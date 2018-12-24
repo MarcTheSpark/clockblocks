@@ -1,6 +1,8 @@
 # clockblocks
 
-_Clockblocks_ is a python library for controling the flow of time, designed with musical applications in mind. A `Clock` acts like thread, but with the advantage that when multiple clocks are coordinated under the same master clock they remain precisely coordinated and do not experience drift. Furthermore, processing time is taken into account when "wait" is called in a given Clock. For example, the following program:
+_Clockblocks_ is a python library for controling the flow of time, designed with musical applications in mind. In particular, it is a central component of [scamp](https://github.com/MarcTheSpark/scamp/), a Suite for Composing Algorithmic Music in Python.
+
+A `Clock` acts like thread, but with the advantage that when multiple clocks are coordinated under the same master clock they remain precisely coordinated and do not experience drift. Furthermore, processing time is taken into account when "wait" is called in a given Clock. For example, the following program:
 
 ```python
 import clockblocks
