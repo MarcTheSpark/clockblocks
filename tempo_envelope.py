@@ -236,49 +236,6 @@ class TempoEnvelope(Envelope):
             return out_envelope
 
     @classmethod
-    def release(cls, duration, start_level=1, curve_shape=None, units="tempo", duration_units="beats"):
-        curve_shapes = (curve_shape,) if curve_shape is not None else None
-        return cls.from_levels_and_durations((start_level, 0), (duration,), curve_shapes=curve_shapes,
-                                             units=units, duration_units=duration_units)
-
-    @classmethod
-    def ar(cls, attack_length, release_length, peak_level=1, attack_shape=None, release_shape=None,
-           units="tempo", duration_units="beats"):
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().ar(attack_length, release_length,
-                                  TempoEnvelope._convert_units(peak_level, units, "beatlength"),
-                                  attack_shape=attack_shape, release_shape=release_shape)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
-    def asr(cls, attack_length, sustain_level, sustain_length, release_length, attack_shape=None, release_shape=None,
-            units="tempo", duration_units="beats"):
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().asr(attack_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
-                                   sustain_length, release_length,
-                                   attack_shape=attack_shape, release_shape=release_shape)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
-    def adsr(cls, attack_length, attack_level, decay_length, sustain_level, sustain_length, release_length,
-             attack_shape=None, decay_shape=None, release_shape=None, units="tempo", duration_units="beats"):
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().adsr(attack_length, TempoEnvelope._convert_units(attack_level, units, "beatlength"),
-                                    decay_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
-                                    sustain_length, release_length, attack_shape=attack_shape, decay_shape=decay_shape,
-                                    release_shape=release_shape)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
     def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2,
                       key_point_precision=100, key_point_iterations=5, units="tempo", duration_units="beats"):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
