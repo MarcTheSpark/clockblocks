@@ -74,7 +74,7 @@ class TempoEnvelope(Envelope):
 
     def set_beat_length_target(self, beat_length_target, duration, curve_shape=0,
                                duration_units="beats", truncate=True):
-        assert duration_units in ("beats", "time")
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
         # truncate removes any segments that extend into the future
         if truncate:
             self.remove_segments_after(self.beats())
@@ -148,73 +148,148 @@ class TempoEnvelope(Envelope):
             else:
                 return convert_beat_length_to_output(convert_input_to_beat_length(values))
 
-    @classmethod
-    def from_levels_and_durations(cls, levels=(0, 0), durations=(0,), curve_shapes=None, offset=0, units="tempo"):
-        super().from_levels_and_durations(TempoEnvelope._convert_units(levels, units, "beatlength"),
-                                          durations, curve_shapes, offset)
+    def convert_durations_to_times(self):
+        """
+        Warps this tempo_curve so that all of the locations of key points get re-interpreted as times instead of beat
+        locations. For instance, a tempo curve where the rate hovers around 2 will see a segment of length 3 get
+        stretched into a segment of length 6, since if it's supposed to take 3 seconds, it would take 6 beats.
+        Pretty confusing, but when we want to construct a tempo curve specifying the *times* that changes occur rather
+        than the beats, we can first construct it as though the durations were in beats, then call this function
+        to warp it so that the durations are in time.
+        :return: self, altered accordingly
+        """
+
+        # this is a little confusing, like everything else about this function, but t represents the start beat of
+        # the curve, which gets scaled inversely to the initial beat length, since a long initial beat length means
+        # it won't take that many beats to get to the desired time.
+        t = self.start_time() / self.start_level()
+        for segment in self.segments:
+            """
+            The following has been condensed into a single statement for efficiency:
+
+                actual_time_duration = segment.integrate_segment(segment.start_time, segment.end_time)
+                # the segment duration is currently in beats, but it also represents the duration we would like
+                # the segment to have in time. so the scale factor is desired time duration / actual time duration
+                scale_factor = segment.duration / actual_time_duration
+                # here's we're scaling the duration to now last as long in time as it used to in beats
+                modified_segment_length = scale_factor * segment.duration
+            """
+            modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
+                                                                                        segment.end_time)
+            segment.start_time = t
+            t = segment.end_time = t + modified_segment_length
+        return self
 
     @classmethod
-    def from_levels(cls, levels, length=1.0, offset=0, units="tempo"):
-        super().from_levels(TempoEnvelope._convert_units(levels, units, "beatlength"), length=length, offset=offset)
+    def from_levels_and_durations(cls, levels=(0, 0), durations=(0,), curve_shapes=None, offset=0,
+                                  units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().from_levels_and_durations(TempoEnvelope._convert_units(levels, units, "beatlength"),
+                                                         durations, curve_shapes, offset)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     @classmethod
-    def from_list(cls, constructor_list, units="tempo"):
+    def from_levels(cls, levels, length=1.0, offset=0, units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().from_levels(TempoEnvelope._convert_units(levels, units, "beatlength"),
+                                           length=length, offset=offset)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
+
+    @classmethod
+    def from_list(cls, constructor_list, units="tempo", duration_units="beats"):
         assert hasattr(constructor_list, "__len__")
         if hasattr(constructor_list[0], "__len__"):
             # we were given levels and durations, and possibly curvature values
             if len(constructor_list) == 2:
                 if hasattr(constructor_list[1], "__len__"):
                     # given levels and durations
-                    return cls.from_levels_and_durations(constructor_list[0], constructor_list[1], units=units)
+                    return cls.from_levels_and_durations(constructor_list[0], constructor_list[1],
+                                                         units=units, duration_units=duration_units)
                 else:
                     # given levels and the total length
-                    return cls.from_levels(constructor_list[0], length=constructor_list[1], units=units)
+                    return cls.from_levels(constructor_list[0], length=constructor_list[1],
+                                           units=units, duration_units=duration_units)
 
             elif len(constructor_list) >= 3:
                 # given levels, durations, and curvature values
                 return cls.from_levels_and_durations(constructor_list[0], constructor_list[1], constructor_list[2],
-                                                     units=units)
+                                                     units=units, duration_units=duration_units)
         else:
             # just given levels
-            return cls.from_levels(constructor_list, units=units)
+            return cls.from_levels(constructor_list, units=units, duration_units=duration_units)
 
     @classmethod
-    def from_points(cls, *points, units="tempo"):
+    def from_points(cls, *points, units="tempo", duration_units="beats"):
         assert all(len(point) >= 2 for point in points)
-        return super().from_points([(t, TempoEnvelope._convert_units(l, units, "beatlength"))
-                                    for (t, l) in points])
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().from_points([(t, TempoEnvelope._convert_units(l, units, "beatlength"))
+                                            for (t, l) in points])
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     @classmethod
-    def release(cls, duration, start_level=1, curve_shape=None, units="tempo"):
+    def release(cls, duration, start_level=1, curve_shape=None, units="tempo", duration_units="beats"):
         curve_shapes = (curve_shape,) if curve_shape is not None else None
-        return cls.from_levels_and_durations((start_level, 0), (duration,), curve_shapes=curve_shapes, units=units)
+        return cls.from_levels_and_durations((start_level, 0), (duration,), curve_shapes=curve_shapes,
+                                             units=units, duration_units=duration_units)
 
     @classmethod
-    def ar(cls, attack_length, release_length, peak_level=1, attack_shape=None, release_shape=None, units="tempo"):
-        return super().ar(attack_length, release_length, TempoEnvelope._convert_units(peak_level, units, "beatlength"),
-                          attack_shape=attack_shape, release_shape=release_shape)
+    def ar(cls, attack_length, release_length, peak_level=1, attack_shape=None, release_shape=None,
+           units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().ar(attack_length, release_length,
+                                  TempoEnvelope._convert_units(peak_level, units, "beatlength"),
+                                  attack_shape=attack_shape, release_shape=release_shape)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     @classmethod
     def asr(cls, attack_length, sustain_level, sustain_length, release_length, attack_shape=None, release_shape=None,
-            units="tempo"):
-        return super().asr(attack_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
-                           sustain_length, release_length, attack_shape=attack_shape, release_shape=release_shape)
+            units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().asr(attack_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
+                                   sustain_length, release_length,
+                                   attack_shape=attack_shape, release_shape=release_shape)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     @classmethod
     def adsr(cls, attack_length, attack_level, decay_length, sustain_level, sustain_length, release_length,
-             attack_shape=None, decay_shape=None, release_shape=None, units="tempo"):
-        return super().adsr(attack_length, TempoEnvelope._convert_units(attack_level, units, "beatlength"),
-                            decay_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
-                            sustain_length, release_length, attack_shape=attack_shape, decay_shape=decay_shape,
-                            release_shape=release_shape)
+             attack_shape=None, decay_shape=None, release_shape=None, units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+        out_envelope = super().adsr(attack_length, TempoEnvelope._convert_units(attack_level, units, "beatlength"),
+                                    decay_length, TempoEnvelope._convert_units(sustain_level, units, "beatlength"),
+                                    sustain_length, release_length, attack_shape=attack_shape, decay_shape=decay_shape,
+                                    release_shape=release_shape)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     @classmethod
     def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2,
-                      key_point_precision=100, key_point_iterations=5, units="tempo"):
+                      key_point_precision=100, key_point_iterations=5, units="tempo", duration_units="beats"):
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
         converted_function = (lambda x: TempoEnvelope._convert_units(function(x), units, "beatlength")) \
             if units.lower().replace(" ", "") != "beatlength" else function
-        return super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
-                                     key_point_precision, key_point_iterations)
+        out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
+                                             key_point_precision, key_point_iterations)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
 
     def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
                   x_range=None, y_range=None):
