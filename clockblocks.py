@@ -304,7 +304,14 @@ class Clock:
 
         self._run_in_pool(_process, args, kwargs)
 
-    def wait_in_parent(self, dt):
+    def _wait_in_parent(self, dt):
+        """
+        If master clock, sleeps precisely for dt seconds (with adjustments based on timing policy / fast forwarding)
+        Otherwise registers a wake up time with parent clock and pauses execution.
+        NB: Should not be called directly, since this doesn't actually advance the tempo clock; instead call
+        clock.wait(dt, units="time")
+        :param dt: how many beats to wait on the parent clock
+        """
         if self._log_processing_time:
             logging.info("Clock {} processed for {} secs.".format(self.name if self.name is not None else "<unnamed>",
                                                                   time.time() - self._last_sleep_time))
@@ -368,23 +375,27 @@ class Clock:
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
-    def wait(self, beats):
+    def wait(self, dt, units="beats"):
+        units = units.lower()
+        assert units in ("beats", "time"), "Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\"."
+
         # wait for any and all children to schedule their next wake up call and call wait()
         while not all(child._ready_and_waiting for child in self._children):
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
 
-        end_time = self.beats() + beats
+        end_time = self.beats() + dt if units == "beats" \
+            else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
-        # while there are wakeup calls left to do amongst the children, and those wake up calls
+        # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before we're done waiting here on the master clock
         while len(self._queue) > 0 and self._queue[0].t < end_time:
             # find the next wake up call
             next_wake_up_call = self._queue.pop(0)
             wake_up_beat = next_wake_up_call.t
             beats_till_wake = wake_up_beat - self.beats()
-            self.wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
+            self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
             self._advance_tempo_map_to_beat(wake_up_beat)
             next_wake_up_call.clock._ready_and_waiting = False
             next_wake_up_call.clock._wait_event.set()
@@ -397,7 +408,7 @@ class Clock:
 
         # if we exit the while loop, that means that there is no one in the queue (meaning no children),
         # or the first wake up call is scheduled for after this wait is to end. So we can safely wait.
-        self.wait_in_parent(self.tempo_envelope.get_wait_time(end_time - self.beats()))
+        self._wait_in_parent(self.tempo_envelope.get_wait_time(end_time - self.beats()))
         self.tempo_envelope.advance(end_time - self.beats())
 
         # see explanation of synchronization_policy above
@@ -453,14 +464,14 @@ class Clock:
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
 
-        # while there are wakeup calls left to do amongst the children, and those wake up calls
+        # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before we're done waiting here on the master clock
         while len(self._queue) > 0:
             # find the next wake up call
             next_wake_up_call = self._queue.pop(0)
             wake_up_beat = next_wake_up_call.t
             beats_till_wake = wake_up_beat - self.beats()
-            self.wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
+            self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
             self._advance_tempo_map_to_beat(wake_up_beat)
             next_wake_up_call.clock._ready_and_waiting = False
             next_wake_up_call.clock._wait_event.set()

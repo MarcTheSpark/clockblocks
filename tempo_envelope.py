@@ -1,4 +1,5 @@
 from .expenvelope import Envelope, EnvelopeSegment
+from copy import deepcopy
 
 
 class TempoEnvelope(Envelope):
@@ -25,15 +26,21 @@ class TempoEnvelope(Envelope):
     def beat_length(self):
         return self.value_at(self._beats)
 
+    def bring_up_to_date(self, beat=None):
+        beat = self.beats() if beat is None else beat
+        # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
+        if self.length() < beat:
+            # no explicit segments have been made for a while, insert a constant segment to bring us up to date
+            self.append_segment(self.end_level(), beat - self.length())
+        return self
+
     def truncate(self, beat=None):
         # removes all segments after beat (which defaults to the current beat) and adds a constant segment
         # if necessary to being us up to that beat
         beat = self.beats() if beat is None else beat
         self.remove_segments_after(beat)
-        # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
-        if self.length() < beat:
-            # no explicit segments have been made for a while, insert a constant segment to bring us up to date
-            self.append_segment(self.end_level(), beat - self.length())
+        self.bring_up_to_date(beat)
+        return self
 
     @beat_length.setter
     def beat_length(self, beat_length):
@@ -209,18 +216,28 @@ class TempoEnvelope(Envelope):
         return super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
                                      key_point_precision, key_point_iterations)
 
-    def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo"):
+    def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
+                  x_range=None, y_range=None):
+        # if we're past the end of the envelope, we want to plot that as a final constant segment
+        # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
+        env_to_plot = deepcopy(self).bring_up_to_date() if self.end_time() < self.beats() else self
+
         try:
             import matplotlib.pyplot as plt
         except ImportError:
             raise ImportError("Could not find matplotlib, which is needed for plotting.")
+
         fig, ax = plt.subplots()
-        x_values, y_values = self.get_graphable_point_pairs(resolution)
+        x_values, y_values = env_to_plot.get_graphable_point_pairs(resolution)
         ax.plot(x_values, TempoEnvelope._convert_units(y_values, "beat length", units))
         if show_segment_divisions:
-            ax.plot(self.times, TempoEnvelope._convert_units(self.levels, "beat length", units), 'o')
+            ax.plot(env_to_plot.times, TempoEnvelope._convert_units(env_to_plot.levels, "beat length", units), 'o')
         plt.xlabel("Beat")
         plt.ylabel("Tempo" if units == "tempo" else "Rate" if units == "rate" else "Beat Length")
+        if x_range is not None:
+            plt.xlim(x_range)
+        if y_range is not None:
+            plt.ylim(y_range)
         ax.set_title('Graph of TempoEnvelope' if title is None else title)
         plt.show()
 
