@@ -131,7 +131,7 @@ class TempoEnvelope(Envelope):
         return self
 
     @staticmethod
-    def _convert_units(values, input_units, output_units):
+    def convert_units(values, input_units, output_units):
         in_units = input_units.lower().replace(" ", "")
         out_units = output_units.lower().replace(" ", "")
         assert in_units in ("tempo", "rate", "beatlength") and out_units in ("tempo", "rate", "beatlength"), \
@@ -184,7 +184,7 @@ class TempoEnvelope(Envelope):
     def from_levels_and_durations(cls, levels=(0, 0), durations=(0,), curve_shapes=None, offset=0,
                                   units="tempo", duration_units="beats"):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_levels_and_durations(TempoEnvelope._convert_units(levels, units, "beatlength"),
+        out_envelope = super().from_levels_and_durations(TempoEnvelope.convert_units(levels, units, "beatlength"),
                                                          durations, curve_shapes, offset)
         if duration_units == "time":
             return out_envelope.convert_durations_to_times()
@@ -194,7 +194,7 @@ class TempoEnvelope(Envelope):
     @classmethod
     def from_levels(cls, levels, length=1.0, offset=0, units="tempo", duration_units="beats"):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_levels(TempoEnvelope._convert_units(levels, units, "beatlength"),
+        out_envelope = super().from_levels(TempoEnvelope.convert_units(levels, units, "beatlength"),
                                            length=length, offset=offset)
         if duration_units == "time":
             return out_envelope.convert_durations_to_times()
@@ -228,7 +228,7 @@ class TempoEnvelope(Envelope):
     def from_points(cls, *points, units="tempo", duration_units="beats"):
         assert all(len(point) >= 2 for point in points)
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_points([(t, TempoEnvelope._convert_units(l, units, "beatlength"))
+        out_envelope = super().from_points([(t, TempoEnvelope.convert_units(l, units, "beatlength"))
                                             for (t, l) in points])
         if duration_units == "time":
             return out_envelope.convert_durations_to_times()
@@ -239,7 +239,7 @@ class TempoEnvelope(Envelope):
     def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2,
                       key_point_precision=100, key_point_iterations=5, units="tempo", duration_units="beats"):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        converted_function = (lambda x: TempoEnvelope._convert_units(function(x), units, "beatlength")) \
+        converted_function = (lambda x: TempoEnvelope.convert_units(function(x), units, "beatlength")) \
             if units.lower().replace(" ", "") != "beatlength" else function
         out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
                                              key_point_precision, key_point_iterations)
@@ -261,9 +261,9 @@ class TempoEnvelope(Envelope):
 
         fig, ax = plt.subplots()
         x_values, y_values = env_to_plot.get_graphable_point_pairs(resolution)
-        ax.plot(x_values, TempoEnvelope._convert_units(y_values, "beat length", units))
+        ax.plot(x_values, TempoEnvelope.convert_units(y_values, "beat length", units))
         if show_segment_divisions:
-            ax.plot(env_to_plot.times, TempoEnvelope._convert_units(env_to_plot.levels, "beat length", units), 'o')
+            ax.plot(env_to_plot.times, TempoEnvelope.convert_units(env_to_plot.levels, "beat length", units), 'o')
         plt.xlabel("Beat")
         plt.ylabel("Tempo" if units == "tempo" else "Rate" if units == "rate" else "Beat Length")
         if x_range is not None:

@@ -1,40 +1,11 @@
 from .tempo_envelope import *
-import time
+from .expenvelope.utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
-import threading
 from multiprocessing.pool import ThreadPool
 import logging
 from copy import deepcopy
 import inspect
-
-
-def _sleep_precisely_until(stop_time):
-    time_remaining = stop_time - time.time()
-    if time_remaining <= 0:
-        return
-    elif time_remaining < 0.0005:
-        # when there's fewer than 500 microseconds left, just burn cpu cycles and hit it exactly
-        while time.time() < stop_time:
-            pass
-    else:
-        time.sleep(time_remaining / 2)
-        _sleep_precisely_until(stop_time)
-
-
-def sleep_precisely(secs):
-    _sleep_precisely_until(time.time() + secs)
-
-
-def current_clock():
-    # utility for getting the clock we are currently using (we attach it to the thread when it's started)
-    current_thread = threading.current_thread()
-    if not hasattr(current_thread, '__clock__'):
-        return None
-    return threading.current_thread().__clock__
-
-
-def wait(dt):
-    current_clock().wait(dt)
+from .utilities import *
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -125,6 +96,8 @@ class Clock:
         self._log_processing_time = False
         self._fast_forward_goal = None
 
+        self.envelope_loop_or_function = None
+
     @property
     def master(self):
         return self if self.is_master() else self.parent.master
@@ -165,19 +138,94 @@ class Clock:
     def tempo(self, t):
         self.tempo_envelope.tempo = t
 
-    def apply_tempo_envelope(self, tempo_envelope, start_beat=None):
-        assert isinstance(tempo_envelope, TempoEnvelope)
-        assert start_beat is None or start_beat > 0
-        if self.beats() == 0 and start_beat is None:
-            self.tempo_envelope = tempo_envelope
-        else:
-            start_beat = self.beats() if start_beat is None else start_beat
-            self.tempo_envelope.truncate(start_beat)
+    def _apply_tempo_envelope(self, levels, durations, curve_shapes=None, units="beatlength", duration_units="beats",
+                              truncate=True, loop=False):
+        envelope = TempoEnvelope.from_levels_and_durations(levels, durations, curve_shapes=curve_shapes, units=units,
+                                                           duration_units=duration_units)
+        # truncate removes any segments that extend into the future
+        if truncate:
+            self.tempo_envelope.remove_segments_after(self.beats())
 
-            if self.tempo_envelope.end_level() != tempo_envelope.start_level():
-                self.tempo_envelope.append_segment(tempo_envelope.start_level(), 0)
-            for l, d, cs in zip(tempo_envelope.levels[1:], tempo_envelope.durations, tempo_envelope.curve_shapes):
-                self.tempo_envelope.append_segment(l, d, cs)
+        if self.tempo_envelope.length() == 0:
+            # if there's nothing to this clock's tempo envelope yet, we just replace it with the new one
+            self.tempo_envelope = envelope
+            if loop:
+                # but if we're looping the same envelope that we just set this clocks tempo_envelope to,
+                # we need to make a copy or we start adding an envelope to itself
+                self.envelope_loop_or_function = deepcopy(envelope)
+        else:
+            # if we're just appending to an existing envelope, then we don't need to make a deep copy if we loop
+            self.tempo_envelope.append_envelope(envelope)
+            if loop:
+                self.envelope_loop_or_function = envelope
+
+    def apply_beat_length_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
+                                   truncate=True, loop=False):
+        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
+                                   units="beatlength", truncate=truncate, loop=loop)
+
+    def apply_rate_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
+                             truncate=True, loop=False):
+        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
+                                   units="rate", truncate=truncate, loop=loop)
+
+    def apply_tempo_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
+                             truncate=True, loop=False):
+        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
+                                   units="tempo", truncate=truncate, loop=loop)
+
+    def _apply_tempo_function(self, function, domain_start=0, domain_end=None, units="beatlength",
+                              duration_units="beats", truncate=False, loop=False, extension_increment=1.0,
+                              resolution_multiple=2):
+        # truncate removes any segments that extend into the future
+        if truncate:
+            self.tempo_envelope.remove_segments_after(self.beats())
+
+        if domain_end is None:
+            self.tempo_envelope.append_envelope(
+                TempoEnvelope.from_function(function, domain_start, domain_start + extension_increment,
+                                            units=units, duration_units=duration_units,
+                                            resolution_multiple=resolution_multiple))
+            # add a note to use this function, starting where we left off, and going by the same extension increment
+            # when we get to the end of the envelope
+            self.envelope_loop_or_function = (function, domain_start + extension_increment, extension_increment,
+                                              units, duration_units, resolution_multiple)
+        else:
+            envelope = TempoEnvelope.from_function(
+                function, domain_start, domain_end, units=units,
+                duration_units=duration_units, resolution_multiple=resolution_multiple
+            )
+
+            if self.tempo_envelope.length() == 0:
+                # if there's nothing to this clock's tempo envelope yet, we just replace it with the new one
+                self.tempo_envelope = envelope
+                if loop:
+                    # but if we're looping the same envelope that we just set this clocks tempo_envelope to,
+                    # we need to make a copy or we start adding an envelope to itself
+                    self.envelope_loop_or_function = deepcopy(envelope)
+            else:
+                # if we're just appending to an existing envelope, then we don't need to make a deep copy if we loop
+                self.tempo_envelope.append_envelope(envelope)
+                if loop:
+                    self.envelope_loop_or_function = envelope
+
+    def apply_beat_length_function(self, function, domain_start=0, domain_end=None, duration_units="beats",
+                                   truncate=False, loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+
+    def apply_rate_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
+                            loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="rate",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+
+    def apply_tempo_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
+                             loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
     def set_beat_length_target(self, beat_length_target, duration, curve_shape=0,
                                duration_units="beats", truncate=True):
@@ -363,7 +411,7 @@ class Clock:
                 pass
             else:
                 if self.use_precise_timing:
-                    _sleep_precisely_until(stop_sleeping_time)
+                    sleep_precisely_until(stop_sleeping_time)
                 else:
                     # the max is just in case we got behind in the microsecond it took before the elif check above
                     time.sleep(max(0, stop_sleeping_time - time.time()))
@@ -385,8 +433,7 @@ class Clock:
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
 
-        end_time = self.beats() + dt if units == "beats" \
-            else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+        end_time = self._get_wait_end_time_and_extend_envelopes(dt, units)
 
         # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before we're done waiting here on the master clock
@@ -424,6 +471,50 @@ class Clock:
                             "off by setting the synchonization_policy for this clock (or for the master clock) to "
                             "\"no synchronization\"".format(calc_time, current_clock().name))
 
+    def _get_wait_end_time_and_extend_envelopes(self, dt, units):
+        end_time = self.beats() + dt if units == "beats" \
+            else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+
+        # if we have a looping tempo envelope or an endless tempo function, and we're going past
+        # the end of what's already been charted out, then we extend it before waiting
+        while end_time > self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+            if isinstance(self.envelope_loop_or_function, TempoEnvelope):
+                self.tempo_envelope.append_envelope(self.envelope_loop_or_function)
+            else:
+                function, domain_start, extension_increment, function_units, \
+                    function_duration_units, resolution_multiple = self.envelope_loop_or_function
+
+                next_key_point = _get_extrema_and_inflection_points(
+                    function, domain_start, domain_start + extension_increment,
+                    return_on_first_point=True, iterations=4)
+
+                increment = (next_key_point - domain_start) / resolution_multiple
+                for k in range(resolution_multiple):
+                    piece_start = domain_start + k * increment
+                    piece_end = domain_start + (k + 1) * increment
+                    self.tempo_envelope.append_segment(
+                        TempoEnvelope.convert_units(function(piece_end), function_units, "beatlength"), increment,
+                        halfway_level=TempoEnvelope.convert_units(function((piece_start + piece_end) / 2),
+                                                                  function_units, "beatlength")
+                    )
+                    if function_duration_units == "time":
+                        segment = self.tempo_envelope.segments[-1]
+                        modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
+                                                                                                    segment.end_time)
+                        segment.end_time = segment.start_time + modified_segment_length
+
+                # add a note to use this function, starting where we left off, and going by the same extension increment
+                # when we get to the end of the envelope
+                self.envelope_loop_or_function = (function, next_key_point, extension_increment,
+                                                  function_units, function_duration_units, resolution_multiple)
+
+            if units == "time":
+                # if we're using time units then we need to recalculate the end time based on the new information
+                # about how the tempo envelope extends
+                end_time = self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+
+        return end_time
+
     def fast_forward_to_time(self, t):
         assert self.is_master(), "Only the master clock can be fast-forwarded."
         assert t >= self.time(), "Cannot fast-forward to a time in the past."
@@ -453,9 +544,9 @@ class Clock:
     def _advance_tempo_map_to_beat(self, beat):
         self.tempo_envelope.advance(beat - self.beats())
 
-    def sleep(self, beats):
+    def sleep(self, dt, units="beats"):
         # alias to wait
-        self.wait(beats)
+        self.wait(dt, units)
 
     def wait_for_children_to_finish(self):
         # wait for any and all children to schedule their next wake up call and call wait()
@@ -527,7 +618,7 @@ class Clock:
         for i in range(1, len(tempo_envelopes)):
             # for each clock, its parent_offset + the time it would take to get to its current beat = its parent's beat
             tempo_envelopes[i].go_to_beat(clocks[i-1].parent_offset + tempo_envelopes[i-1].time())
-            initial_rate = tempo_envelopes[i].rate
+            initial_rate *= tempo_envelopes[i].rate
 
         def step_and_get_beat_length(step):
             beat_change = step
