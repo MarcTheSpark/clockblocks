@@ -98,6 +98,8 @@ class Clock:
 
         self.envelope_loop_or_function = None
 
+        self.running_behind_warning_count = 0
+
     @property
     def master(self):
         return self if self.is_master() else self.parent.master
@@ -406,6 +408,7 @@ class Clock:
             if stop_sleeping_time < time.time() - 0.01:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
                 logging.warning("Clock is running noticeably behind real time; probably processing is too heavy.")
+                self.running_behind_warning_count += 1
             elif stop_sleeping_time < time.time():
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
                 pass
@@ -465,10 +468,11 @@ class Clock:
         elif self._resolve_synchronization_policy() == "all descendants":
             self._catch_up_children()
         calc_time = time.time() - start
-        if calc_time > 0.001:
-            logging.warning("Catching up child clocks is taking more than 1 milliseconds ({} seconds to be precise) on "
+        if calc_time > (0.003 if self.master.running_behind_warning_count == 0 else 0.001):
+            # throw a warning if catching up child clocks is being slow. Be more picky if the master is getting behind
+            logging.warning("Catching up child clocks is taking a little while ({} seconds to be precise) on "
                             "clock {}. \nUnless you are recording on a child or cousin clock, you can safely turn this "
-                            "off by setting the synchonization_policy for this clock (or for the master clock) to "
+                            "off by setting the synchronization_policy for this clock (or for the master clock) to "
                             "\"no synchronization\"".format(calc_time, current_clock().name))
 
     def _get_wait_end_time_and_extend_envelopes(self, dt, units):
