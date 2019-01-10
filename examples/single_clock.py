@@ -1,3 +1,7 @@
+"""
+Demo of a single clock changing tempo and the resulting beat length graph.
+"""
+
 from clockblocks import Clock
 
 clock = Clock(initial_tempo=60)
@@ -25,4 +29,4 @@ while clock.beats() < 20:
     log_timing()
     clock.wait(1)
 
-clock.tempo_envelope.show_plot(resolution=200, title="Example TempoEnvelope", units="tempo")
+clock.tempo_envelope.show_plot(title="Example TempoEnvelope", units="beatlength", y_range=(0, 2.5), resolution=200)
