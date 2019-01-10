@@ -1,5 +1,5 @@
 from .tempo_envelope import *
-from .expenvelope.utilities import _get_extrema_and_inflection_points
+from expenvelope.utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
 from multiprocessing.pool import ThreadPool
 import logging

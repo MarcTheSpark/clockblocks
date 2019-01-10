@@ -1,4 +1,4 @@
-from .expenvelope import Envelope, EnvelopeSegment
+from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
 
 
