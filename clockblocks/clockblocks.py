@@ -479,9 +479,9 @@ class Clock:
         end_time = self.beats() + dt if units == "beats" \
             else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
-        # if we have a looping tempo envelope or an endless tempo function, and we're going past
-        # the end of what's already been charted out, then we extend it before waiting
-        while end_time > self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+        # if we have a looping tempo envelope or an endless tempo function, and we're going right up
+        # to or past the end of what's already been charted out, then we extend it before waiting
+        while end_time >= self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
             if isinstance(self.envelope_loop_or_function, TempoEnvelope):
                 self.tempo_envelope.append_envelope(self.envelope_loop_or_function)
             else:
