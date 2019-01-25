@@ -577,6 +577,10 @@ class Clock:
                 # which slows down the other threads with its greediness
                 time.sleep(0.000001)
 
+    def wait_forever(self):
+        while True:
+            self.wait(1.0)
+
     def log_processing_time(self):
         if logging.getLogger().level > 20:
             logging.warning("Set default logger to level of 20 or less to see INFO logs about clock processing time."
