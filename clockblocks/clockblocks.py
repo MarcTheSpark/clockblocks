@@ -603,7 +603,15 @@ class Clock:
     def inheritance(self):
         return tuple(self.iterate_inheritance())
 
-    def iterate_descendants(self):
+    def iterate_all_relatives(self, include_self=False):
+        if include_self:
+            return self.master.iterate_descendants(True)
+        else:
+            return (c for c in self.master.iterate_descendants(True) if c is not self)
+
+    def iterate_descendants(self, include_self=False):
+        if include_self:
+            yield self
         for child_clock in self._children:
             yield child_clock
             for descendant_of_child in child_clock.iterate_descendants():
@@ -654,3 +662,25 @@ class Clock:
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)
         return ("Clock('{}')".format(self.name) if self.name is not None else "Clock") + "[" + child_list + "]"
+
+
+class TimeStamp:
+
+    def __init__(self, clock=None):
+        """
+        TimeStamp that takes note of the time in every clock related to the given clock
+        :param clock: a Clock; if None, the clock implicitly from the thread
+        """
+        clock = current_clock() if clock is None else clock
+        # if no clock was specified and we couldn't capture the clock, throw an error
+        if clock is None:
+            raise Exception("No clock was given and could not capture clock implicitly from context.")
+        self.times_in_clocks = {
+            c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
+        }
+        self.time_in_master = clock.time_in_master()
+
+    def time_in_clock(self, clock: Clock):
+        if clock in self.times_in_clocks:
+            return self.times_in_clocks[clock]
+        raise ValueError("Invalid clock: not found in TimeStamp")
