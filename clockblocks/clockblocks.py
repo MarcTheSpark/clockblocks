@@ -12,6 +12,11 @@ from functools import total_ordering
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
 
 
+class ClockKilledException(Exception):
+    """Exception raised when a clock is killed, allowing us to exit the process forked on it."""
+    pass
+
+
 class Clock:
 
     def __init__(self, name=None, parent=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
@@ -100,6 +105,8 @@ class Clock:
         self.envelope_loop_or_function = None
 
         self.running_behind_warning_count = 0
+
+        self._killed = False
 
     @property
     def master(self):
@@ -333,16 +340,40 @@ class Clock:
                     "Too many arguments given for function {}".format(process_function.__name__)
                 assert len(args) >= num_positional_parameters-1, \
                     "Too few arguments given for function {}".format(process_function.__name__)
-                if len(args) == num_positional_parameters - 1:
-                    process_function(child, *args, **kwds)
-                else:
-                    process_function(*args, **kwds)
+
+                """
+                The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
+                it at will. When and if "kill" is called on the clock, its wait_event is set free and it immediately
+                raises a ClockKilledException, which exits us from the process.
+                """
+                try:
+                    if len(args) == num_positional_parameters - 1:
+                        # if the process_function we have been takes one more argument than
+                        # provided then we pass the clock as the first argument
+                        process_function(child, *args, **kwds)
+                    else:
+                        # otherwise we just pass the arguments as given
+                        process_function(*args, **kwds)
+                except ClockKilledException:
+                    pass
+
                 self._children.remove(child)
             except Exception as e:
                 logging.exception(e)
         self._run_in_pool(_process, extra_args, kwargs)
 
         return child
+
+    def kill(self):
+        """
+        Ends the process forked on this clock and all child processes.
+        If this is the master clock, since it wasn't forked, this simply kills all child processes.
+        """
+        self._killed = True
+        self._wait_event.set()
+        if self.is_master():
+            for child in self.children():
+                child.kill()
 
     def fork_unsynchronized(self, process_function, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -424,6 +455,8 @@ class Clock:
             self.parent._queue.sort(key=lambda x: x.t)
             self._ready_and_waiting = True
             self._wait_event.wait()
+            if self._killed:
+                raise ClockKilledException()
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
