@@ -6,6 +6,7 @@ import logging
 from copy import deepcopy
 import inspect
 from .utilities import *
+from functools import total_ordering
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -664,6 +665,7 @@ class Clock:
         return ("Clock('{}')".format(self.name) if self.name is not None else "Clock") + "[" + child_list + "]"
 
 
+@total_ordering
 class TimeStamp:
 
     def __init__(self, clock=None):
@@ -672,15 +674,25 @@ class TimeStamp:
         :param clock: a Clock; if None, the clock implicitly from the thread
         """
         clock = current_clock() if clock is None else clock
-        # if no clock was specified and we couldn't capture the clock, throw an error
-        if clock is None:
-            raise Exception("No clock was given and could not capture clock implicitly from context.")
         self.times_in_clocks = {
             c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
-        }
-        self.time_in_master = clock.time_in_master()
+        } if clock is not None else {}
+        self.wall_time = time.time()
+        self.time_in_master = clock.time_in_master() if clock is not None else self.wall_time
 
     def time_in_clock(self, clock: Clock):
         if clock in self.times_in_clocks:
             return self.times_in_clocks[clock]
         raise ValueError("Invalid clock: not found in TimeStamp")
+
+    def __repr__(self):
+        return "TimeStamp[{}]".format(self.time_in_master)
+
+    def __eq__(self, other):
+        return self.time_in_master == other.time_in_master and self.wall_time == other.wall_time
+
+    def __lt__(self, other):
+        if self.time_in_master == other.time_in_master:
+            return self.wall_time < other.wall_time
+        else:
+            return self.time_in_master < other.time_in_master
