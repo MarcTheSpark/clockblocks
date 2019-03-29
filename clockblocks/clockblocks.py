@@ -713,10 +713,16 @@ class TimeStamp:
         self.wall_time = time.time()
         self.time_in_master = clock.time_in_master() if clock is not None else self.wall_time
 
-    def time_in_clock(self, clock: Clock):
+    def beat_in_clock(self, clock: Clock):
         if clock in self.times_in_clocks:
             return self.times_in_clocks[clock]
         raise ValueError("Invalid clock: not found in TimeStamp")
+
+    def time_in_clock(self, clock: Clock):
+        if clock.is_master():
+            return self.time_in_master
+        else:
+            return self.beat_in_clock(clock.parent)
 
     def __repr__(self):
         return "TimeStamp[{}]".format(self.time_in_master)
