@@ -707,15 +707,15 @@ class TimeStamp:
         :param clock: a Clock; if None, the clock implicitly from the thread
         """
         clock = current_clock() if clock is None else clock
-        self.times_in_clocks = {
+        self.beats_in_clocks = {
             c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
         } if clock is not None else {}
         self.wall_time = time.time()
         self.time_in_master = clock.time_in_master() if clock is not None else self.wall_time
 
     def beat_in_clock(self, clock: Clock):
-        if clock in self.times_in_clocks:
-            return self.times_in_clocks[clock]
+        if clock in self.beats_in_clocks:
+            return self.beats_in_clocks[clock]
         raise ValueError("Invalid clock: not found in TimeStamp")
 
     def time_in_clock(self, clock: Clock):
