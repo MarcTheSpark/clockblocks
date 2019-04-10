@@ -89,7 +89,8 @@ class Clock:
             self._pool = None
             self._pool_semaphore = None
 
-        self._last_sleep_time = self._start_time = time.time()
+        # these are set on the first call to "wait"; this way, any processing at the very beginning is ignored
+        self._last_sleep_time = self._start_time = None
         # precise timing uses a while loop when we get close to the wake-up time
         # it burns more CPU to do this, but the timing is more accurate
         self.use_precise_timing = True
@@ -461,6 +462,9 @@ class Clock:
         self._last_sleep_time = time.time()
 
     def wait(self, dt, units="beats"):
+        if self._start_time is None:
+            self._last_sleep_time = self._start_time = time.time()
+
         units = units.lower()
         assert units in ("beats", "time"), "Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\"."
 
