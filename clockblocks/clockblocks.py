@@ -249,7 +249,7 @@ class Clock:
         self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, duration_units, truncate)
 
     def absolute_rate(self):
-        absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.rate)
+        absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.absolute_rate())
         return absolute_rate
 
     def absolute_tempo(self):
@@ -591,6 +591,9 @@ class Clock:
         self.wait(dt, units)
 
     def wait_for_children_to_finish(self):
+        if self._start_time is None:
+            self._last_sleep_time = self._start_time = time.time()
+
         # wait for any and all children to schedule their next wake up call and call wait()
         while not all(child._ready_and_waiting for child in self._children):
             # note that sleeping a tiny amount is better than a straight while loop,
