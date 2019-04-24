@@ -477,8 +477,8 @@ class Clock:
         end_time = self._get_wait_end_time_and_extend_envelopes(dt, units)
 
         # while there are wake up calls left to do amongst the children, and those wake up calls
-        # would take place before we're done waiting here on the master clock
-        while len(self._queue) > 0 and self._queue[0].t < end_time:
+        # would take place before or exactly when we're done waiting here on the master clock
+        while len(self._queue) > 0 and self._queue[0].t <= end_time:
             # find the next wake up call
             next_wake_up_call = self._queue.pop(0)
             wake_up_beat = next_wake_up_call.t
