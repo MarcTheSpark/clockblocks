@@ -6,7 +6,9 @@ import logging
 from copy import deepcopy
 import inspect
 from .utilities import *
+from .utilities import _PrintColors
 from functools import total_ordering
+import textwrap
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -148,6 +150,21 @@ class Clock:
     @tempo.setter
     def tempo(self, t):
         self.tempo_envelope.tempo = t
+
+    def _child_tree_string(self, highlight_clock=None):
+        name_text = self.name if self.name is not None else "(UNNAMED)"
+        if highlight_clock is self:
+            name_text = _PrintColors.BOLD + name_text + _PrintColors.END
+        children = self.children()
+        if len(children) == 0:
+            return name_text
+        return "{}:\n{}".format(
+            name_text,
+            textwrap.indent("\n".join(child._child_tree_string(highlight_clock) for child in self.children()), "  ")
+        )
+
+    def print_family_tree(self):
+        print(self.master._child_tree_string(self))
 
     def _apply_tempo_envelope(self, levels, durations, curve_shapes=None, units="beatlength", duration_units="beats",
                               truncate=True, loop=False):
@@ -318,7 +335,7 @@ class Clock:
                             "result. You can increase the number of threads in the pool to avoid this.")
             threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
-    def fork(self, process_function, name="", initial_rate=None, initial_tempo=None, initial_beat_length=None,
+    def fork(self, process_function, name=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
              extra_args=(), kwargs=None):
 
         kwargs = {} if kwargs is None else kwargs
@@ -702,7 +719,7 @@ class Clock:
 
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)
-        return ("Clock('{}')".format(self.name) if self.name is not None else "Clock") + "[" + child_list + "]"
+        return ("Clock('{}')".format(self.name) if self.name is not None else "UNNAMED") + "[" + child_list + "]"
 
 
 @total_ordering
