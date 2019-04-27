@@ -380,6 +380,14 @@ class Clock:
                 logging.exception(e)
         self._run_in_pool(_process, extra_args, kwargs)
 
+        # Allow the new child to run until it hits a wait call. This is quite important; if we don't do this,
+        # the master clock may end up not seeing any queued events and go to sleep for a while before this newly
+        # forked process sets if first wake up call.
+        while child in self._children and not child._ready_and_waiting:
+            # note that sleeping a tiny amount is better than a straight while loop,
+            # which slows down the other threads with its greediness
+            time.sleep(0.000001)
+
         return child
 
     def kill(self):
