@@ -7,6 +7,7 @@ from copy import deepcopy
 import inspect
 from .utilities import *
 from .utilities import _PrintColors
+from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering
 import textwrap
 
@@ -93,9 +94,6 @@ class Clock:
 
         # these are set on the first call to "wait"; this way, any processing at the very beginning is ignored
         self._last_sleep_time = self._start_time = None
-        # precise timing uses a while loop when we get close to the wake-up time
-        # it burns more CPU to do this, but the timing is more accurate
-        self.use_precise_timing = True
 
         self.timing_policy = timing_policy
 
@@ -423,7 +421,7 @@ class Clock:
         if self._log_processing_time:
             logging.info("Clock {} processed for {} secs.".format(self.name if self.name is not None else "<unnamed>",
                                                                   time.time() - self._last_sleep_time))
-        if dt == 0:
+        if dt < 1e-10:
             return
         if self.is_master():
             # this is the master thread that actually sleeps
@@ -461,11 +459,16 @@ class Clock:
                 else stop_sleeping_time_absolute if self._timing_policy == "absolute" \
                 else max(self._last_sleep_time + dt * self._timing_policy, stop_sleeping_time_absolute)
 
+            if _print_and_clear_debug_calc_times():
+                print("MASTER SCHEDULED WAIT TIME: {}, TOTAL PROCESSING TIME: {}".format(
+                    dt, time.time() - self._last_sleep_time))
+
             # in case processing took so long that we are already past the time we were supposed to stop sleeping,
             # we throw a warning that we're getting behind and don't try to sleep at all
             if stop_sleeping_time < time.time() - 0.01:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
-                logging.warning("Clock is running noticeably behind real time; probably processing is too heavy.")
+                logging.warning("Clock is running noticeably behind real time ({} s); "
+                                "probably processing is too heavy.".format(time.time() - stop_sleeping_time))
                 self.running_behind_warning_count += 1
             elif stop_sleeping_time < time.time():
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
