@@ -87,10 +87,16 @@ class Clock:
             # if so, we just start a thread and throw a warning to increase pool size
             self._pool_semaphore = threading.BoundedSemaphore(pool_size)
             threading.current_thread().__clock__ = self
+
+            # the master clock also holds onto a dictionary of time stamp data
+            # (i.e. a dictionary of (time_in_master -> {clock: beat in clock for clock in master.all_descendants}
+            self.time_stamp_data = {}
         else:
             # All other clocks just use self.master._pool
             self._pool = None
             self._pool_semaphore = None
+            # no need for this unless on the master clock
+            self.time_stamp_data = None
 
         # these are set on the first call to "wait"; this way, any processing at the very beginning is ignored
         self._last_sleep_time = self._start_time = None
@@ -467,8 +473,11 @@ class Clock:
             # we throw a warning that we're getting behind and don't try to sleep at all
             if stop_sleeping_time < time.time() - 0.01:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
-                logging.warning("Clock is running noticeably behind real time ({} s); "
-                                "probably processing is too heavy.".format(time.time() - stop_sleeping_time))
+                logging.warning(
+                    "Clock is running noticeably behind real time ({} s) on a wait call of {} s; "
+                    "probably processing is too heavy.".format(
+                        round(time.time() - stop_sleeping_time, 5), round(dt, 5))
+                )
                 self.running_behind_warning_count += 1
             elif stop_sleeping_time < time.time():
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
@@ -487,6 +496,15 @@ class Clock:
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
+    def _complete_timestamp_data(self):
+        # if this is the master clock and a time stamp has been created for this moment
+        # make sure to update the data for that time stamp to include all clocks active at that moment
+        # this solves the issue of incomplete time stamps that get created just before a new clock is forked
+        if self.is_master() and self.time() in self.time_stamp_data:
+            for c in self.iterate_all_relatives(include_self=True):
+                if c not in self.time_stamp_data[self.time()]:
+                    self.time_stamp_data[self.time()][c] = c.beats()
+
     def wait(self, dt, units="beats"):
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
@@ -499,6 +517,9 @@ class Clock:
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
+
+        # make sure any timestamps for this moment have all clocks represented in them
+        self._complete_timestamp_data()
 
         end_time = self._get_wait_end_time_and_extend_envelopes(dt, units)
 
@@ -538,6 +559,7 @@ class Clock:
                             "clock {}. \nUnless you are recording on a child or cousin clock, you can safely turn this "
                             "off by setting the synchronization_policy for this clock (or for the master clock) to "
                             "\"no synchronization\"".format(calc_time, current_clock().name))
+            self.master.running_behind_warning_count = 0
 
     def _get_wait_end_time_and_extend_envelopes(self, dt, units):
         end_time = self.beats() + dt if units == "beats" \
@@ -625,6 +647,9 @@ class Clock:
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
+
+        # make sure any timestamps for this moment have all clocks represented in them
+        self._complete_timestamp_data()
 
         # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before we're done waiting here on the master clock
@@ -740,11 +765,34 @@ class TimeStamp:
         :param clock: a Clock; if None, the clock implicitly from the thread
         """
         clock = current_clock() if clock is None else clock
-        self.beats_in_clocks = {
-            c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
-        } if clock is not None else {}
+
+        if clock is None or not isinstance(clock, Clock):
+            raise ValueError("No valid clock given or found for TimeStamp")
+
         self.wall_time = time.time()
         self.time_in_master = clock.time_in_master() if clock is not None else self.wall_time
+
+        # There's no reason to keep multiple copies of the time stamp data (i.e. beat in each clock) for the
+        # same time in the master clock, (also, some of these copies could end up deficient if not all of the
+        # child clocks had been forked when they were created). For this reason, we keep all the data in a
+        # dictionary in the master clock called time_stamp_data, indexed by the time in master
+        if self.time_in_master in clock.master.time_stamp_data:
+            # if the given time_in_master is already represented in the time_stamp_data, set self.beats_in_clocks
+            # to be an alias to that entry
+            self.beats_in_clocks = clock.master.time_stamp_data[self.time_in_master]
+
+            # ...but also update that entry to contain a value for every relative for this clock, in case it was
+            # missing one or more
+            for c in clock.iterate_all_relatives(include_self=True):
+                if c not in self.beats_in_clocks:
+                    self.beats_in_clocks[c] = c.beats()
+        else:
+            # if the given time_in_master is not yet represented in the time_stamp_data, create the entry
+            # also, use self.beats_in_clocks as an alias
+            self.beats_in_clocks = {
+                c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
+            }
+            clock.master.time_stamp_data[self.time_in_master] = self.beats_in_clocks
 
     def beat_in_clock(self, clock: Clock):
         if clock in self.beats_in_clocks:
