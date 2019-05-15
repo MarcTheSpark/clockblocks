@@ -1,22 +1,27 @@
 import threading
 import time
+from threading import Event
 
 
-def sleep_precisely_until(stop_time):
+def sleep_precisely_until(stop_time, interruption_event: Event = None):
     time_remaining = stop_time - time.time()
     if time_remaining <= 0:
         return
     elif time_remaining < 0.0005:
         # when there's fewer than 500 microseconds left, just burn cpu cycles and hit it exactly
-        while time.time() < stop_time:
+        while time.time() < stop_time and (interruption_event is None or not interruption_event.is_set()):
             pass
     else:
-        time.sleep(time_remaining / 2)
-        sleep_precisely_until(stop_time)
+        if interruption_event is not None:
+            if interruption_event.wait(timeout=time_remaining / 2):
+                return
+        else:
+            time.sleep(time_remaining / 2)
+        sleep_precisely_until(stop_time, interruption_event)
 
 
-def sleep_precisely(secs):
-    sleep_precisely_until(time.time() + secs)
+def sleep_precisely(secs, interruption_event: Event = None):
+    sleep_precisely_until(time.time() + secs, interruption_event)
 
 
 def current_clock():
@@ -28,7 +33,11 @@ def current_clock():
 
 
 def wait(dt):
-    current_clock().wait(dt)
+    c = current_clock()
+    if c is not None:
+        current_clock().wait(dt)
+    else:
+        time.sleep(dt)
 
 
 def fork(process_function, name="", initial_rate=None, initial_tempo=None, initial_beat_length=None,

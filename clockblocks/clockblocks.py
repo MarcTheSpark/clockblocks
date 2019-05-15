@@ -474,11 +474,9 @@ class Clock:
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
                 pass
             else:
-                if self.use_precise_timing:
-                    sleep_precisely_until(stop_sleeping_time)
-                else:
-                    # the max is just in case we got behind in the microsecond it took before the elif check above
-                    time.sleep(max(0, stop_sleeping_time - time.time()))
+                self._ready_and_waiting = True
+                sleep_precisely_until(stop_sleeping_time, self._wait_event)
+                self._ready_and_waiting = False
         else:
             self.parent._queue.append(_WakeUpCall(self.parent.beats() + dt, self))
             self.parent._queue.sort(key=lambda x: x.t)
