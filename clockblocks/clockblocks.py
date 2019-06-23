@@ -28,6 +28,7 @@ class Clock:
         Recursively nestable clock class. Clocks can fork child-clocks, which can in turn fork their own child-clock.
         Only the master clock calls sleep; child-clocks instead register WakeUpCalls with their parents, who
         register wake-up calls with their parents all the way up to the master clock.
+
         :param name (optional): can be useful for keeping track in confusing multi-threaded situations
         :param parent: the parent clock for this clock; a value of None indicates the master clock
         :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
@@ -508,7 +509,6 @@ class Clock:
     def wait(self, dt, units="beats"):
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
-
         units = units.lower()
         assert units in ("beats", "time"), "Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\"."
 
