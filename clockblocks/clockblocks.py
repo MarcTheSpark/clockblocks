@@ -347,8 +347,8 @@ class Clock:
                             "result. You can increase the number of threads in the pool to avoid this.")
             threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
-    def fork(self, process_function, name=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
-             extra_args=(), kwargs=None):
+    def fork(self, process_function, args=(), kwargs=None, name=None,
+             initial_rate=None, initial_tempo=None, initial_beat_length=None):
 
         kwargs = {} if kwargs is None else kwargs
 
@@ -390,7 +390,7 @@ class Clock:
                 self._children.remove(child)
             except Exception as e:
                 logging.exception(e)
-        self._run_in_pool(_process, extra_args, kwargs)
+        self._run_in_pool(_process, args, kwargs)
 
         # Allow the new child to run until it hits a wait call. This is quite important; if we don't do this,
         # the master clock may end up not seeing any queued events and go to sleep for a while before this newly
