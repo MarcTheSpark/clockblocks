@@ -32,28 +32,28 @@ class Clock:
         :param name (optional): can be useful for keeping track in confusing multi-threaded situations
         :param parent: the parent clock for this clock; a value of None indicates the master clock
         :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
-        has an effect if this is the master clock.
+            has an effect if this is the master clock.
         :param timing_policy: either "relative", "absolute", or a float between 0 and 1 representing a balance between
-        the two. "relative" attempts to keeps each wait call as faithful as possible to what it should be. This can
-        result in the clock getting behind real time, since if heavy processing causes us to get behind on one note
-        we never catch up. "absolute" tries instead to stay faithful to the time since the clock began. If one wait
-        is too long due to heavy processing, later delays will be shorter to try to catch up. This can result in
-        inaccuracies in relative timing. Setting the timing policy to a float between 0 and 1 implements a hybrid
-        approach in which, when the clock gets behind, it is allowed to catch up somewhat, but only to a certain extent.
-        (0 is equivalent to absolute timing, 1 is equivalent to relative timing.)
+            the two. "relative" attempts to keeps each wait call as faithful as possible to what it should be. This can
+            result in the clock getting behind real time, since if heavy processing causes us to get behind on one note
+            we never catch up. "absolute" tries instead to stay faithful to the time since the clock began. If one wait
+            is too long due to heavy processing, later delays will be shorter to try to catch up. This can result in
+            inaccuracies in relative timing. Setting the timing policy to a float between 0 and 1 implements a hybrid
+            approach in which, when the clock gets behind, it is allowed to catch up somewhat, but only to a certain extent.
+            (0 is equivalent to absolute timing, 1 is equivalent to relative timing.)
         :param synchronization_policy: either None or one of "all relatives", "all descendants", "no synchronization",
-        or "inherit". Since a clock is woken up by its parent clock, it will always remain synchronized with
-        all parents / grandparents / etc; however, if you ask one of its children what time / beat it is on, it may
-        have old information, since it has been asleep. If the synchronization_policy is set to "no synchronization",
-        then we live with this, but if it is set to "all descendants" then we take the time (and CPU cycles) to catch
-        up all its descendants so that they read the correct time. Nevertheless, cousin clocks (other descendants of
-        this clock's parent) may still not be caught up, so the "all relatives" policy makes sure that all descendants
-        of the master clock - no matter how they are related to this clock - will have up-to-date information about
-        what time / beat they are on whenever this clock wakes up. This is the default setting, since it avoids
-        inaccurate information, but if there are a lot of clocks it may be valuable to turn off relative synchronization
-        if it's slowing things down. The value "inherit" means that this clock inherits its synchronization policy from
-        its master. If no value is specified, then it defaults to "all relatives" for the master clock and "inherit"
-        for all descendants, which in practice means that all clocks will synchronize with all relatives upon waking.
+            or "inherit". Since a clock is woken up by its parent clock, it will always remain synchronized with
+            all parents / grandparents / etc; however, if you ask one of its children what time / beat it is on, it may
+            have old information, since it has been asleep. If the synchronization_policy is set to "no synchronization",
+            then we live with this, but if it is set to "all descendants" then we take the time (and CPU cycles) to catch
+            up all its descendants so that they read the correct time. Nevertheless, cousin clocks (other descendants of
+            this clock's parent) may still not be caught up, so the "all relatives" policy makes sure that all descendants
+            of the master clock - no matter how they are related to this clock - will have up-to-date information about
+            what time / beat they are on whenever this clock wakes up. This is the default setting, since it avoids
+            inaccurate information, but if there are a lot of clocks it may be valuable to turn off relative synchronization
+            if it's slowing things down. The value "inherit" means that this clock inherits its synchronization policy from
+            its master. If no value is specified, then it defaults to "all relatives" for the master clock and "inherit"
+            for all descendants, which in practice means that all clocks will synchronize with all relatives upon waking.
         """
         self.name = name
         self.parent = parent
@@ -286,10 +286,11 @@ class Clock:
 
     @synchronization_policy.setter
     def synchronization_policy(self, value):
-        assert value in ("all relatives", "all descendants", "no synchronization", "inherit"), \
-            'Invalid synchronization policy "{}". Must be one of ("all relatives", "all descendants", ' \
-            '"no synchronization", "inherit").'.format(value)
-        assert not (self.is_master() and value == "inherit"), "Master cannot inherit synchronization policy."
+        if value not in("all relatives", "all descendants", "no synchronization", "inherit"):
+            raise ValueError('Invalid synchronization policy "{}". Must be one of ("all relatives", "all descendants", '
+                             '"no synchronization", "inherit").'.format(value))
+        if self.is_master() and value == "inherit":
+            raise ValueError("Master cannot inherit synchronization policy.")
         self._synchronization_policy = value
 
     def _resolve_synchronization_policy(self):
@@ -327,8 +328,9 @@ class Clock:
         :param absolute_relative_mix: a float representing the minimum proportion of the ideal wait time we are willing
         to wait in order to catch up to the correct absolute time since the clock started.
         """
-        assert 0.0 <= absolute_relative_mix <= 1.0, "Mix coefficient should be between 0 (fully absolute timing " \
-                                                    "policy) and 1 (fully relative timing policy)."
+        if not (0.0 <= absolute_relative_mix <= 1.0):
+            raise ValueError("Mix coefficient should be between 0 (fully absolute timing policy) "
+                             "and 1 (fully relative timing policy).")
         self._timing_policy = absolute_relative_mix
 
     def _run_in_pool(self, target, args, kwargs):
@@ -423,6 +425,7 @@ class Clock:
         Otherwise registers a wake up time with parent clock and pauses execution.
         NB: Should not be called directly, since this doesn't actually advance the tempo clock; instead call
         clock.wait(dt, units="time")
+
         :param dt: how many beats to wait on the parent clock
         """
         if self._log_processing_time:
@@ -510,7 +513,8 @@ class Clock:
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
         units = units.lower()
-        assert units in ("beats", "time"), "Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\"."
+        if units not in ("beats", "time"):
+            raise ValueError("Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\".".format(units))
 
         # wait for any and all children to schedule their next wake up call and call wait()
         while not all(child._ready_and_waiting for child in self._children):
@@ -607,8 +611,10 @@ class Clock:
         return end_time
 
     def fast_forward_to_time(self, t):
-        assert self.is_master(), "Only the master clock can be fast-forwarded."
-        assert t >= self.time(), "Cannot fast-forward to a time in the past."
+        if not self.is_master():
+            raise ValueError("Only the master clock can be fast-forwarded.")
+        if t < self.time():
+            raise ValueError("Cannot fast-forward to a time in the past.")
         self._fast_forward_goal = t
 
     def fast_forward_in_time(self, t):
@@ -763,6 +769,7 @@ class TimeStamp:
     def __init__(self, clock=None):
         """
         TimeStamp that takes note of the time in every clock related to the given clock
+
         :param clock: a Clock; if None, the clock implicitly from the thread
         """
         clock = current_clock() if clock is None else clock

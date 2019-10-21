@@ -87,12 +87,14 @@ class TempoEnvelope(Envelope):
 
         if duration_units == "beats":
             extension_into_future = self.length() - self.beats()
-            assert duration >= extension_into_future, "Target must extend beyond the last existing target."
+            if duration < extension_into_future:
+                raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
         else:
             # units == "time", so we need to figure out how many beats are necessary
             time_extension_into_future = self.integrate_interval(self.beats(), self.length())
-            assert duration >= time_extension_into_future, "Target must extend beyond the last existing target."
+            if duration < time_extension_into_future:
+                raise ValueError("Duration to target must extend beyond the last existing target.")
 
             # normalized_time = how long the curve would take if it were one beat long
             normalized_time = EnvelopeSegment(
@@ -157,6 +159,7 @@ class TempoEnvelope(Envelope):
         Pretty confusing, but when we want to construct a tempo curve specifying the *times* that changes occur rather
         than the beats, we can first construct it as though the durations were in beats, then call this function
         to warp it so that the durations are in time.
+
         :return: self, altered accordingly
         """
 
@@ -168,12 +171,12 @@ class TempoEnvelope(Envelope):
             """
             The following has been condensed into a single statement for efficiency:
 
-                actual_time_duration = segment.integrate_segment(segment.start_time, segment.end_time)
-                # the segment duration is currently in beats, but it also represents the duration we would like
-                # the segment to have in time. so the scale factor is desired time duration / actual time duration
-                scale_factor = segment.duration / actual_time_duration
-                # here's we're scaling the duration to now last as long in time as it used to in beats
-                modified_segment_length = scale_factor * segment.duration
+            actual_time_duration = segment.integrate_segment(segment.start_time, segment.end_time)
+            # the segment duration is currently in beats, but it also represents the duration we would like
+            # the segment to have in time. so the scale factor is desired time duration / actual time duration
+            scale_factor = segment.duration / actual_time_duration
+            # here's we're scaling the duration to now last as long in time as it used to in beats
+            modified_segment_length = scale_factor * segment.duration
             """
             modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
                                                                                         segment.end_time)
