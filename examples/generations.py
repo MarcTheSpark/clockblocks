@@ -26,8 +26,8 @@ from clockblocks import *
 
 
 def child_process(my_clock: Clock):
-    while my_clock.beats() < 4:
-        print("{} at beat {}".format(my_clock.name, my_clock.beats()))
+    while my_clock.beat() < 4:
+        print("{} at beat {}".format(my_clock.name, my_clock.beat()))
         wait(1)
     my_clock.fork(grandchild_process, "GRANDCHILD")
     my_clock.wait_for_children_to_finish()
@@ -36,16 +36,16 @@ def child_process(my_clock: Clock):
 def grandchild_process(my_clock: Clock):
     my_clock.tempo = 120
     my_clock.set_tempo_target(40, 8)
-    while my_clock.beats() < 8:
-        print("{} at beat {}".format(my_clock.name, my_clock.beats()))
+    while my_clock.beat() < 8:
+        print("{} at beat {}".format(my_clock.name, my_clock.beat()))
         my_clock.wait(1)
 
 
 master = Clock("MASTER")
 
 master.set_tempo_target(180, 40)
-while master.beats() < 40:
-    print("{} at beat {}".format(master.name, master.beats()))
-    if master.beats() % 8 == 0:
+while master.beat() < 40:
+    print("{} at beat {}".format(master.name, master.beat()))
+    if master.beat() % 8 == 0:
         master.fork(child_process, "CHILD", initial_tempo=120)
     wait(1)

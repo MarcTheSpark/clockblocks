@@ -76,7 +76,7 @@ class Clock:
         self.tempo_envelope = TempoEnvelope(initial_rate)
 
         # how long had my parent been around when I was created
-        self.parent_offset = self.parent.beats() if self.parent is not None else 0
+        self.parent_offset = self.parent.beat() if self.parent is not None else 0
         # will use these if not master clock
         self._ready_and_waiting = False
         self._wait_event = threading.Event()
@@ -236,8 +236,8 @@ class Clock:
     def time(self):
         return self.tempo_envelope.time()
 
-    def beats(self):
-        return self.tempo_envelope.beats()
+    def beat(self):
+        return self.tempo_envelope.beat()
 
     def time_in_master(self):
         return self.master.time()
@@ -286,7 +286,7 @@ class Clock:
                                                            duration_units=duration_units)
         # truncate removes any segments that extend into the future
         if truncate:
-            self.tempo_envelope.remove_segments_after(self.beats())
+            self.tempo_envelope.remove_segments_after(self.beat())
 
         if self.tempo_envelope.length() == 0:
             # if there's nothing to this clock's tempo envelope yet, we just replace it with the new one
@@ -321,7 +321,7 @@ class Clock:
                               resolution_multiple=2):
         # truncate removes any segments that extend into the future
         if truncate:
-            self.tempo_envelope.remove_segments_after(self.beats())
+            self.tempo_envelope.remove_segments_after(self.beat())
 
         if domain_end is None:
             self.tempo_envelope.append_envelope(
@@ -550,7 +550,7 @@ class Clock:
                 sleep_precisely_until(stop_sleeping_time, self._wait_event)
                 self._ready_and_waiting = False
         else:
-            self.parent._queue.append(_WakeUpCall(self.parent.beats() + dt, self))
+            self.parent._queue.append(_WakeUpCall(self.parent.beat() + dt, self))
             self.parent._queue.sort(key=lambda x: x.t)
             self._ready_and_waiting = True
             self._wait_event.wait()
@@ -583,7 +583,7 @@ class Clock:
             # find the next wake up call
             next_wake_up_call = self._queue.pop(0)
             wake_up_beat = next_wake_up_call.t
-            beats_till_wake = wake_up_beat - self.beats()
+            beats_till_wake = wake_up_beat - self.beat()
             self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
             self._advance_tempo_map_to_beat(wake_up_beat)
             # tell the process of the clock being woken to go ahead and do it's thing
@@ -598,8 +598,8 @@ class Clock:
 
         # if we exit the while loop, that means that there is no one in the queue (meaning no children),
         # or the first wake up call is scheduled for after this wait is to end. So we can safely wait.
-        self._wait_in_parent(self.tempo_envelope.get_wait_time(end_time - self.beats()))
-        self.tempo_envelope.advance(end_time - self.beats())
+        self._wait_in_parent(self.tempo_envelope.get_wait_time(end_time - self.beat()))
+        self.tempo_envelope.advance(end_time - self.beat())
 
         # see explanation of synchronization_policy above
         start = time.time()
@@ -623,18 +623,18 @@ class Clock:
         if self.is_master() and self.time() in self.time_stamp_data:
             for c in self.iterate_all_relatives(include_self=True):
                 if c not in self.time_stamp_data[self.time()]:
-                    self.time_stamp_data[self.time()][c] = c.beats()
+                    self.time_stamp_data[self.time()][c] = c.beat()
 
     def _catch_up_children(self):
         # when we catch up the children, they also have to recursively catch up their children, etc.
         for child in self._children:
-            if (child.parent_offset + child.time()) < self.beats():
-                child.tempo_envelope.advance_time(self.beats() - (child.parent_offset + child.time()))
+            if (child.parent_offset + child.time()) < self.beat():
+                child.tempo_envelope.advance_time(self.beat() - (child.parent_offset + child.time()))
                 child._catch_up_children()
 
     def _get_wait_end_time_and_extend_envelopes(self, dt, units):
-        end_time = self.beats() + dt if units == "beats" \
-            else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+        end_time = self.beat() + dt if units == "beats" \
+            else self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
         # if we have a looping tempo envelope or an endless tempo function, and we're going right up
         # to or past the end of what's already been charted out, then we extend it before waiting
@@ -672,12 +672,12 @@ class Clock:
             if units == "time":
                 # if we're using time units then we need to recalculate the end time based on the new information
                 # about how the tempo envelope extends
-                end_time = self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+                end_time = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
         return end_time
 
     def _advance_tempo_map_to_beat(self, beat):
-        self.tempo_envelope.advance(beat - self.beats())
+        self.tempo_envelope.advance(beat - self.beat())
 
     def wait_for_children_to_finish(self):
         if self._start_time is None:
@@ -698,7 +698,7 @@ class Clock:
             # find the next wake up call
             next_wake_up_call = self._queue.pop(0)
             wake_up_beat = next_wake_up_call.t
-            beats_till_wake = wake_up_beat - self.beats()
+            beats_till_wake = wake_up_beat - self.beat()
             self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
             self._advance_tempo_map_to_beat(wake_up_beat)
             next_wake_up_call.clock._ready_and_waiting = False
@@ -729,8 +729,8 @@ class Clock:
         self.fast_forward_to_time(self.time() + t)
 
     def fast_forward_to_beat(self, b):
-        assert b > self.beats(), "Cannot fast-forward to a beat in the past."
-        self.fast_forward_in_beats(b - self.beats())
+        assert b > self.beat(), "Cannot fast-forward to a beat in the past."
+        self.fast_forward_in_beats(b - self.beat())
 
     def fast_forward_in_beats(self, b):
         self.fast_forward_in_time(self.tempo_envelope.get_wait_time(b))
@@ -776,7 +776,7 @@ class Clock:
 
         output_curve = TempoEnvelope(initial_rate_or_segments=initial_rate)
 
-        while any(tempo_envelope.beats() < tempo_envelope.length() for tempo_envelope in tempo_envelopes):
+        while any(tempo_envelope.beat() < tempo_envelope.length() for tempo_envelope in tempo_envelopes):
             # we step twice for half the step size so that we can get a halfway point to use to guide curvature
             start_level = output_curve.end_level()
             halfway_level = step_and_get_beat_length(step_size / 2)
@@ -826,12 +826,12 @@ class TimeStamp:
             # missing one or more
             for c in clock.iterate_all_relatives(include_self=True):
                 if c not in self.beats_in_clocks:
-                    self.beats_in_clocks[c] = c.beats()
+                    self.beats_in_clocks[c] = c.beat()
         else:
             # if the given time_in_master is not yet represented in the time_stamp_data, create the entry
             # also, use self.beats_in_clocks as an alias
             self.beats_in_clocks = {
-                c: c.beats() for c in clock.iterate_all_relatives(include_self=True)
+                c: c.beat() for c in clock.iterate_all_relatives(include_self=True)
             }
             clock.master.time_stamp_data[self.time_in_master] = self.beats_in_clocks
 

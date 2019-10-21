@@ -16,17 +16,17 @@ class TempoEnvelope(Envelope):
             super().__init__()
             self.initialize(1 / initial_rate_or_segments)
         self._t = 0.0
-        self._beats = 0.0
+        self._beat = 0.0
 
     def time(self):
         return self._t
 
-    def beats(self):
-        return self._beats
+    def beat(self):
+        return self._beat
 
     @property
     def beat_length(self):
-        return self.value_at(self._beats)
+        return self.value_at(self._beat)
 
     @beat_length.setter
     def beat_length(self, beat_length):
@@ -34,7 +34,7 @@ class TempoEnvelope(Envelope):
         self.append_segment(beat_length, 0)
 
     def _bring_up_to_date(self, beat=None):
-        beat = self.beats() if beat is None else beat
+        beat = self.beat() if beat is None else beat
         # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
         if self.length() < beat:
             # no explicit segments have been made for a while, insert a constant segment to bring us up to date
@@ -44,7 +44,7 @@ class TempoEnvelope(Envelope):
     def truncate(self, beat=None):
         # removes all segments after beat (which defaults to the current beat) and adds a constant segment
         # if necessary to being us up to that beat
-        beat = self.beats() if beat is None else beat
+        beat = self.beat() if beat is None else beat
         self.remove_segments_after(beat)
         self._bring_up_to_date(beat)
         return self
@@ -79,23 +79,23 @@ class TempoEnvelope(Envelope):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
         # truncate removes any segments that extend into the future
         if truncate:
-            self.remove_segments_after(self.beats())
+            self.remove_segments_after(self.beat())
 
         # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
-        if self.length() < self.beats():
+        if self.length() < self.beat():
             # no explicit segments have been made for a while, insert a constant segment to bring us up to date
-            self.append_segment(self.end_level(), self.beats() - self.length())
+            self.append_segment(self.end_level(), self.beat() - self.length())
 
         if duration_units == "beats":
-            extension_into_future = self.length() - self.beats()
+            extension_into_future = self.length() - self.beat()
             if duration < extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
             if metric_phase_goal is not None:
-                self.set_metric_phase_target_at_beat(self.beats() + duration, metric_phase_goal, phase_cycle_length)
+                self.set_metric_phase_target_at_beat(self.beat() + duration, metric_phase_goal, phase_cycle_length)
         else:
             # units == "time", so we need to figure out how many beats are necessary
-            time_extension_into_future = self.integrate_interval(self.beats(), self.length())
+            time_extension_into_future = self.integrate_interval(self.beat(), self.length())
             if duration < time_extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
 
@@ -131,7 +131,7 @@ class TempoEnvelope(Envelope):
         :param divisor: the divisor with respect to which the desired phase is measured
         :return True, if the adjustment is possible, False if not
         """
-        if target_beat > self.length() or target_beat <= self.beats():
+        if target_beat > self.length() or target_beat <= self.beat():
             raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
         desired_time_phase_or_phases = (desired_time_phase_or_phases, ) \
             if not hasattr(desired_time_phase_or_phases, '__len__') else desired_time_phase_or_phases
@@ -139,7 +139,7 @@ class TempoEnvelope(Envelope):
             raise ValueError("One or more phases out of range for divisor.")
 
         # what's the current time at the beat?
-        time_at_beat = self.time() + self.integrate_interval(self.beats(), target_beat)
+        time_at_beat = self.time() + self.integrate_interval(self.beat(), target_beat)
         # look at the nearest time before and after that time that satisfy the phase condition
         good_phase_times = TempoEnvelope._get_nearest_remainders(time_at_beat, desired_time_phase_or_phases, divisor)
 
@@ -162,13 +162,13 @@ class TempoEnvelope(Envelope):
         :return: True if the adjustment worked, False if it's impossible
         """
         fudge_factor = 1e-7
-        assert self.beats() < beat_to_adjust <= self.length() + fudge_factor
+        assert self.beat() < beat_to_adjust <= self.length() + fudge_factor
 
         # make a copy of the original segments lists to fall back on in case we fail
         back_up = deepcopy(self.segments)
-        self.insert_interpolated(self.beats(), min_difference=fudge_factor)
+        self.insert_interpolated(self.beat(), min_difference=fudge_factor)
         self.insert_interpolated(beat_to_adjust, min_difference=fudge_factor)
-        adjustable_segments = self.segments[self._get_index_of_segment_at(self.beats(), right_most=True):
+        adjustable_segments = self.segments[self._get_index_of_segment_at(self.beat(), right_most=True):
                                             self._get_index_of_segment_at(beat_to_adjust, left_most=True) + 1]
         # ranges of how long each segment could take by adjusting curvature
         segment_time_ranges = [segment.get_integral_range() for segment in adjustable_segments]
@@ -226,7 +226,7 @@ class TempoEnvelope(Envelope):
         :return True, if the adjustment is possible, False if not
         """
 
-        envelope_end_time = self.time() + self.integrate_interval(self.beats(), self.end_time())
+        envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
         if target_time > envelope_end_time or target_time <= self.time():
             raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
 
@@ -236,7 +236,7 @@ class TempoEnvelope(Envelope):
             raise ValueError("One or more phases out of range for divisor.")
 
         # what's the current beat at the time?
-        beat_at_time = self.beats() + self.get_beat_wait_from_time_wait(target_time - self.time())
+        beat_at_time = self.beat() + self.get_beat_wait_from_time_wait(target_time - self.time())
         good_phase_beats = TempoEnvelope._get_nearest_remainders(beat_at_time, desired_beat_phase_or_phases, divisor)
 
         # try to adjust to that one of those phases (starting with the closest)
@@ -249,18 +249,18 @@ class TempoEnvelope(Envelope):
         return False
 
     def _adjust_beat_at_time(self, time_to_adjust, desired_beat):
-        envelope_end_time = self.time() + self.integrate_interval(self.beats(), self.end_time())
+        envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
         assert self.time() < time_to_adjust <= envelope_end_time
 
         # make a copy of the original segments lists to fall back on in case we fail
         back_up = deepcopy(self.segments)
-        current_beat_at_adjust_point = self.beats() + self.get_beat_wait_from_time_wait(time_to_adjust - self.time())
+        current_beat_at_adjust_point = self.beat() + self.get_beat_wait_from_time_wait(time_to_adjust - self.time())
 
-        start_beat = self.insert_interpolated(self.beats())
+        start_beat = self.insert_interpolated(self.beat())
         # if the insertion does nothing because it's too close to an existing point, it will return the existing point
         current_beat_at_adjust_point = self.insert_interpolated(current_beat_at_adjust_point)
 
-        adjustable_index_start = self._get_index_of_segment_at(self.beats(), right_most=True)
+        adjustable_index_start = self._get_index_of_segment_at(self.beat(), right_most=True)
         adjustable_index_end = self._get_index_of_segment_at(current_beat_at_adjust_point, left_most=True) + 1
         adjustable_segments = self.segments[adjustable_index_start: adjustable_index_end]
 
@@ -307,18 +307,18 @@ class TempoEnvelope(Envelope):
         return closest_below, closest_above
 
     def get_wait_time(self, beats):
-        return self.integrate_interval(self._beats, self._beats + beats)
+        return self.integrate_interval(self._beat, self._beat + beats)
 
     def advance(self, beats, wait_time=None):
         if wait_time is None:
             wait_time = self.get_wait_time(beats)
-        self._beats += beats
+        self._beat += beats
         self._t = snap_float_to_nice_decimal(self._t + wait_time)
         return beats, wait_time
 
     def get_beat_wait_from_time_wait(self, seconds):
-        beat_to_get_to = self.get_upper_integration_bound(self._beats, seconds, max_error=0.00000001)
-        return beat_to_get_to - self._beats
+        beat_to_get_to = self.get_upper_integration_bound(self._beat, seconds, max_error=0.00000001)
+        return beat_to_get_to - self._beat
 
     def advance_time(self, seconds):
         beats = self.get_beat_wait_from_time_wait(seconds)
@@ -326,7 +326,7 @@ class TempoEnvelope(Envelope):
         return beats, seconds
 
     def go_to_beat(self, b):
-        self._beats = b
+        self._beat = b
         self._t = snap_float_to_nice_decimal(self.integrate_interval(0, b))
         return self
 
@@ -461,7 +461,7 @@ class TempoEnvelope(Envelope):
                   x_range=None, y_range=None):
         # if we're past the end of the envelope, we want to plot that as a final constant segment
         # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
-        env_to_plot = deepcopy(self)._bring_up_to_date() if self.end_time() < self.beats() else self
+        env_to_plot = deepcopy(self)._bring_up_to_date() if self.end_time() < self.beat() else self
 
         try:
             import matplotlib.pyplot as plt
