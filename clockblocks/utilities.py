@@ -58,6 +58,23 @@ def fork_unsynchronized(process_function, args=(), kwargs=None):
         clock.fork_unsynchronized(process_function, args=args, kwargs=kwargs)
 
 
+def snap_float_to_nice_decimal(x: float, order_of_magnitude_difference=7):
+    """
+    If x is near to a nice decimal, this rounds it. E.g., given a number like 8.01399999999999214, we want to round
+    it to 8.014. We do this by comparing what we get if we round coarsely to what we get if we round precisely, for
+    where place_difference represents how much more precise the precise round is than the course round. If they're the
+    same, then we should be rounding.
+
+    :param x: number to snap
+    :param order_of_magnitude_difference: how many orders of magnitude we compare rounding across
+    :return:
+    """
+    for first_place in range(0, 17 - order_of_magnitude_difference):
+        if round(x, first_place) == round(x, first_place + order_of_magnitude_difference):
+            return round(x, first_place)
+    return x
+
+
 class _PrintColors:
     PURPLE = '\033[95m'
     CYAN = '\033[96m'

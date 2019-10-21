@@ -1,5 +1,6 @@
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
+from .utilities import snap_float_to_nice_decimal
 
 
 class TempoEnvelope(Envelope):
@@ -113,7 +114,7 @@ class TempoEnvelope(Envelope):
         if wait_time is None:
             wait_time = self.get_wait_time(beats)
         self._beats += beats
-        self._t += wait_time
+        self._t = snap_float_to_nice_decimal(self._t + wait_time)
         return beats, wait_time
 
     def get_beat_wait_from_time_wait(self, seconds):
@@ -127,7 +128,7 @@ class TempoEnvelope(Envelope):
 
     def go_to_beat(self, b):
         self._beats = b
-        self._t = self.integrate_interval(0, b)
+        self._t = snap_float_to_nice_decimal(self.integrate_interval(0, b))
         return self
 
     @staticmethod
