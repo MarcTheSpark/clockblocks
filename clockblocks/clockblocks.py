@@ -532,7 +532,8 @@ class Clock:
             beats_till_wake = wake_up_beat - self.beats()
             self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
             self._advance_tempo_map_to_beat(wake_up_beat)
-            next_wake_up_call.clock._ready_and_waiting = False
+            # tell the process of the clock being woken to go ahead and do it's thing
+            next_wake_up_call.clock._ready_and_waiting = False  # this flag tells us when that process hits a new wait
             next_wake_up_call.clock._wait_event.set()
 
             # wait for the child clock that we woke up to finish processing, or to finish altogether
