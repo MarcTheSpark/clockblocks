@@ -381,6 +381,10 @@ class TempoEnvelope(Envelope):
             t = segment.end_time = t + modified_segment_length
         return self
 
+    ##################################################################################################################
+    #                                                Class Methods
+    ##################################################################################################################
+
     @classmethod
     def from_levels_and_durations(cls, levels=(0, 0), durations=(0,), curve_shapes=None, offset=0,
                                   units="tempo", duration_units="beats"):
@@ -448,6 +452,10 @@ class TempoEnvelope(Envelope):
             return out_envelope.convert_durations_to_times()
         else:
             return out_envelope
+
+    ##################################################################################################################
+    #                                                Other Utilities
+    ##################################################################################################################
 
     def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
                   x_range=None, y_range=None):

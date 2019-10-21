@@ -116,12 +116,122 @@ class Clock:
 
         self._killed = False
 
+    ##################################################################################################################
+    #                                                  Family Matters
+    ##################################################################################################################
+
     @property
     def master(self):
         return self if self.is_master() else self.parent.master
 
     def is_master(self):
         return self.parent is None
+
+    def children(self):
+        return tuple(self._children)
+
+    def iterate_inheritance(self):
+        clock = self
+        yield clock
+        while clock.parent is not None:
+            clock = clock.parent
+            yield clock
+
+    def inheritance(self):
+        return tuple(self.iterate_inheritance())
+
+    def iterate_all_relatives(self, include_self=False):
+        if include_self:
+            return self.master.iterate_descendants(True)
+        else:
+            return (c for c in self.master.iterate_descendants(True) if c is not self)
+
+    def iterate_descendants(self, include_self=False):
+        if include_self:
+            yield self
+        for child_clock in self._children:
+            yield child_clock
+            for descendant_of_child in child_clock.iterate_descendants():
+                yield descendant_of_child
+
+    def descendants(self):
+        return tuple(self.iterate_descendants())
+
+    def print_family_tree(self):
+        print(self.master._child_tree_string(self))
+
+    def _child_tree_string(self, highlight_clock=None):
+        name_text = self.name if self.name is not None else "(UNNAMED)"
+        if highlight_clock is self:
+            name_text = _PrintColors.BOLD + name_text + _PrintColors.END
+        children = self.children()
+        if len(children) == 0:
+            return name_text
+        return "{}:\n{}".format(
+            name_text,
+            textwrap.indent("\n".join(child._child_tree_string(highlight_clock) for child in self.children()), "  ")
+        )
+
+    ##################################################################################################################
+    #                                                 Policy Matters
+    ##################################################################################################################
+
+    @property
+    def synchronization_policy(self):
+        return self._synchronization_policy
+
+    @synchronization_policy.setter
+    def synchronization_policy(self, value):
+        if value not in("all relatives", "all descendants", "no synchronization", "inherit"):
+            raise ValueError('Invalid synchronization policy "{}". Must be one of ("all relatives", "all descendants", '
+                             '"no synchronization", "inherit").'.format(value))
+        if self.is_master() and value == "inherit":
+            raise ValueError("Master cannot inherit synchronization policy.")
+        self._synchronization_policy = value
+
+    def _resolve_synchronization_policy(self):
+        # resolves a value of "inherit" if necessary
+        for clock in self.iterate_inheritance():
+            if clock.synchronization_policy != "inherit":
+                return clock.synchronization_policy
+
+    @property
+    def timing_policy(self):
+        return self._timing_policy
+
+    @timing_policy.setter
+    def timing_policy(self, value):
+        assert value in ("absolute", "relative") or isinstance(value, (int, float)) and 0 <= value <= 1.
+        self._timing_policy = value
+
+    def use_absolute_timing_policy(self):
+        """
+        This timing policy only cares about keeping the time since the clock start accurate to what it should be.
+        The downside is that relative timings get distorted when it falls behind.
+        """
+        self._timing_policy = "absolute"
+
+    def use_relative_timing_policy(self):
+        """
+        This timing policy only cares about making each individual wait call as accurate as possible.
+        The downside is that long periods of calculation cause the clock to drift and get behind.
+        """
+        self._timing_policy = "relative"
+
+    def use_mixed_timing_policy(self, absolute_relative_mix: float):
+        """
+        Balance considerations of relative timing and absolute timing accuracy according to the given coefficient
+        :param absolute_relative_mix: a float representing the minimum proportion of the ideal wait time we are willing
+        to wait in order to catch up to the correct absolute time since the clock started.
+        """
+        if not (0.0 <= absolute_relative_mix <= 1.0):
+            raise ValueError("Mix coefficient should be between 0 (fully absolute timing policy) "
+                             "and 1 (fully relative timing policy).")
+        self._timing_policy = absolute_relative_mix
+
+    ##################################################################################################################
+    #                                               Timing Properties
+    ##################################################################################################################
 
     def time(self):
         return self.tempo_envelope.time()
@@ -156,20 +266,19 @@ class Clock:
     def tempo(self, t):
         self.tempo_envelope.tempo = t
 
-    def _child_tree_string(self, highlight_clock=None):
-        name_text = self.name if self.name is not None else "(UNNAMED)"
-        if highlight_clock is self:
-            name_text = _PrintColors.BOLD + name_text + _PrintColors.END
-        children = self.children()
-        if len(children) == 0:
-            return name_text
-        return "{}:\n{}".format(
-            name_text,
-            textwrap.indent("\n".join(child._child_tree_string(highlight_clock) for child in self.children()), "  ")
-        )
+    def absolute_rate(self):
+        absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.absolute_rate())
+        return absolute_rate
 
-    def print_family_tree(self):
-        print(self.master._child_tree_string(self))
+    def absolute_tempo(self):
+        return self.absolute_rate() * 60
+
+    def absolute_beat_length(self):
+        return 1 / self.absolute_rate()
+
+    ##################################################################################################################
+    #                                                  Tempo Mapping
+    ##################################################################################################################
 
     def _apply_tempo_envelope(self, levels, durations, curve_shapes=None, units="beatlength", duration_units="beats",
                               truncate=True, loop=False):
@@ -275,68 +384,9 @@ class Clock:
         self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, duration_units, truncate,
                                              metric_phase_goal, phase_cycle_length)
 
-    def absolute_rate(self):
-        absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.absolute_rate())
-        return absolute_rate
-
-    def absolute_tempo(self):
-        return self.absolute_rate() * 60
-
-    def absolute_beat_length(self):
-        return 1 / self.absolute_rate()
-
-    @property
-    def synchronization_policy(self):
-        return self._synchronization_policy
-
-    @synchronization_policy.setter
-    def synchronization_policy(self, value):
-        if value not in("all relatives", "all descendants", "no synchronization", "inherit"):
-            raise ValueError('Invalid synchronization policy "{}". Must be one of ("all relatives", "all descendants", '
-                             '"no synchronization", "inherit").'.format(value))
-        if self.is_master() and value == "inherit":
-            raise ValueError("Master cannot inherit synchronization policy.")
-        self._synchronization_policy = value
-
-    def _resolve_synchronization_policy(self):
-        # resolves a value of "inherit" if necessary
-        for clock in self.iterate_inheritance():
-            if clock.synchronization_policy != "inherit":
-                return clock.synchronization_policy
-
-    @property
-    def timing_policy(self):
-        return self._timing_policy
-
-    @timing_policy.setter
-    def timing_policy(self, value):
-        assert value in ("absolute", "relative") or isinstance(value, (int, float)) and 0 <= value <= 1.
-        self._timing_policy = value
-
-    def use_absolute_timing_policy(self):
-        """
-        This timing policy only cares about keeping the time since the clock start accurate to what it should be.
-        The downside is that relative timings get distorted when it falls behind.
-        """
-        self._timing_policy = "absolute"
-
-    def use_relative_timing_policy(self):
-        """
-        This timing policy only cares about making each individual wait call as accurate as possible.
-        The downside is that long periods of calculation cause the clock to drift and get behind.
-        """
-        self._timing_policy = "relative"
-
-    def use_mixed_timing_policy(self, absolute_relative_mix: float):
-        """
-        Balance considerations of relative timing and absolute timing accuracy according to the given coefficient
-        :param absolute_relative_mix: a float representing the minimum proportion of the ideal wait time we are willing
-        to wait in order to catch up to the correct absolute time since the clock started.
-        """
-        if not (0.0 <= absolute_relative_mix <= 1.0):
-            raise ValueError("Mix coefficient should be between 0 (fully absolute timing policy) "
-                             "and 1 (fully relative timing policy).")
-        self._timing_policy = absolute_relative_mix
+    ##################################################################################################################
+    #                                                   Forking
+    ##################################################################################################################
 
     def _run_in_pool(self, target, args, kwargs):
         if self.master._pool_semaphore.acquire(blocking=False):
@@ -424,6 +474,10 @@ class Clock:
 
         self._run_in_pool(_process, args, kwargs)
 
+    ##################################################################################################################
+    #                                             Waiting (the guts)
+    ##################################################################################################################
+
     def _wait_in_parent(self, dt):
         """
         If master clock, sleeps precisely for dt seconds (with adjustments based on timing policy / fast forwarding)
@@ -505,15 +559,6 @@ class Clock:
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
-    def _complete_timestamp_data(self):
-        # if this is the master clock and a time stamp has been created for this moment
-        # make sure to update the data for that time stamp to include all clocks active at that moment
-        # this solves the issue of incomplete time stamps that get created just before a new clock is forked
-        if self.is_master() and self.time() in self.time_stamp_data:
-            for c in self.iterate_all_relatives(include_self=True):
-                if c not in self.time_stamp_data[self.time()]:
-                    self.time_stamp_data[self.time()][c] = c.beats()
-
     def wait(self, dt, units="beats"):
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
@@ -571,6 +616,22 @@ class Clock:
                             "\"no synchronization\"".format(calc_time, current_clock().name))
             self.master.running_behind_warning_count = 0
 
+    def _complete_timestamp_data(self):
+        # if this is the master clock and a time stamp has been created for this moment
+        # make sure to update the data for that time stamp to include all clocks active at that moment
+        # this solves the issue of incomplete time stamps that get created just before a new clock is forked
+        if self.is_master() and self.time() in self.time_stamp_data:
+            for c in self.iterate_all_relatives(include_self=True):
+                if c not in self.time_stamp_data[self.time()]:
+                    self.time_stamp_data[self.time()][c] = c.beats()
+
+    def _catch_up_children(self):
+        # when we catch up the children, they also have to recursively catch up their children, etc.
+        for child in self._children:
+            if (child.parent_offset + child.time()) < self.beats():
+                child.tempo_envelope.advance_time(self.beats() - (child.parent_offset + child.time()))
+                child._catch_up_children()
+
     def _get_wait_end_time_and_extend_envelopes(self, dt, units):
         end_time = self.beats() + dt if units == "beats" \
             else self.beats() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
@@ -615,40 +676,8 @@ class Clock:
 
         return end_time
 
-    def fast_forward_to_time(self, t):
-        if not self.is_master():
-            raise ValueError("Only the master clock can be fast-forwarded.")
-        if t < self.time():
-            raise ValueError("Cannot fast-forward to a time in the past.")
-        self._fast_forward_goal = t
-
-    def fast_forward_in_time(self, t):
-        self.fast_forward_to_time(self.time() + t)
-
-    def fast_forward_to_beat(self, b):
-        assert b > self.beats(), "Cannot fast-forward to a beat in the past."
-        self.fast_forward_in_beats(b - self.beats())
-
-    def fast_forward_in_beats(self, b):
-        self.fast_forward_in_time(self.tempo_envelope.get_wait_time(b))
-
-    def is_fast_forwarding(self):
-        # same as asking if this clock's master clock is fast-forwarding
-        return self.master._fast_forward_goal is not None
-
-    def _catch_up_children(self):
-        # when we catch up the children, they also have to recursively catch up their children, etc.
-        for child in self._children:
-            if (child.parent_offset + child.time()) < self.beats():
-                child.tempo_envelope.advance_time(self.beats() - (child.parent_offset + child.time()))
-                child._catch_up_children()
-
     def _advance_tempo_map_to_beat(self, beat):
         self.tempo_envelope.advance(beat - self.beats())
-
-    def sleep(self, dt, units="beats"):
-        # alias to wait
-        self.wait(dt, units)
 
     def wait_for_children_to_finish(self):
         if self._start_time is None:
@@ -685,6 +714,35 @@ class Clock:
         while True:
             self.wait(1.0)
 
+    ##################################################################################################################
+    #                                                 Fast-forwarding
+    ##################################################################################################################
+
+    def fast_forward_to_time(self, t):
+        if not self.is_master():
+            raise ValueError("Only the master clock can be fast-forwarded.")
+        if t < self.time():
+            raise ValueError("Cannot fast-forward to a time in the past.")
+        self._fast_forward_goal = t
+
+    def fast_forward_in_time(self, t):
+        self.fast_forward_to_time(self.time() + t)
+
+    def fast_forward_to_beat(self, b):
+        assert b > self.beats(), "Cannot fast-forward to a beat in the past."
+        self.fast_forward_in_beats(b - self.beats())
+
+    def fast_forward_in_beats(self, b):
+        self.fast_forward_in_time(self.tempo_envelope.get_wait_time(b))
+
+    def is_fast_forwarding(self):
+        # same as asking if this clock's master clock is fast-forwarding
+        return self.master._fast_forward_goal is not None
+
+    ##################################################################################################################
+    #                                                 Other Utilities
+    ##################################################################################################################
+
     def log_processing_time(self):
         if logging.getLogger().level > 20:
             logging.warning("Set default logger to level of 20 or less to see INFO logs about clock processing time."
@@ -693,36 +751,6 @@ class Clock:
 
     def stop_logging_processing_time(self):
         self._log_processing_time = False
-
-    def children(self):
-        return tuple(self._children)
-
-    def iterate_inheritance(self):
-        clock = self
-        yield clock
-        while clock.parent is not None:
-            clock = clock.parent
-            yield clock
-
-    def inheritance(self):
-        return tuple(self.iterate_inheritance())
-
-    def iterate_all_relatives(self, include_self=False):
-        if include_self:
-            return self.master.iterate_descendants(True)
-        else:
-            return (c for c in self.master.iterate_descendants(True) if c is not self)
-
-    def iterate_descendants(self, include_self=False):
-        if include_self:
-            yield self
-        for child_clock in self._children:
-            yield child_clock
-            for descendant_of_child in child_clock.iterate_descendants():
-                yield descendant_of_child
-
-    def descendants(self):
-        return tuple(self.iterate_descendants())
 
     def extract_absolute_tempo_envelope(self, start_beat=0, step_size=0.1, tolerance=0.005):
         if self.is_master():
