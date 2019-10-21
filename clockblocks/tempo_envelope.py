@@ -28,7 +28,12 @@ class TempoEnvelope(Envelope):
     def beat_length(self):
         return self.value_at(self._beats)
 
-    def bring_up_to_date(self, beat=None):
+    @beat_length.setter
+    def beat_length(self, beat_length):
+        self.truncate()
+        self.append_segment(beat_length, 0)
+
+    def _bring_up_to_date(self, beat=None):
         beat = self.beats() if beat is None else beat
         # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
         if self.length() < beat:
@@ -41,13 +46,8 @@ class TempoEnvelope(Envelope):
         # if necessary to being us up to that beat
         beat = self.beats() if beat is None else beat
         self.remove_segments_after(beat)
-        self.bring_up_to_date(beat)
+        self._bring_up_to_date(beat)
         return self
-
-    @beat_length.setter
-    def beat_length(self, beat_length):
-        self.truncate()
-        self.append_segment(beat_length, 0)
 
     def beat_length_at(self, beat, from_left=False):
         return self.value_at(beat, from_left)
@@ -461,7 +461,7 @@ class TempoEnvelope(Envelope):
                   x_range=None, y_range=None):
         # if we're past the end of the envelope, we want to plot that as a final constant segment
         # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
-        env_to_plot = deepcopy(self).bring_up_to_date() if self.end_time() < self.beats() else self
+        env_to_plot = deepcopy(self)._bring_up_to_date() if self.end_time() < self.beats() else self
 
         try:
             import matplotlib.pyplot as plt
