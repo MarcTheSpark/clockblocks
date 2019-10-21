@@ -1,6 +1,7 @@
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
 from .utilities import snap_float_to_nice_decimal
+import math
 
 
 class TempoEnvelope(Envelope):
@@ -73,8 +74,8 @@ class TempoEnvelope(Envelope):
     def tempo_at(self, beat, from_left=False):
         return self.rate_at(beat, from_left) * 60
 
-    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0,
-                               duration_units="beats", truncate=True):
+    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                               metric_phase_goal=None, phase_cycle_length=1.0):
         assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
         # truncate removes any segments that extend into the future
         if truncate:
@@ -90,6 +91,8 @@ class TempoEnvelope(Envelope):
             if duration < extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
+            if metric_phase_goal is not None:
+                self.set_metric_phase_target_at_beat(self.beats() + duration, metric_phase_goal, phase_cycle_length)
         else:
             # units == "time", so we need to figure out how many beats are necessary
             time_extension_into_future = self.integrate_interval(self.beats(), self.length())
@@ -102,12 +105,206 @@ class TempoEnvelope(Envelope):
             ).integrate_segment(0, 1)
             desired_curve_length = duration - time_extension_into_future
             self.append_segment(beat_length_target, desired_curve_length / normalized_time, curve_shape)
+            if metric_phase_goal is not None:
+                self.set_metric_phase_target_at_time(self.time() + duration, metric_phase_goal, phase_cycle_length)
 
-    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True):
-        self.set_beat_length_target(1 / rate_target, duration, curve_shape, duration_units, truncate)
+    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                        metric_phase_goal=None, phase_cycle_length=1.0):
+        self.set_beat_length_target(1 / rate_target, duration, curve_shape, duration_units, truncate,
+                                    metric_phase_goal, phase_cycle_length)
 
-    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True):
-        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, duration_units, truncate)
+    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                         metric_phase_goal=None, phase_cycle_length=1.0):
+        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, duration_units, truncate,
+                                    metric_phase_goal, phase_cycle_length)
+
+    def set_metric_phase_target_at_beat(self, target_beat, desired_time_phase_or_phases, divisor=1.0):
+        """
+        Sets the goal phase in terms of time at the given beat. So, for instance, if we called
+        set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
+        beat 5. If we called set_metric_phase_target_at_beat(7, 1.25, 3), this would mean that at beat 7, we would want
+        to be at time 1.25, 4.25, 7.25, etc.
+
+        :param target_beat: The beat at which to have the given phase in time
+        :param desired_time_phase_or_phases: either a single number or a list/tuple of numbers in the range [0, divisor)
+            representing the remainder in terms of time.
+        :param divisor: the divisor with respect to which the desired phase is measured
+        :return True, if the adjustment is possible, False if not
+        """
+        if target_beat > self.length() or target_beat <= self.beats():
+            raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
+        desired_time_phase_or_phases = (desired_time_phase_or_phases, ) \
+            if not hasattr(desired_time_phase_or_phases, '__len__') else desired_time_phase_or_phases
+        if not all(0 <= x < divisor for x in desired_time_phase_or_phases):
+            raise ValueError("One or more phases out of range for divisor.")
+
+        # what's the current time at the beat?
+        time_at_beat = self.time() + self.integrate_interval(self.beats(), target_beat)
+        # look at the nearest time before and after that time that satisfy the phase condition
+        good_phase_times = TempoEnvelope._get_nearest_remainders(time_at_beat, desired_time_phase_or_phases, divisor)
+
+        # try to adjust to that one of those phases (starting with the closest)
+        for good_phase_time in sorted(good_phase_times, key=lambda x: abs(x - time_at_beat)):
+            if self._adjust_time_at_beat(target_beat, good_phase_time):
+                # the adjustment worked (returned true), so return True to say that we succeeded
+                return True
+
+        # if we get here, neither adjustment was possible, so we failed. Return false.
+        return False
+
+    def _adjust_time_at_beat(self, beat_to_adjust, desired_time):
+        """
+        Adjusts the curvature of segments from now until beat so that we reach it at desired_time, if possible. If not
+        possible, leaves the TempoCurve unchanged and returns False
+
+        :param beat_to_adjust: the beat at which we want to be at a particular time
+        :param desired_time: the time we want to be at
+        :return: True if the adjustment worked, False if it's impossible
+        """
+        fudge_factor = 1e-7
+        assert self.beats() < beat_to_adjust <= self.length() + fudge_factor
+
+        # make a copy of the original segments lists to fall back on in case we fail
+        back_up = deepcopy(self.segments)
+        self.insert_interpolated(self.beats(), min_difference=fudge_factor)
+        self.insert_interpolated(beat_to_adjust, min_difference=fudge_factor)
+        adjustable_segments = self.segments[self._get_index_of_segment_at(self.beats(), right_most=True):
+                                            self._get_index_of_segment_at(beat_to_adjust, left_most=True) + 1]
+        # ranges of how long each segment could take by adjusting curvature
+        segment_time_ranges = [segment.get_integral_range() for segment in adjustable_segments]
+        # range of how long the entire thing could take
+        total_time_range = (sum(x[0] for x in segment_time_ranges), sum(x[1] for x in segment_time_ranges))
+        # how long we want it to take
+        goal_total_time = desired_time - self.time()
+
+        # check if it's even possible to get to the desired time by simply adjusting curvatures
+        if not total_time_range[0] < goal_total_time < total_time_range[1]:
+            # if not return false, and go back to the backup segments (before we interpolated some points)
+            self.segments = back_up
+            return False
+
+        # how long each segment currently takes
+        segment_times = [segment.integrate_segment(segment.start_time, segment.end_time)
+                         for segment in adjustable_segments]
+        # how long all the segments take
+        total_time = sum(segment_times)
+
+        # on the off-chance that it already works perfectly, just return True
+        if goal_total_time == total_time:
+            self.segments = back_up  # also no need for those interpolations
+            return True
+
+        # if we've reached this point, we're ready to make the adjustments
+        # delta_time is how much of an adjustment we need total
+        delta_time = goal_total_time - total_time
+        # we distribute this total adjustment between the segments based on how much room they have to move
+        # in the direction we want them to move. Longer segments and segments with more room to wiggle do the
+        # majority of the adjusting.
+        if delta_time < 0:
+            weightings = [segment_time - segment_time_range[0]
+                          for segment_time, segment_time_range in zip(segment_times, segment_time_ranges)]
+        else:
+            weightings = [segment_time_range[1] - segment_time
+                          for segment_time, segment_time_range in zip(segment_times, segment_time_ranges)]
+        weightings_sum = sum(weightings)
+        segment_adjustments = [weighting / weightings_sum * delta_time for weighting in weightings]
+        for segment, segment_time, segment_adjustment in zip(adjustable_segments, segment_times, segment_adjustments):
+            segment.set_curvature_to_desired_integral(segment_time + segment_adjustment)
+        return True
+
+    def set_metric_phase_target_at_time(self, target_time, desired_beat_phase_or_phases, divisor=1.0):
+        """
+        Sets the goal phase in terms of beat at the given time. So, for instance, if we called
+        set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at beat 1.5, 2.5, 3.5 etc. at
+        time 5. If we called set_metric_phase_target_at_beat(7, 1.25, 3), this would mean that at time 7, we would want
+        to be at beat 1.25, 4.25, 7.25, etc.
+
+        :param target_time: The time at which to have the given phase in beat
+        :param desired_beat_phase_or_phases: either a single number or a list/tuple of numbers in the range [0, divisor)
+            representing the remainder in terms of beats.
+        :param divisor: the divisor with respect to which the desired phase is measured
+        :return True, if the adjustment is possible, False if not
+        """
+
+        envelope_end_time = self.time() + self.integrate_interval(self.beats(), self.end_time())
+        if target_time > envelope_end_time or target_time <= self.time():
+            raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
+
+        desired_beat_phase_or_phases = (desired_beat_phase_or_phases, ) \
+            if not hasattr(desired_beat_phase_or_phases, '__len__') else desired_beat_phase_or_phases
+        if not all(0 <= x < divisor for x in desired_beat_phase_or_phases):
+            raise ValueError("One or more phases out of range for divisor.")
+
+        # what's the current beat at the time?
+        beat_at_time = self.beats() + self.get_beat_wait_from_time_wait(target_time - self.time())
+        good_phase_beats = TempoEnvelope._get_nearest_remainders(beat_at_time, desired_beat_phase_or_phases, divisor)
+
+        # try to adjust to that one of those phases (starting with the closest)
+        for good_phase_beat in sorted(good_phase_beats, key=lambda x: abs(x - beat_at_time)):
+            if self._adjust_beat_at_time(target_time, good_phase_beat):
+                # the adjustment worked (returned true), so return True to say that we succeeded
+                return True
+
+        # if we get here, neither adjustment was possible, so we failed. Return false.
+        return False
+
+    def _adjust_beat_at_time(self, time_to_adjust, desired_beat):
+        envelope_end_time = self.time() + self.integrate_interval(self.beats(), self.end_time())
+        assert self.time() < time_to_adjust <= envelope_end_time
+
+        # make a copy of the original segments lists to fall back on in case we fail
+        back_up = deepcopy(self.segments)
+        current_beat_at_adjust_point = self.beats() + self.get_beat_wait_from_time_wait(time_to_adjust - self.time())
+
+        start_beat = self.insert_interpolated(self.beats())
+        # if the insertion does nothing because it's too close to an existing point, it will return the existing point
+        current_beat_at_adjust_point = self.insert_interpolated(current_beat_at_adjust_point)
+
+        adjustable_index_start = self._get_index_of_segment_at(self.beats(), right_most=True)
+        adjustable_index_end = self._get_index_of_segment_at(current_beat_at_adjust_point, left_most=True) + 1
+        adjustable_segments = self.segments[adjustable_index_start: adjustable_index_end]
+
+        # first we squeeze or stretch all the segments so that we reach the right beat at the end of the last one
+        delta_beat = desired_beat - current_beat_at_adjust_point
+        proportional_length_adjustment = (desired_beat - start_beat) / (current_beat_at_adjust_point - start_beat)
+
+        b = adjustable_segments[0].start_time
+        for segment in adjustable_segments:
+            old_dur = segment.duration
+            segment.start_time = b
+            segment.end_time = b = b + proportional_length_adjustment * old_dur
+
+        for segment in self.segments[adjustable_index_end:]:
+            segment.start_time += delta_beat
+            segment.end_time += delta_beat
+
+        # now that we squeezed or stretched so as to be at the correct moment in the curve, on the correct beat
+        # see if we can adjust the curvature of the segments so that the time at that moment is unchanged
+        if self._adjust_time_at_beat(desired_beat, time_to_adjust):
+            # if it works, return True
+            return True
+        else:
+            # otherwise, revert and return false
+            self.segments = back_up
+            return False
+
+    @staticmethod
+    def _get_nearest_remainders(value, desired_remainders, divisor):
+        floored_value = math.floor(value / divisor) * divisor
+        closest_below = None
+        closest_above = None
+        min_dist_below = float("inf")
+        min_dist_above = float("inf")
+        for base_multiple in (floored_value - divisor, floored_value, floored_value + divisor):
+            for remainder in desired_remainders:
+                this_value = base_multiple + remainder
+                if this_value < value and value - this_value < min_dist_below:
+                    closest_below = this_value
+                    min_dist_below = value - this_value
+                elif this_value >= value and this_value - value < min_dist_above:
+                    closest_above = this_value
+                    min_dist_above = this_value - value
+        return closest_below, closest_above
 
     def get_wait_time(self, beats):
         return self.integrate_interval(self._beats, self._beats + beats)

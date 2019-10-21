@@ -260,15 +260,20 @@ class Clock:
                                    duration_units=duration_units, truncate=truncate, loop=loop,
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
-    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0,
-                               duration_units="beats", truncate=True):
-        self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, duration_units, truncate)
+    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                               metric_phase_goal=None, phase_cycle_length=1.0):
+        self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, duration_units, truncate,
+                                                   metric_phase_goal, phase_cycle_length)
 
-    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True):
-        self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, duration_units, truncate)
+    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                        metric_phase_goal=None, phase_cycle_length=1.0):
+        self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, duration_units, truncate,
+                                            metric_phase_goal, phase_cycle_length)
 
-    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True):
-        self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, duration_units, truncate)
+    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True,
+                         metric_phase_goal=None, phase_cycle_length=1.0):
+        self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, duration_units, truncate,
+                                             metric_phase_goal, phase_cycle_length)
 
     def absolute_rate(self):
         absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.absolute_rate())
