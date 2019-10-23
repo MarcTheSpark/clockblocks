@@ -312,7 +312,7 @@ class TempoEnvelope(Envelope):
     def advance(self, beats, wait_time=None):
         if wait_time is None:
             wait_time = self.get_wait_time(beats)
-        self._beat += beats
+        self._beat = snap_float_to_nice_decimal(self._beat + beats)
         self._t = snap_float_to_nice_decimal(self._t + wait_time)
         return beats, wait_time
 
@@ -326,7 +326,7 @@ class TempoEnvelope(Envelope):
         return beats, seconds
 
     def go_to_beat(self, b):
-        self._beat = b
+        self._beat = snap_float_to_nice_decimal(b)
         self._t = snap_float_to_nice_decimal(self.integrate_interval(0, b))
         return self
 

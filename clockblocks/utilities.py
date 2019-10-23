@@ -32,10 +32,10 @@ def current_clock():
     return threading.current_thread().__clock__
 
 
-def wait(dt):
+def wait(dt, units="beats"):
     c = current_clock()
     if c is not None:
-        current_clock().wait(dt)
+        current_clock().wait(dt, units=units)
     else:
         time.sleep(dt)
 
