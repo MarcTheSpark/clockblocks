@@ -1,6 +1,7 @@
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
-from .utilities import snap_float_to_nice_decimal
+from .utilities import snap_float_to_nice_decimal, current_clock
+import logging
 import math
 
 
@@ -74,25 +75,27 @@ class TempoEnvelope(Envelope):
     def tempo_at(self, beat, from_left=False):
         return self.rate_at(beat, from_left) * 60
 
-    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                               metric_phase_goal=None, phase_cycle_length=1.0):
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
+    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, metric_phase_target=None,
+                               duration_units="beats", truncate=True):
+        if duration_units not in ("beats", "time"):
+            raise ValueError("Argument duration_units must be either \"beat\" or \"time\".")
+        if metric_phase_target is not None:
+            metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
+
         # truncate removes any segments that extend into the future
         if truncate:
             self.remove_segments_after(self.beat())
-
-        # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
-        if self.length() < self.beat():
-            # no explicit segments have been made for a while, insert a constant segment to bring us up to date
-            self.append_segment(self.end_level(), self.beat() - self.length())
+        # add a flat segment up to the current beat if needed
+        self._bring_up_to_date()
 
         if duration_units == "beats":
             extension_into_future = self.length() - self.beat()
             if duration < extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
-            if metric_phase_goal is not None:
-                self.set_metric_phase_target_at_beat(self.beat() + duration, metric_phase_goal, phase_cycle_length)
+            if metric_phase_target is not None:
+                if not self._adjust_segment_end_time_to_metric_phase_target(self.segments[-1], metric_phase_target):
+                    logging.warning("Metric phase target {} was not reachable".format(metric_phase_target))
         else:
             # units == "time", so we need to figure out how many beats are necessary
             time_extension_into_future = self.integrate_interval(self.beat(), self.length())
@@ -105,54 +108,76 @@ class TempoEnvelope(Envelope):
             ).integrate_segment(0, 1)
             desired_curve_length = duration - time_extension_into_future
             self.append_segment(beat_length_target, desired_curve_length / normalized_time, curve_shape)
-            if metric_phase_goal is not None:
-                self.set_metric_phase_target_at_time(self.time() + duration, metric_phase_goal, phase_cycle_length)
+            if metric_phase_target is not None:
+                if not self._adjust_segment_end_beat_to_metric_phase_target(self.segments[-1], metric_phase_target):
+                    logging.warning("Metric phase target {} was not reachable".format(metric_phase_target))
 
-    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                        metric_phase_goal=None, phase_cycle_length=1.0):
-        self.set_beat_length_target(1 / rate_target, duration, curve_shape, duration_units, truncate,
-                                    metric_phase_goal, phase_cycle_length)
+    def _adjust_segment_end_time_to_metric_phase_target(self, segment, metric_phase_target):
+        # this is confusing; segment.start_time and segment.end_time are really the start and end *beats*
+        segment_start_time = self.time() + self.integrate_interval(self.beat(), segment.start_time)
+        segment_end_time = segment_start_time + segment.integrate_segment(segment.start_time, segment.end_time)
+        for new_end_time in metric_phase_target.get_nearest_matching_times(segment_end_time):
+            try:
+                segment.set_curvature_to_desired_integral(new_end_time - segment_start_time)
+                return True
+            except ValueError:
+                pass
+        return False
 
-    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                         metric_phase_goal=None, phase_cycle_length=1.0):
-        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, duration_units, truncate,
-                                    metric_phase_goal, phase_cycle_length)
+    @staticmethod
+    def _adjust_segment_end_beat_to_metric_phase_target(segment, metric_phase_target):
+        # this is how long the segment currently takes; we want to end up with this being the same
+        original_integral = segment.integrate_segment(segment.start_time, segment.end_time)
+        for new_end_beat in metric_phase_target.get_nearest_matching_beats(segment.end_time):
+            try:
+                # shrink the segment
+                segment.end_time = new_end_beat
+                # and then try to change the curvature to return to the original time duration
+                segment.set_curvature_to_desired_integral(original_integral)
+                return True
+            except ValueError:
+                pass
+        return False
 
-    def set_metric_phase_target_at_beat(self, target_beat, desired_time_phase_or_phases, divisor=1.0):
+    def set_rate_target(self, rate_target, duration, curve_shape=0, metric_phase_target=None,
+                        duration_units="beats", truncate=True):
+        self.set_beat_length_target(1 / rate_target, duration, curve_shape, metric_phase_target,
+                                    duration_units, truncate)
+
+    def set_tempo_target(self, tempo_target, duration, curve_shape=0, metric_phase_target=None,
+                         duration_units="beats", truncate=True):
+        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, metric_phase_target,
+                                    duration_units, truncate)
+
+    def set_metric_phase_target_at_beat(self, beat, metric_phase_target):
         """
         Sets the goal phase in terms of time at the given beat. So, for instance, if we called
         set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
         beat 5. If we called set_metric_phase_target_at_beat(7, 1.25, 3), this would mean that at beat 7, we would want
         to be at time 1.25, 4.25, 7.25, etc.
 
-        :param target_beat: The beat at which to have the given phase in time
-        :param desired_time_phase_or_phases: either a single number or a list/tuple of numbers in the range [0, divisor)
-            representing the remainder in terms of time.
-        :param divisor: the divisor with respect to which the desired phase is measured
+        :param beat: The beat at which to have the given phase in time
+        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one
         :return True, if the adjustment is possible, False if not
         """
-        if target_beat > self.length() or target_beat <= self.beat():
+        if beat > self.length() or beat <= self.beat():
             raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
-        desired_time_phase_or_phases = (desired_time_phase_or_phases, ) \
-            if not hasattr(desired_time_phase_or_phases, '__len__') else desired_time_phase_or_phases
-        if not all(0 <= x < divisor for x in desired_time_phase_or_phases):
-            raise ValueError("One or more phases out of range for divisor.")
+
+        metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
 
         # what's the current time at the beat?
-        time_at_beat = self.time() + self.integrate_interval(self.beat(), target_beat)
-        # look at the nearest time before and after that time that satisfy the phase condition
-        good_phase_times = TempoEnvelope._get_nearest_remainders(time_at_beat, desired_time_phase_or_phases, divisor)
+        time_at_beat = self.time() + self.integrate_interval(self.beat(), beat)
 
-        # try to adjust to that one of those phases (starting with the closest)
-        for good_phase_time in sorted(good_phase_times, key=lambda x: abs(x - time_at_beat)):
-            if self._adjust_time_at_beat(target_beat, good_phase_time):
+        # try to adjust that to one of the nearby target phases
+        for good_phase_time in metric_phase_target.get_nearest_matching_times(time_at_beat):
+            if self.adjust_time_at_beat(beat, good_phase_time):
                 # the adjustment worked (returned true), so return True to say that we succeeded
                 return True
 
         # if we get here, neither adjustment was possible, so we failed. Return false.
         return False
 
-    def _adjust_time_at_beat(self, beat_to_adjust, desired_time):
+    def adjust_time_at_beat(self, beat_to_adjust, desired_time):
         """
         Adjusts the curvature of segments from now until beat so that we reach it at desired_time, if possible. If not
         possible, leaves the TempoCurve unchanged and returns False
@@ -161,13 +186,12 @@ class TempoEnvelope(Envelope):
         :param desired_time: the time we want to be at
         :return: True if the adjustment worked, False if it's impossible
         """
-        fudge_factor = 1e-7
-        assert self.beat() < beat_to_adjust <= self.length() + fudge_factor
+        assert self.beat() < beat_to_adjust <= self.length()
 
         # make a copy of the original segments lists to fall back on in case we fail
         back_up = deepcopy(self.segments)
-        self.insert_interpolated(self.beat(), min_difference=fudge_factor)
-        self.insert_interpolated(beat_to_adjust, min_difference=fudge_factor)
+        self.insert_interpolated(self.beat())
+        self.insert_interpolated(beat_to_adjust)
         adjustable_segments = self.segments[self._get_index_of_segment_at(self.beat(), right_most=True):
                                             self._get_index_of_segment_at(beat_to_adjust, left_most=True) + 1]
         # ranges of how long each segment could take by adjusting curvature
@@ -212,7 +236,7 @@ class TempoEnvelope(Envelope):
             segment.set_curvature_to_desired_integral(segment_time + segment_adjustment)
         return True
 
-    def set_metric_phase_target_at_time(self, target_time, desired_beat_phase_or_phases, divisor=1.0):
+    def set_metric_phase_target_at_time(self, target_time, metric_phase_target):
         """
         Sets the goal phase in terms of beat at the given time. So, for instance, if we called
         set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at beat 1.5, 2.5, 3.5 etc. at
@@ -220,9 +244,7 @@ class TempoEnvelope(Envelope):
         to be at beat 1.25, 4.25, 7.25, etc.
 
         :param target_time: The time at which to have the given phase in beat
-        :param desired_beat_phase_or_phases: either a single number or a list/tuple of numbers in the range [0, divisor)
-            representing the remainder in terms of beats.
-        :param divisor: the divisor with respect to which the desired phase is measured
+        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one
         :return True, if the adjustment is possible, False if not
         """
 
@@ -230,25 +252,21 @@ class TempoEnvelope(Envelope):
         if target_time > envelope_end_time or target_time <= self.time():
             raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
 
-        desired_beat_phase_or_phases = (desired_beat_phase_or_phases, ) \
-            if not hasattr(desired_beat_phase_or_phases, '__len__') else desired_beat_phase_or_phases
-        if not all(0 <= x < divisor for x in desired_beat_phase_or_phases):
-            raise ValueError("One or more phases out of range for divisor.")
+        metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
 
         # what's the current beat at the time?
         beat_at_time = self.beat() + self.get_beat_wait_from_time_wait(target_time - self.time())
-        good_phase_beats = TempoEnvelope._get_nearest_remainders(beat_at_time, desired_beat_phase_or_phases, divisor)
 
-        # try to adjust to that one of those phases (starting with the closest)
-        for good_phase_beat in sorted(good_phase_beats, key=lambda x: abs(x - beat_at_time)):
-            if self._adjust_beat_at_time(target_time, good_phase_beat):
+        # try to adjust that to one of the nearby target phases
+        for good_phase_beat in metric_phase_target.get_nearest_matching_beats(beat_at_time):
+            if self.adjust_beat_at_time(target_time, good_phase_beat):
                 # the adjustment worked (returned true), so return True to say that we succeeded
                 return True
 
         # if we get here, neither adjustment was possible, so we failed. Return false.
         return False
 
-    def _adjust_beat_at_time(self, time_to_adjust, desired_beat):
+    def adjust_beat_at_time(self, time_to_adjust, desired_beat):
         envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
         assert self.time() < time_to_adjust <= envelope_end_time
 
@@ -280,31 +298,13 @@ class TempoEnvelope(Envelope):
 
         # now that we squeezed or stretched so as to be at the correct moment in the curve, on the correct beat
         # see if we can adjust the curvature of the segments so that the time at that moment is unchanged
-        if self._adjust_time_at_beat(desired_beat, time_to_adjust):
+        if self.adjust_time_at_beat(desired_beat, time_to_adjust):
             # if it works, return True
             return True
         else:
             # otherwise, revert and return false
             self.segments = back_up
             return False
-
-    @staticmethod
-    def _get_nearest_remainders(value, desired_remainders, divisor):
-        floored_value = math.floor(value / divisor) * divisor
-        closest_below = None
-        closest_above = None
-        min_dist_below = float("inf")
-        min_dist_above = float("inf")
-        for base_multiple in (floored_value - divisor, floored_value, floored_value + divisor):
-            for remainder in desired_remainders:
-                this_value = base_multiple + remainder
-                if this_value < value and value - this_value < min_dist_below:
-                    closest_below = this_value
-                    min_dist_below = value - this_value
-                elif this_value >= value and this_value - value < min_dist_above:
-                    closest_above = this_value
-                    min_dist_above = this_value - value
-        return closest_below, closest_above
 
     def get_wait_time(self, beats):
         return self.integrate_interval(self._beat, self._beat + beats)
@@ -484,3 +484,68 @@ class TempoEnvelope(Envelope):
 
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(self.levels, self.durations, self.curve_shapes)
+
+
+class MetricPhaseTarget:
+
+    def __init__(self, phase_or_phases, divisor=1, relative=False):
+        self.phases = (phase_or_phases, ) if not hasattr(phase_or_phases, "__len__") else phase_or_phases
+        if not all(0 <= x < divisor for x in self.phases):
+            raise ValueError("One or more phases out of range for divisor.")
+        self.divisor = divisor
+        self.relative = relative
+
+    @classmethod
+    def interpret(cls, value):
+        """
+        Turn an input in the form of a tuple or just a number into a MetricPhaseTarget. E.g. we want the user to be able
+        to hand in a tuple like (0.5, 3) and have it get interpreted as a target of 0.5 with divisor 3.
+
+        :param value: either a tuple (which becomes the constructor arguments), a MetricPhaseTarget (which
+            is passed through unchanged), or a number which is treated as the phase with other args as defaults.
+        :return: A MetricPhaseTarget, interpreted from the argument
+        """
+        if isinstance(value, MetricPhaseTarget):
+            return value
+        elif hasattr(value, "__len__"):
+            return MetricPhaseTarget(*value)
+        else:
+            return MetricPhaseTarget(value)
+
+    def _get_nearest_matches(self, t, offset=0):
+        floored_value = math.floor(t / self.divisor) * self.divisor
+        closest_below = None
+        closest_above = None
+        min_dist_below = float("inf")
+        min_dist_above = float("inf")
+        for base_multiple in (floored_value - self.divisor, floored_value, floored_value + self.divisor):
+            for remainder in self.phases:
+                remainder = (remainder + offset) % self.divisor
+                this_value = base_multiple + remainder
+                if this_value < t and t - this_value < min_dist_below:
+                    closest_below = this_value
+                    min_dist_below = t - this_value
+                elif this_value >= t and this_value - t < min_dist_above:
+                    closest_above = this_value
+                    min_dist_above = this_value - t
+        # return the closest above and below in order of closeness
+        return closest_below, closest_above if min_dist_below <= min_dist_above else closest_above, closest_below
+
+    def get_nearest_matching_beats(self, beat):
+        if self.relative:
+            return self._get_nearest_matches(beat, current_clock().beat())
+        else:
+            return self._get_nearest_matches(beat)
+
+    def get_nearest_matching_times(self, time):
+        if self.relative:
+            return self._get_nearest_matches(time, current_clock().time())
+        else:
+            return self._get_nearest_matches(time)
+
+    def __repr__(self):
+        return "MetricPhaseTarget({}{}{})".format(
+            str(self.phases[0]) if hasattr(self.phases, "__len__") else self.phases,
+            (", " + str(self.divisor)) if self.divisor != 1 else "",
+            ", True" if self.relative else "",
+        )

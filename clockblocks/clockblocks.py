@@ -280,6 +280,63 @@ class Clock:
     #                                                  Tempo Mapping
     ##################################################################################################################
 
+    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, metric_phase_target=None,
+                               duration_units="beats", truncate=True):
+        """
+        Set a target beat length for this clock to reach in duration beats/seconds (with the unit defined by
+        duration_units).
+
+        :param beat_length_target: The beat length we want to reach
+        :param duration: How long until we reach that beat length
+        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
+        :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
+            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
+            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting this goal.
+        """
+        self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, metric_phase_target,
+                                                   duration_units, truncate)
+
+    def set_rate_target(self, rate_target, duration, curve_shape=0, metric_phase_target=None,
+                        duration_units="beats", truncate=True):
+        """
+        Set a target rate for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
+
+        :param duration: How long until we reach that tempo
+        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
+        :param metric_phase_target: This argument allows us to align the arrival at the given rate with a particular
+            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
+            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting this goal.
+        """
+        self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, metric_phase_target,
+                                            duration_units, truncate)
+
+    def set_tempo_target(self, tempo_target, duration, curve_shape=0, metric_phase_target=None,
+                         duration_units="beats", truncate=True):
+        """
+        Set a target tempo for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
+
+        :param tempo_target: The tempo we want to reach
+        :param duration: How long until we reach that tempo
+        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
+        :param metric_phase_target: This argument allows us to align the arrival at the given tempo with a particular
+            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
+            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting this goal.
+        """
+        self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, metric_phase_target,
+                                             duration_units, truncate)
+
     def _apply_tempo_envelope(self, levels, durations, curve_shapes=None, units="beatlength", duration_units="beats",
                               truncate=True, loop=False):
         envelope = TempoEnvelope.from_levels_and_durations(levels, durations, curve_shapes=curve_shapes, units=units,
@@ -368,21 +425,6 @@ class Clock:
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
-
-    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                               metric_phase_goal=None, phase_cycle_length=1.0):
-        self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, duration_units, truncate,
-                                                   metric_phase_goal, phase_cycle_length)
-
-    def set_rate_target(self, rate_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                        metric_phase_goal=None, phase_cycle_length=1.0):
-        self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, duration_units, truncate,
-                                            metric_phase_goal, phase_cycle_length)
-
-    def set_tempo_target(self, tempo_target, duration, curve_shape=0, duration_units="beats", truncate=True,
-                         metric_phase_goal=None, phase_cycle_length=1.0):
-        self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, duration_units, truncate,
-                                             metric_phase_goal, phase_cycle_length)
 
     ##################################################################################################################
     #                                                   Forking
