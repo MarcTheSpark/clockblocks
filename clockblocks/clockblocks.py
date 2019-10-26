@@ -277,7 +277,7 @@ class Clock:
         return 1 / self.absolute_rate()
 
     ##################################################################################################################
-    #                                                  Tempo Mapping
+    #                                                  Tempo Changes
     ##################################################################################################################
 
     def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, metric_phase_target=None,
@@ -305,6 +305,7 @@ class Clock:
         """
         Set a target rate for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
 
+        :param rate_target: The rate we want to reach
         :param duration: How long until we reach that tempo
         :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
         :param metric_phase_target: This argument allows us to align the arrival at the given rate with a particular
@@ -337,41 +338,103 @@ class Clock:
         self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, metric_phase_target,
                                              duration_units, truncate)
 
-    def _apply_tempo_envelope(self, levels, durations, curve_shapes=None, units="beatlength", duration_units="beats",
-                              truncate=True, loop=False):
-        envelope = TempoEnvelope.from_levels_and_durations(levels, durations, curve_shapes=curve_shapes, units=units,
-                                                           duration_units=duration_units)
-        # truncate removes any segments that extend into the future
-        if truncate:
-            self.tempo_envelope.remove_segments_after(self.beat())
+    def set_beat_length_targets(self, beat_length_targets, durations, curve_shapes=None, metric_phase_targets=None,
+                                duration_units="beats", truncate=True, loop=False):
+        """
+        Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
+        of the argument.
 
-        if self.tempo_envelope.length() == 0:
-            # if there's nothing to this clock's tempo envelope yet, we just replace it with the new one
-            self.tempo_envelope = envelope
-            if loop:
-                # but if we're looping the same envelope that we just set this clocks tempo_envelope to,
-                # we need to make a copy or we start adding an envelope to itself
-                self.envelope_loop_or_function = deepcopy(envelope)
-        else:
-            # if we're just appending to an existing envelope, then we don't need to make a deep copy if we loop
-            self.tempo_envelope.append_envelope(envelope)
-            if loop:
-                self.envelope_loop_or_function = envelope
+        :param beat_length_targets: list of the target beat_lengths
+        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
+        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
+        :param metric_phase_targets: list of metric phase targets for each segement (or None to ignore metric phase)
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting these targets.
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+            is called.
+        """
+        self.tempo_envelope.set_beat_length_targets(beat_length_targets, durations, curve_shapes, metric_phase_targets,
+                                                    duration_units, truncate)
+        if loop:
+            self._loop_segments(self.tempo_envelope.segments[-len(beat_length_targets):])
 
-    def apply_beat_length_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
-                                   truncate=True, loop=False):
-        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
-                                   units="beatlength", truncate=truncate, loop=loop)
+    def _loop_segments(self, segments_to_loop):
+        self.envelope_loop_or_function = TempoEnvelope.from_levels_and_durations(
+            [s.start_level for s in segments_to_loop] + [segments_to_loop[-1].end_level],
+            [s.duration for s in segments_to_loop],
+            [s.curve_shape for s in segments_to_loop],
+            units="beatlength"
+        )
 
-    def apply_rate_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
-                             truncate=True, loop=False):
-        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
-                                   units="rate", truncate=truncate, loop=loop)
+    def set_rate_targets(self, rate_targets, durations, curve_shapes=None, metric_phase_targets=None,
+                                duration_units="beats", truncate=True, loop=False):
+        """
+        Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
+        of the argument.
 
-    def apply_tempo_envelope(self, levels, durations, curve_shapes=None, duration_units="beats",
-                             truncate=True, loop=False):
-        self._apply_tempo_envelope(levels, durations, curve_shapes=curve_shapes, duration_units=duration_units,
-                                   units="tempo", truncate=truncate, loop=loop)
+        :param rate_targets: list of the target rates
+        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
+        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting these targets.
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+            is called.
+        """
+        self.tempo_envelope.set_rate_targets(rate_targets, durations, curve_shapes, metric_phase_targets,
+                                             duration_units, truncate)
+        if loop:
+            self._loop_segments(self.tempo_envelope.segments[-len(rate_targets):])
+
+    def set_tempo_targets(self, tempo_targets, durations, curve_shapes=None, metric_phase_targets=None,
+                          duration_units="beats", truncate=True, loop=False):
+        """
+        Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
+        of the argument.
+
+        :param tempo_targets: list of the target tempos
+        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
+        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
+        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
+            seconds/parent beats.
+        :param truncate: Whether or not to delete all future tempo plans before setting these targets.
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+            is called.
+        """
+        self.tempo_envelope.set_tempo_targets(tempo_targets, durations, curve_shapes, metric_phase_targets,
+                                              duration_units, truncate)
+        if loop:
+            self._loop_segments(self.tempo_envelope.segments[-len(tempo_targets):])
+
+    def stop_looping_tempo_targets(self):
+        """
+        If we set up a looping list of tempo targets, this stops that looping process. It also stops extending any
+        tempo function that we set up to go indefinitely.
+        """
+        self.envelope_loop_or_function = None
+
+    # --------------------------------------------- Tempo Functions -------------------------------------------------
+
+    def apply_beat_length_function(self, function, domain_start=0, domain_end=None, duration_units="beats",
+                                   truncate=False, loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+
+    def apply_rate_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
+                            loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="rate",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+
+    def apply_tempo_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
+                             loop=False, extension_increment=1.0, resolution_multiple=2):
+        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
+                                   duration_units=duration_units, truncate=truncate, loop=loop,
+                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
     def _apply_tempo_function(self, function, domain_start=0, domain_end=None, units="beatlength",
                               duration_units="beats", truncate=False, loop=False, extension_increment=1.0,
@@ -407,24 +470,6 @@ class Clock:
                 self.tempo_envelope.append_envelope(envelope)
                 if loop:
                     self.envelope_loop_or_function = envelope
-
-    def apply_beat_length_function(self, function, domain_start=0, domain_end=None, duration_units="beats",
-                                   truncate=False, loop=False, extension_increment=1.0, resolution_multiple=2):
-        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
-                                   duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
-
-    def apply_rate_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
-                            loop=False, extension_increment=1.0, resolution_multiple=2):
-        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="rate",
-                                   duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
-
-    def apply_tempo_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
-                             loop=False, extension_increment=1.0, resolution_multiple=2):
-        self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
-                                   duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
     ##################################################################################################################
     #                                                   Forking

@@ -9,8 +9,8 @@ def child_process_1(clock: Clock):
 
 
 def child_process_2(clock: Clock):
-    clock.apply_tempo_envelope([70, 90, 90, 55, 85, 70], [2, 1.5, 2.5, 1.5, 1.0],
-                               curve_shapes=[0, 3, 0, -2, 0], loop=True)
+    clock.tempo = 70
+    clock.set_tempo_targets([90, 90, 55, 85, 70], [2, 3.5, 6, 7.5, 8.0], curve_shapes=[0, 3, 0, -2, 0], loop=True)
     while clock.time() < 40:
         clock.wait(1, units="time")
 

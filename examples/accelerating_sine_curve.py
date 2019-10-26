@@ -14,8 +14,7 @@ def child_process():
 
 child = master.fork(child_process)
 
-sin_env = TempoEnvelope.from_function(lambda x: 1 + math.sin(x) / 4, 0, 100, units="rate")
-child.apply_tempo_envelope(TempoEnvelope.from_function(lambda x: 1 + math.sin(x) / 4, 0, 40, units="rate"))
+child.apply_rate_function(lambda x: 1 + math.sin(x) / 4, 0, 40)
 
 master.fast_forward_in_beats(10)
 master.wait(10)

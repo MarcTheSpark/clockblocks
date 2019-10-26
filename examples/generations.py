@@ -29,7 +29,7 @@ def child_process(my_clock: Clock):
     while my_clock.beat() < 4:
         print("{} at beat {}".format(my_clock.name, my_clock.beat()))
         wait(1)
-    my_clock.fork(grandchild_process, "GRANDCHILD")
+    my_clock.fork(grandchild_process, name="GRANDCHILD")
     my_clock.wait_for_children_to_finish()
 
 
@@ -47,5 +47,5 @@ master.set_tempo_target(180, 40)
 while master.beat() < 40:
     print("{} at beat {}".format(master.name, master.beat()))
     if master.beat() % 8 == 0:
-        master.fork(child_process, "CHILD", initial_tempo=120)
+        master.fork(child_process, name="CHILD", initial_tempo=120)
     wait(1)
