@@ -10,6 +10,7 @@ from .utilities import _PrintColors
 from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering
 import textwrap
+from .event_queue import EventQueue
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -23,7 +24,7 @@ class ClockKilledException(Exception):
 class Clock:
 
     def __init__(self, name=None, parent=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
-                 timing_policy=0.98, synchronization_policy=None, pool_size=200):
+                 timing_policy=0.98, synchronization_policy=None, pool_size=200, precise_schedule_latency=None):
         """
         Recursively nestable clock class. Clocks can fork child-clocks, which can in turn fork their own child-clock.
         Only the master clock calls sleep; child-clocks instead register WakeUpCalls with their parents, who
@@ -92,12 +93,24 @@ class Clock:
             # the master clock also holds onto a dictionary of time stamp data
             # (i.e. a dictionary of (time_in_master -> {clock: beat in clock for clock in master.all_descendants}
             self.time_stamp_data = {}
+
+            if precise_schedule_latency is not None:
+                # if we're using precise_schedule latency, we don't try to be precise on the master clock
+                # instead we save the busy-wait based precision for the EventQueue
+                self.sleep_until_function = lambda t: self._wait_event.wait(timeout=t - time.time())
+                self.precise_schedule_event_cue = EventQueue(precise_schedule_latency)
+                self.precise_schedule_event_cue.run()
+            else:
+                self.sleep_until_function = lambda t: sleep_precisely_until(t, self._wait_event)
+                self.precise_schedule_event_cue = None
         else:
             # All other clocks just use self.master._pool
             self._pool = None
             self._pool_semaphore = None
             # no need for this unless on the master clock
             self.time_stamp_data = None
+            if precise_schedule_latency is not None:
+                logging.warning("Setting precise_schedule_latency on a child clock has no effect")
 
         # these are set on the first call to "wait"; this way, any processing at the very beginning is ignored
         self._last_sleep_time = self._start_time = None
@@ -825,6 +838,28 @@ class Clock:
     def is_fast_forwarding(self):
         # same as asking if this clock's master clock is fast-forwarding
         return self.master._fast_forward_goal is not None
+
+    ##################################################################################################################
+    #                                             Scheduling with Precision
+    ##################################################################################################################
+
+    def schedule_precisely_with_latency(self, func, args=(), kwargs=None, extra_latency=0):
+        kwargs = {} if kwargs is None else kwargs
+        if self.master.precise_schedule_event_cue is None:
+            if extra_latency != 0:
+                raise ValueError("Extra latency can only be applied when scheduling with latency, and master "
+                                 "clock was created with no latency.")
+            func(*args, **kwargs)
+        else:
+            if self.master._start_time is None:  # this would be the case if we haven't waited yet
+                self.master._last_sleep_time = self.master._start_time = time.time()
+
+            self.master.precise_schedule_event_cue.add_to_queue(
+                self.time_in_master() + self.master._start_time + extra_latency, func, args, kwargs
+            )
+
+    def precise_scheduling_on(self):
+        return self.master.precise_schedule_event_cue is not None
 
     ##################################################################################################################
     #                                                 Other Utilities
