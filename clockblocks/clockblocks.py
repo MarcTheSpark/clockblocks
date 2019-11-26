@@ -662,7 +662,7 @@ class Clock:
         # make sure any timestamps for this moment have all clocks represented in them
         self._complete_timestamp_data()
 
-        end_time = self._get_wait_end_time_and_extend_envelopes(dt, units)
+        end_time = self._get_wait_end_time(dt, units)
 
         # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before or exactly when we're done waiting here on the master clock
@@ -719,13 +719,33 @@ class Clock:
                 child.tempo_envelope.advance_time(self.beat() - (child.parent_offset + child.time()))
                 child._catch_up_children()
 
-    def _get_wait_end_time_and_extend_envelopes(self, dt, units):
-        end_time = self.beat() + dt if units == "beats" \
+    def _get_wait_end_time(self, dt, units):
+        end_beat = self.beat() + dt if units == "beats" \
             else self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
         # if we have a looping tempo envelope or an endless tempo function, and we're going right up
         # to or past the end of what's already been charted out, then we extend it before waiting
-        while end_time >= self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+        extension_needed = self._extend_looping_envelopes_if_needed(end_beat)
+
+        if extension_needed and units == "time":
+            # if we're using time units, and we added an extention, then we need to recalculate the end time based on
+            # the new information about how the tempo envelope extends
+            end_beat = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+
+        return end_beat
+
+    def _extend_looping_envelopes_if_needed(self, beat_to_extend_to):
+        """
+        Call this function if there's a looping envelope or tempo function and we need to build it out more.
+
+        :param beat_to_extend_to: the beat we need to extend the envelope to
+        :return: True if an extension was needed, false otherwise
+        """
+        extension_needed = False
+
+        while beat_to_extend_to >= self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+            extension_needed = True
+
             if isinstance(self.envelope_loop_or_function, TempoEnvelope):
                 self.tempo_envelope.append_envelope(self.envelope_loop_or_function)
             else:
@@ -756,12 +776,7 @@ class Clock:
                 self.envelope_loop_or_function = (function, next_key_point, extension_increment,
                                                   function_units, function_duration_units, resolution_multiple)
 
-            if units == "time":
-                # if we're using time units then we need to recalculate the end time based on the new information
-                # about how the tempo envelope extends
-                end_time = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
-
-        return end_time
+        return extension_needed
 
     def _advance_tempo_map_to_beat(self, beat):
         self.tempo_envelope.advance(beat - self.beat())
@@ -838,6 +853,24 @@ class Clock:
 
     def stop_logging_processing_time(self):
         self._log_processing_time = False
+
+    def get_time_increments_from_beat_increments(self, increments):
+        beat = self.beat()
+        time_increments = []
+        for increment in increments:
+            time_increments.append(
+                (self.tempo_envelope.value_at(beat) + self.tempo_envelope.value_at(beat + increment)) / 2 * increment
+            )
+            beat += increment
+            self._extend_looping_envelopes_if_needed(beat)
+        return time_increments
+
+    def get_absolute_time_increments_from_beat_increments(self, increments):
+        clock = self
+        while not clock.is_master():
+            increments = clock.get_time_increments_from_beat_increments(increments)
+            clock = clock.parent
+        return clock.get_time_increments_from_beat_increments(increments)
 
     def extract_absolute_tempo_envelope(self, start_beat=0, step_size=0.1, tolerance=0.005):
         if self.is_master():
