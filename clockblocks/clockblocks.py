@@ -98,11 +98,11 @@ class Clock:
                 # if we're using precise_schedule latency, we don't try to be precise on the master clock
                 # instead we save the busy-wait based precision for the EventQueue
                 self.sleep_until_function = lambda t: self._wait_event.wait(timeout=t - time.time())
-                self.precise_schedule_event_cue = EventQueue(precise_schedule_latency)
-                self.precise_schedule_event_cue.run()
+                self.precise_schedule_event_queue = EventQueue(precise_schedule_latency, running_behind_warning_threshold=0.01)
+                self.precise_schedule_event_queue.run()
             else:
                 self.sleep_until_function = lambda t: sleep_precisely_until(t, self._wait_event)
-                self.precise_schedule_event_cue = None
+                self.precise_schedule_event_queue = None
         else:
             # All other clocks just use self.master._pool
             self._pool = None
@@ -636,11 +636,13 @@ class Clock:
             # we throw a warning that we're getting behind and don't try to sleep at all
             if stop_sleeping_time < time.time() - 0.01:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
-                logging.warning(
-                    "Clock is running noticeably behind real time ({} s) on a wait call of {} s; "
-                    "probably processing is too heavy.".format(
-                        round(time.time() - stop_sleeping_time, 5), round(dt, 5))
-                )
+                # If we're using an EventQueue, though, we leave it up to that queue to complain about being behind
+                if not self.precise_scheduling_on():
+                    logging.warning(
+                        "Clock is running noticeably behind real time ({} s) on a wait call of {} s; "
+                        "probably processing is too heavy.".format(
+                            round(time.time() - stop_sleeping_time, 5), round(dt, 5))
+                    )
                 self.running_behind_warning_count += 1
             elif stop_sleeping_time < time.time():
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
@@ -675,7 +677,7 @@ class Clock:
         # make sure any timestamps for this moment have all clocks represented in them
         self._complete_timestamp_data()
 
-        end_time = self._get_wait_end_time_and_extend_envelopes(dt, units)
+        end_time = self._get_wait_end_time(dt, units)
 
         # while there are wake up calls left to do amongst the children, and those wake up calls
         # would take place before or exactly when we're done waiting here on the master clock
@@ -708,7 +710,8 @@ class Clock:
         elif self._resolve_synchronization_policy() == "all descendants":
             self._catch_up_children()
         calc_time = time.time() - start
-        if calc_time > (0.003 if self.master.running_behind_warning_count == 0 else 0.001):
+        if calc_time > (0.003 if self.master.running_behind_warning_count == 0 else 0.001) \
+                and not self.precise_scheduling_on():
             # throw a warning if catching up child clocks is being slow. Be more picky if the master is getting behind
             logging.warning("Catching up child clocks is taking a little while ({} seconds to be precise) on "
                             "clock {}. \nUnless you are recording on a child or cousin clock, you can safely turn this "
@@ -732,13 +735,33 @@ class Clock:
                 child.tempo_envelope.advance_time(self.beat() - (child.parent_offset + child.time()))
                 child._catch_up_children()
 
-    def _get_wait_end_time_and_extend_envelopes(self, dt, units):
-        end_time = self.beat() + dt if units == "beats" \
+    def _get_wait_end_time(self, dt, units):
+        end_beat = self.beat() + dt if units == "beats" \
             else self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
         # if we have a looping tempo envelope or an endless tempo function, and we're going right up
         # to or past the end of what's already been charted out, then we extend it before waiting
-        while end_time >= self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+        extension_needed = self._extend_looping_envelopes_if_needed(end_beat)
+
+        if extension_needed and units == "time":
+            # if we're using time units, and we added an extention, then we need to recalculate the end time based on
+            # the new information about how the tempo envelope extends
+            end_beat = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+
+        return end_beat
+
+    def _extend_looping_envelopes_if_needed(self, beat_to_extend_to):
+        """
+        Call this function if there's a looping envelope or tempo function and we need to build it out more.
+
+        :param beat_to_extend_to: the beat we need to extend the envelope to
+        :return: True if an extension was needed, false otherwise
+        """
+        extension_needed = False
+
+        while beat_to_extend_to >= self.tempo_envelope.end_time() and self.envelope_loop_or_function is not None:
+            extension_needed = True
+
             if isinstance(self.envelope_loop_or_function, TempoEnvelope):
                 self.tempo_envelope.append_envelope(self.envelope_loop_or_function)
             else:
@@ -769,12 +792,7 @@ class Clock:
                 self.envelope_loop_or_function = (function, next_key_point, extension_increment,
                                                   function_units, function_duration_units, resolution_multiple)
 
-            if units == "time":
-                # if we're using time units then we need to recalculate the end time based on the new information
-                # about how the tempo envelope extends
-                end_time = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
-
-        return end_time
+        return extension_needed
 
     def _advance_tempo_map_to_beat(self, beat):
         self.tempo_envelope.advance(beat - self.beat())
@@ -845,7 +863,7 @@ class Clock:
 
     def schedule_precisely_with_latency(self, func, args=(), kwargs=None, extra_latency=0):
         kwargs = {} if kwargs is None else kwargs
-        if self.master.precise_schedule_event_cue is None:
+        if self.master.precise_schedule_event_queue is None:
             if extra_latency != 0:
                 raise ValueError("Extra latency can only be applied when scheduling with latency, and master "
                                  "clock was created with no latency.")
@@ -854,12 +872,12 @@ class Clock:
             if self.master._start_time is None:  # this would be the case if we haven't waited yet
                 self.master._last_sleep_time = self.master._start_time = time.time()
 
-            self.master.precise_schedule_event_cue.add_to_queue(
+            self.master.precise_schedule_event_queue.add_to_queue(
                 self.time_in_master() + self.master._start_time + extra_latency, func, args, kwargs
             )
 
     def precise_scheduling_on(self):
-        return self.master.precise_schedule_event_cue is not None
+        return self.master.precise_schedule_event_queue is not None
 
     ##################################################################################################################
     #                                                 Other Utilities
@@ -873,6 +891,24 @@ class Clock:
 
     def stop_logging_processing_time(self):
         self._log_processing_time = False
+
+    def get_time_increments_from_beat_increments(self, increments):
+        beat = self.beat()
+        time_increments = []
+        for increment in increments:
+            time_increments.append(
+                (self.tempo_envelope.value_at(beat) + self.tempo_envelope.value_at(beat + increment)) / 2 * increment
+            )
+            beat += increment
+            self._extend_looping_envelopes_if_needed(beat)
+        return time_increments
+
+    def get_absolute_time_increments_from_beat_increments(self, increments):
+        clock = self
+        while not clock.is_master():
+            increments = clock.get_time_increments_from_beat_increments(increments)
+            clock = clock.parent
+        return clock.get_time_increments_from_beat_increments(increments)
 
     def extract_absolute_tempo_envelope(self, start_beat=0, step_size=0.1, tolerance=0.005):
         if self.is_master():
