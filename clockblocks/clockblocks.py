@@ -20,6 +20,11 @@ class ClockKilledException(Exception):
     pass
 
 
+class WokenEarlyException(Exception):
+    """Exception raised when master clock is woken up during its wait call."""
+    pass
+
+
 class Clock:
 
     def __init__(self, name=None, parent=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
@@ -77,9 +82,16 @@ class Clock:
 
         # how long had my parent been around when I was created
         self.parent_offset = self.parent.beat() if self.parent is not None else 0
-        # will use these if not master clock
-        self._ready_and_waiting = False
+        # boolean marking whether this clock is in the middle of a wait call, and event used for that wait call
+        self._dormant = False
         self._wait_event = threading.Event()
+        # this is used to keep the master clock in a state of suspended animation after it is roused by an
+        # external thread. It is allowed to wake and re-orient (calculate beats and times), but not start sleeping
+        # (this is important, because the external thread might change its tempo)
+        # by default, _suspend_event remains set, and so doesn't block anything. When we want it to block, we clear it.
+        self._suspend_event = threading.Event()
+        self._suspended = False
+        self._suspend_event.set()
 
         if self.is_master():
             # The thread pool runs on the master clock
@@ -532,7 +544,7 @@ class Clock:
         # Allow the new child to run until it hits a wait call. This is quite important; if we don't do this,
         # the master clock may end up not seeing any queued events and go to sleep for a while before this newly
         # forked process sets if first wake up call.
-        while child in self._children and not child._ready_and_waiting:
+        while child in self._children and not child._dormant:
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
@@ -570,7 +582,7 @@ class Clock:
         If master clock, sleeps precisely for dt seconds (with adjustments based on timing policy / fast forwarding)
         Otherwise registers a wake up time with parent clock and pauses execution.
         NB: Should not be called directly, since this doesn't actually advance the tempo clock; instead call
-        clock.wait(dt, units="time")
+        clock.wait(dt, units)
 
         :param dt: how many beats to wait on the parent clock
         """
@@ -633,13 +645,16 @@ class Clock:
                 # we're running a tiny bit behind, but not noticeably, so just don't sleep and let it be what it is
                 pass
             else:
-                self._ready_and_waiting = True
+                self._dormant = True
                 sleep_precisely_until(stop_sleeping_time, self._wait_event)
-                self._ready_and_waiting = False
+                self._dormant = False
+                if self._wait_event.is_set():
+                    self._wait_event.clear()
+                    raise WokenEarlyException()
         else:
             self.parent._queue.append(_WakeUpCall(self.parent.beat() + dt, self))
             self.parent._queue.sort(key=lambda x: x.t)
-            self._ready_and_waiting = True
+            self._dormant = True
             self._wait_event.wait()
             if self._killed:
                 raise ClockKilledException()
@@ -654,39 +669,35 @@ class Clock:
             raise ValueError("Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\".".format(units))
 
         # wait for any and all children to schedule their next wake up call and call wait()
-        while not all(child._ready_and_waiting for child in self._children):
+        while not all(child._dormant for child in self._children):
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
 
         # make sure any timestamps for this moment have all clocks represented in them
+        # (since some new clocks may have been forked since they were created in one of the threads)
         self._complete_timestamp_data()
 
-        end_time = self._get_wait_end_time(dt, units)
+        end_beat = self._get_wait_end_beat(dt, units)
 
-        # while there are wake up calls left to do amongst the children, and those wake up calls
-        # would take place before or exactly when we're done waiting here on the master clock
-        while len(self._queue) > 0 and self._queue[0].t <= end_time:
-            # find the next wake up call
-            next_wake_up_call = self._queue.pop(0)
-            wake_up_beat = next_wake_up_call.t
-            beats_till_wake = wake_up_beat - self.beat()
-            self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
-            self._advance_tempo_map_to_beat(wake_up_beat)
-            # tell the process of the clock being woken to go ahead and do it's thing
-            next_wake_up_call.clock._ready_and_waiting = False  # this flag tells us when that process hits a new wait
-            next_wake_up_call.clock._wait_event.set()
+        try:
+            # while there are wake up calls left to do amongst the children, and those wake up calls
+            # would take place before or exactly when we're done waiting here on the master clock
+            while len(self._queue) > 0 and self._queue[0].t <= end_beat:
+                self._handle_next_wakeup_call()
 
-            # wait for the child clock that we woke up to finish processing, or to finish altogether
-            while next_wake_up_call.clock in self._children and not next_wake_up_call.clock._ready_and_waiting:
-                # note that sleeping a tiny amount is better than a straight while loop,
-                # which slows down the other threads with its greediness
-                time.sleep(0.000001)
+            # if we exit the while loop, that means that there is no one in the queue (meaning no children),
+            # or the first wake up call is scheduled for after this wait is to end. So we can safely wait.
+            self._wait_in_parent(self.tempo_envelope.get_wait_time(end_beat - self.beat()))
+            beats_passed = end_beat - self.beat()
+            woken_early = False
+        except WokenEarlyException:
+            # (master) clock was roused part-way through the wait call (usually from a thread outside the clock system)
+            time_passed = time.time() - self._last_sleep_time
+            beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+            woken_early = True
 
-        # if we exit the while loop, that means that there is no one in the queue (meaning no children),
-        # or the first wake up call is scheduled for after this wait is to end. So we can safely wait.
-        self._wait_in_parent(self.tempo_envelope.get_wait_time(end_time - self.beat()))
-        self.tempo_envelope.advance(end_time - self.beat())
+        self.tempo_envelope.advance(beats_passed)
 
         # see explanation of synchronization_policy above
         start = time.time()
@@ -702,6 +713,33 @@ class Clock:
                             "off by setting the synchronization_policy for this clock (or for the master clock) to "
                             "\"no synchronization\"".format(calc_time, current_clock().name))
             self.master.running_behind_warning_count = 0
+
+        # this only stops us if _suspend_event has been cleared
+        # (which happens when we rouse the clock with suspend=True)
+        self._suspended = True
+        self._suspend_event.wait()
+        self._suspended = False
+        # if the (master) clock was roused mid-wait, wait the rest of the time
+        if woken_early:
+            self.wait(end_beat - self.beat())
+
+    def _handle_next_wakeup_call(self):
+        # find the next wake up call
+        next_wake_up_call = self._queue[0]
+        wake_up_beat = next_wake_up_call.t
+        beats_till_wake = wake_up_beat - self.beat()
+        self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
+        self._queue.pop(0)  # we only pop the wake up call if _wait_in_parent doesn't throw a WokenEarlyException
+        self._advance_tempo_map_to_beat(wake_up_beat)
+        # tell the process of the clock being woken to go ahead and do it's thing
+        next_wake_up_call.clock._dormant = False  # this flag tells us when that process hits a new wait
+        next_wake_up_call.clock._wait_event.set()
+
+        # wait for the child clock that we woke up to finish processing, or to finish altogether
+        while next_wake_up_call.clock in self._children and not next_wake_up_call.clock._dormant:
+            # note that sleeping a tiny amount is better than a straight while loop,
+            # which slows down the other threads with its greediness
+            time.sleep(0.000001)
 
     def _complete_timestamp_data(self):
         # if this is the master clock and a time stamp has been created for this moment
@@ -719,7 +757,7 @@ class Clock:
                 child.tempo_envelope.advance_time(self.beat() - (child.parent_offset + child.time()))
                 child._catch_up_children()
 
-    def _get_wait_end_time(self, dt, units):
+    def _get_wait_end_beat(self, dt, units):
         end_beat = self.beat() + dt if units == "beats" \
             else self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
 
@@ -786,7 +824,7 @@ class Clock:
             self._last_sleep_time = self._start_time = time.time()
 
         # wait for any and all children to schedule their next wake up call and call wait()
-        while not all(child._ready_and_waiting for child in self._children):
+        while not all(child._dormant for child in self._children):
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
@@ -794,27 +832,41 @@ class Clock:
         # make sure any timestamps for this moment have all clocks represented in them
         self._complete_timestamp_data()
 
-        # while there are wake up calls left to do amongst the children, and those wake up calls
-        # would take place before we're done waiting here on the master clock
+        # while there are wake up calls left to do amongst the children
         while len(self._queue) > 0:
-            # find the next wake up call
-            next_wake_up_call = self._queue.pop(0)
-            wake_up_beat = next_wake_up_call.t
-            beats_till_wake = wake_up_beat - self.beat()
-            self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
-            self._advance_tempo_map_to_beat(wake_up_beat)
-            next_wake_up_call.clock._ready_and_waiting = False
-            next_wake_up_call.clock._wait_event.set()
-
-            # wait for the child clock that we woke up to finish processing, or to finish altogether
-            while next_wake_up_call.clock in self._children and not next_wake_up_call.clock._ready_and_waiting:
-                # note that sleeping a tiny amount is better than a straight while loop,
-                # which slows down the other threads with its greediness
-                time.sleep(0.000001)
+            self._handle_next_wakeup_call()
 
     def wait_forever(self):
         while True:
             self.wait(1.0)
+
+    def rouse(self, suspend=False):
+        if current_clock() == self.master:
+            # if we're already on the master clock thread, it's already roused, since we could call this function
+            return
+        if self.is_master():
+            if suspend:
+                # this will cause the master clock to suspend once it reorients, until release_from_suspension is called
+                self._suspend_event.clear()
+
+            # if the master clock is waiting, rouse it and let it orient itself and its children
+            if self._dormant:
+                self._dormant = False
+                self._wait_event.set()  # this will trigger a WokenEarlyException in the master's wait call
+
+            if suspend:
+                # if we're putting the clock into suspended animation, wait for it to have reoriented and suspended
+                while not self._suspended:
+                    time.sleep(0.000001)
+            else:
+                # otherwise, wait for it to have re-oriented and gone back to sleep
+                while not self._dormant:
+                    time.sleep(0.000001)
+        else:
+            self.master.rouse()
+
+    def release_from_suspension(self):
+        self._suspend_event.set()
 
     ##################################################################################################################
     #                                                 Fast-forwarding
