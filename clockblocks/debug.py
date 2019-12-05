@@ -6,7 +6,7 @@ multi_thread_log = []
 
 def log_multi(position, *comment_args):
     # useful for keeping track of the order of events between different threads
-    comment = ""
+    comment = ": "
     for i in range(0, len(comment_args), 2):
         if i != 0:
             comment += ", "
@@ -14,7 +14,9 @@ def log_multi(position, *comment_args):
             comment += "{}={}".format(comment_args[i], comment_args[i+1])
         else:
             comment += comment_args[i]
-    multi_thread_log.append("Clock {} at checkpoint {}: {}".format(current_clock().name, position, comment))
+    multi_thread_log.append("Clock {} at checkpoint {}{}".format(
+        current_clock().name, position, comment if len(comment_args) > 0 else ""
+    ))
 
 
 def print_multi_log(how_many):
