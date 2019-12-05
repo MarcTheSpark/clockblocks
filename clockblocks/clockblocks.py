@@ -36,8 +36,9 @@ class Clock:
 
         :param name (optional): can be useful for keeping track in confusing multi-threaded situations
         :param parent: the parent clock for this clock; a value of None indicates the master clock
-        :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
-            has an effect if this is the master clock.
+        :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
+        :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
+        :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
         :param timing_policy: either "relative", "absolute", or a float between 0 and 1 representing a balance between
             the two. "relative" attempts to keeps each wait call as faithful as possible to what it should be. This can
             result in the clock getting behind real time, since if heavy processing causes us to get behind on one note
@@ -59,6 +60,8 @@ class Clock:
             if it's slowing things down. The value "inherit" means that this clock inherits its synchronization policy from
             its master. If no value is specified, then it defaults to "all relatives" for the master clock and "inherit"
             for all descendants, which in practice means that all clocks will synchronize with all relatives upon waking.
+        :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
+            has an effect if this is the master clock.
         """
         self.name = name
         self.parent = parent
@@ -668,11 +671,7 @@ class Clock:
         if units not in ("beats", "time"):
             raise ValueError("Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\".".format(units))
 
-        # wait for any and all children to schedule their next wake up call and call wait()
-        while not all(child._dormant for child in self._children):
-            # note that sleeping a tiny amount is better than a straight while loop,
-            # which slows down the other threads with its greediness
-            time.sleep(0.000001)
+        self._wait_for_children_to_finish_processing()
 
         # make sure any timestamps for this moment have all clocks represented in them
         # (since some new clocks may have been forked since they were created in one of the threads)
@@ -698,8 +697,26 @@ class Clock:
             woken_early = True
 
         self.tempo_envelope.advance(beats_passed)
+        self._synchronize_children()
 
-        # see explanation of synchronization_policy above
+        # this only stops us if _suspend_event has been cleared
+        # (which happens when we rouse the clock with suspend=True)
+        self._suspended = True
+        self._suspend_event.wait()
+        self._suspended = False
+
+        # if the (master) clock was roused mid-wait, wait the rest of the time
+        if woken_early:
+            self.wait(end_beat - self.beat())
+
+    def _wait_for_children_to_finish_processing(self):
+        while not all(child._dormant for child in self._children):
+            # note that sleeping a tiny amount is better than a straight while loop,
+            # which slows down the other threads with its greediness
+            time.sleep(0.000001)
+
+    def _synchronize_children(self):
+        # see explanation of synchronization_policy in constructor
         start = time.time()
         if self._resolve_synchronization_policy() == "all relatives":
             self.master._catch_up_children()
@@ -714,15 +731,6 @@ class Clock:
                             "\"no synchronization\"".format(calc_time, current_clock().name))
             self.master.running_behind_warning_count = 0
 
-        # this only stops us if _suspend_event has been cleared
-        # (which happens when we rouse the clock with suspend=True)
-        self._suspended = True
-        self._suspend_event.wait()
-        self._suspended = False
-        # if the (master) clock was roused mid-wait, wait the rest of the time
-        if woken_early:
-            self.wait(end_beat - self.beat())
-
     def _handle_next_wakeup_call(self):
         # find the next wake up call
         next_wake_up_call = self._queue[0]
@@ -734,9 +742,11 @@ class Clock:
         # tell the process of the clock being woken to go ahead and do it's thing
         next_wake_up_call.clock._dormant = False  # this flag tells us when that process hits a new wait
         next_wake_up_call.clock._wait_event.set()
+        self._wait_for_child_to_finish_processing(next_wake_up_call.clock)
 
-        # wait for the child clock that we woke up to finish processing, or to finish altogether
-        while next_wake_up_call.clock in self._children and not next_wake_up_call.clock._dormant:
+    def _wait_for_child_to_finish_processing(self, child_clock):
+        # wait for the child clock that we woke up either to finish completely or to finish processing
+        while child_clock in self._children and not child_clock._dormant:
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
