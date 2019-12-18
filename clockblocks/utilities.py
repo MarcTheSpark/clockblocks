@@ -46,8 +46,8 @@ def fork(process_function, name="", initial_rate=None, initial_tempo=None, initi
     if clock is None:
         raise Exception("Cannot fork function: there is no running clock.")
     else:
-        clock.fork(process_function, name=name, initial_rate=initial_rate, initial_tempo=initial_tempo,
-                   initial_beat_length=initial_beat_length, args=args, kwargs=kwargs)
+        return clock.fork(process_function, name=name, initial_rate=initial_rate, initial_tempo=initial_tempo,
+                          initial_beat_length=initial_beat_length, args=args, kwargs=kwargs)
 
 
 def fork_unsynchronized(process_function, args=(), kwargs=None):

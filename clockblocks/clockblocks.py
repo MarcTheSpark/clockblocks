@@ -2,6 +2,7 @@ from .tempo_envelope import *
 from expenvelope.utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
 from multiprocessing.pool import ThreadPool
+from threading import Lock
 import logging
 from copy import deepcopy
 import inspect
@@ -23,6 +24,25 @@ class ClockKilledException(Exception):
 class WokenEarlyException(Exception):
     """Exception raised when master clock is woken up during its wait call."""
     pass
+
+
+def tempo_modification(fn):
+    """
+    This is a decorator for methods of Clock that alter tempo. While there's no issue if a clock's tempo is altered
+    from its own thread, or even from the thread of a child clock, there would be an issue if it were to
+    happen on a parent clock. (This is because the parent clock will have already ceded control to the child,
+    and the child will have already scheduled its wakeup call, which may now be changing due to the tempo change.)
+    This is also needed when tempo is changed from a non-clock thread.
+    """
+    def wrapper(self, *args, **kwargs):
+        if current_clock() == self or (current_clock() is not None
+                                       and self in current_clock().iterate_inheritance()):
+            fn(self, *args, **kwargs)
+        else:
+            self.rouse_and_hold()
+            fn(self, *args, **kwargs)
+            self.release_from_suspension()
+    return wrapper
 
 
 class Clock:
@@ -71,6 +91,9 @@ class Clock:
 
         # queue of WakeUpCalls for child clocks
         self._queue = []
+        # used when a tempo change affecting a dormant child clock requires that clock's wakeup call to be removed
+        # recalculated, and placed back in the queue. We shouldn't act on the queue until the wake up call is replaced.
+        self._queue_lock = Lock()
 
         # get the initial rate from whichever way it was set
         if initial_rate is initial_beat_length is initial_tempo is None:
@@ -88,13 +111,10 @@ class Clock:
         # boolean marking whether this clock is in the middle of a wait call, and event used for that wait call
         self._dormant = False
         self._wait_event = threading.Event()
-        # this is used to keep the master clock in a state of suspended animation after it is roused by an
-        # external thread. It is allowed to wake and re-orient (calculate beats and times), but not start sleeping
-        # (this is important, because the external thread might change its tempo)
-        # by default, _suspend_event remains set, and so doesn't block anything. When we want it to block, we clear it.
-        self._suspend_event = threading.Event()
-        self._suspended = False
-        self._suspend_event.set()
+        # used by child clocks to see if they were woken normally by the parent, or early via an external rouse call
+        self._woken_early = False
+
+        self._wait_keeper = WaitKeeper()
 
         if self.is_master():
             # The thread pool runs on the master clock
@@ -145,15 +165,16 @@ class Clock:
     def children(self):
         return tuple(self._children)
 
-    def iterate_inheritance(self):
+    def iterate_inheritance(self, include_self=True):
         clock = self
-        yield clock
+        if include_self:
+            yield clock
         while clock.parent is not None:
             clock = clock.parent
             yield clock
 
-    def inheritance(self):
-        return tuple(self.iterate_inheritance())
+    def inheritance(self, include_self=True):
+        return tuple(self.iterate_inheritance(include_self))
 
     def iterate_all_relatives(self, include_self=False):
         if include_self:
@@ -262,6 +283,7 @@ class Clock:
         return self.tempo_envelope.beat_length
 
     @beat_length.setter
+    @tempo_modification
     def beat_length(self, b):
         self.tempo_envelope.beat_length = b
 
@@ -270,6 +292,7 @@ class Clock:
         return self.tempo_envelope.rate
 
     @rate.setter
+    @tempo_modification
     def rate(self, r):
         self.tempo_envelope.rate = r
 
@@ -278,6 +301,7 @@ class Clock:
         return self.tempo_envelope.tempo
 
     @tempo.setter
+    @tempo_modification
     def tempo(self, t):
         self.tempo_envelope.tempo = t
 
@@ -295,6 +319,7 @@ class Clock:
     #                                                  Tempo Changes
     ##################################################################################################################
 
+    @tempo_modification
     def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, metric_phase_target=None,
                                duration_units="beats", truncate=True):
         """
@@ -315,6 +340,7 @@ class Clock:
         self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, metric_phase_target,
                                                    duration_units, truncate)
 
+    @tempo_modification
     def set_rate_target(self, rate_target, duration, curve_shape=0, metric_phase_target=None,
                         duration_units="beats", truncate=True):
         """
@@ -334,6 +360,7 @@ class Clock:
         self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, metric_phase_target,
                                             duration_units, truncate)
 
+    @tempo_modification
     def set_tempo_target(self, tempo_target, duration, curve_shape=0, metric_phase_target=None,
                          duration_units="beats", truncate=True):
         """
@@ -353,6 +380,7 @@ class Clock:
         self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, metric_phase_target,
                                              duration_units, truncate)
 
+    @tempo_modification
     def set_beat_length_targets(self, beat_length_targets, durations, curve_shapes=None, metric_phase_targets=None,
                                 duration_units="beats", truncate=True, loop=False):
         """
@@ -382,6 +410,7 @@ class Clock:
             units="beatlength"
         )
 
+    @tempo_modification
     def set_rate_targets(self, rate_targets, durations, curve_shapes=None, metric_phase_targets=None,
                                 duration_units="beats", truncate=True, loop=False):
         """
@@ -403,6 +432,7 @@ class Clock:
         if loop:
             self._loop_segments(self.tempo_envelope.segments[-len(rate_targets):])
 
+    @tempo_modification
     def set_tempo_targets(self, tempo_targets, durations, curve_shapes=None, metric_phase_targets=None,
                           duration_units="beats", truncate=True, loop=False):
         """
@@ -433,18 +463,21 @@ class Clock:
 
     # --------------------------------------------- Tempo Functions -------------------------------------------------
 
+    @tempo_modification
     def apply_beat_length_function(self, function, domain_start=0, domain_end=None, duration_units="beats",
                                    truncate=False, loop=False, extension_increment=1.0, resolution_multiple=2):
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
+    @tempo_modification
     def apply_rate_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
                             loop=False, extension_increment=1.0, resolution_multiple=2):
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="rate",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
+    @tempo_modification
     def apply_tempo_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=False,
                              loop=False, extension_increment=1.0, resolution_multiple=2):
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
@@ -501,6 +534,34 @@ class Clock:
 
     def fork(self, process_function, args=(), kwargs=None, name=None,
              initial_rate=None, initial_tempo=None, initial_beat_length=None):
+        """
+        Spawns a parallel process running on a child clock.
+
+        :param process_function: function defining the process to be spawned
+        :param args: arguments to be passed to the process function. One subtlety to note here: if the number of
+            arguments passed is one fewer than the number taken by the function, the clock on which the process is
+            forked will be passed as the first argument, followed by the arguments given. For instance, if we define
+            "forked_function(clock, a, b)", and then call "parent.fork(forked_function, (13, 6))", 13 will be passed
+            to "a" and 6 to "b", while the clock on which forked_function is running will be passed to "clock". On the
+            other hand, if the signature of the function were "forked_function(a, b)", 13 would be simply be passed to
+            "a" and 6 to "b".
+        :param kwargs: keyword arguments to be passed to the process function
+        :param name: name to be given to the clock of the spawned child process
+        :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
+        :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
+        :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
+        :return: the clock of the spawned child process
+        """
+        if not self.alive:
+            raise RuntimeError("Cannot call fork from a clock that is no longer running.")
+
+        # If we're calling fork from a non clock thread, or from the thread of a parent clock, we need to
+        # rouse this clock, since it will be asleep.
+        if current_clock() != self and (current_clock() is None or self not in current_clock().iterate_inheritance()):
+            self.rouse_and_hold()
+            had_to_rouse = True
+        else:
+            had_to_rouse = False
 
         kwargs = {} if kwargs is None else kwargs
 
@@ -518,10 +579,6 @@ class Clock:
                     param for param in process_function_signature.parameters if
                     process_function_signature.parameters[param].default == inspect.Parameter.empty
                 ])
-                assert len(args) <= num_positional_parameters, \
-                    "Too many arguments given for function {}".format(process_function.__name__)
-                assert len(args) >= num_positional_parameters-1, \
-                    "Too few arguments given for function {}".format(process_function.__name__)
 
                 """
                 The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
@@ -540,6 +597,7 @@ class Clock:
                     pass
 
                 self._children.remove(child)
+                child._killed = True
             except Exception as e:
                 logging.exception(e)
         self._run_in_pool(_process, args, kwargs)
@@ -552,6 +610,8 @@ class Clock:
             # which slows down the other threads with its greediness
             time.sleep(0.000001)
 
+        if had_to_rouse:
+            self.release_from_suspension()
         return child
 
     def kill(self):
@@ -564,6 +624,10 @@ class Clock:
         if self.is_master():
             for child in self.children():
                 child.kill()
+
+    @property
+    def alive(self):
+        return not self._killed
 
     def fork_unsynchronized(self, process_function, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -592,8 +656,7 @@ class Clock:
         if self._log_processing_time:
             logging.info("Clock {} processed for {} secs.".format(self.name if self.name is not None else "<unnamed>",
                                                                   time.time() - self._last_sleep_time))
-        if dt < 1e-10:
-            return
+
         if self.is_master():
             # this is the master thread that actually sleeps
             # ...unless we're fast-forwarding. Better address that possibility.
@@ -649,7 +712,8 @@ class Clock:
                 pass
             else:
                 self._dormant = True
-                sleep_precisely_until(stop_sleeping_time, self._wait_event)
+                if dt > 1e-5:
+                    sleep_precisely_until(stop_sleeping_time, self._wait_event)
                 self._dormant = False
                 if self._wait_event.is_set():
                     self._wait_event.clear()
@@ -657,8 +721,17 @@ class Clock:
         else:
             self.parent._queue.append(_WakeUpCall(self.parent.beat() + dt, self))
             self.parent._queue.sort(key=lambda x: x.t)
+            if self.parent._queue_lock.locked():
+                # if the parent was told to wait while we removed and recalculated the new WakeUpCall, release it now
+                self.parent._queue_lock.release()
             self._dormant = True
             self._wait_event.wait()
+
+            if self._woken_early:
+                self._woken_early = False
+                self._wait_event.clear()
+                raise WokenEarlyException()
+
             if self._killed:
                 raise ClockKilledException()
             self._wait_event.clear()
@@ -670,6 +743,8 @@ class Clock:
         units = units.lower()
         if units not in ("beats", "time"):
             raise ValueError("Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\".".format(units))
+        if not self.alive:
+            raise RuntimeError("Cannot call wait; clock is no longer running.")
 
         self._wait_for_children_to_finish_processing()
 
@@ -682,7 +757,7 @@ class Clock:
         try:
             # while there are wake up calls left to do amongst the children, and those wake up calls
             # would take place before or exactly when we're done waiting here on the master clock
-            while len(self._queue) > 0 and self._queue[0].t <= end_beat:
+            while self._queue_has_wakeup_call(before_beat=end_beat):
                 self._handle_next_wakeup_call()
 
             # if we exit the while loop, that means that there is no one in the queue (meaning no children),
@@ -691,21 +766,27 @@ class Clock:
             beats_passed = end_beat - self.beat()
             woken_early = False
         except WokenEarlyException:
-            # (master) clock was roused part-way through the wait call (usually from a thread outside the clock system)
+            # clock was roused part-way through the wait call (usually from a thread outside the clock system)
             time_passed = time.time() - self._last_sleep_time
+            self._last_sleep_time = time.time()
             beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+            if self.parent is not None:
+                self.parent._queue_lock.acquire()
+                self._remove_wakeup_call_from_parent_queue()
+
             woken_early = True
 
-        self.tempo_envelope.advance(beats_passed)
-        self._synchronize_children()
+        if not woken_early or self.is_master():
+            # do this unless we were woken early and are not on the master clock (in that case, the master will be
+            # roused and catch up all the children, and our main goal is to recalculate the next wake up call)
+            self.tempo_envelope.advance(beats_passed)
+            self._synchronize_children()
 
-        # this only stops us if _suspend_event has been cleared
-        # (which happens when we rouse the clock with suspend=True)
-        self._suspended = True
-        self._suspend_event.wait()
-        self._suspended = False
+        # the wait keeper holds the clock in suspension, generally when the clock has been woken up early (using
+        # rouse_and_hold) and we're waiting to carry out a few commands before letting it go do its thing
+        self._wait_keeper.wait_for_clearance()
 
-        # if the (master) clock was roused mid-wait, wait the rest of the time
+        # if the clock was roused mid-wait, wait the rest of the time
         if woken_early:
             self.wait(end_beat - self.beat())
 
@@ -730,6 +811,14 @@ class Clock:
                             "off by setting the synchronization_policy for this clock (or for the master clock) to "
                             "\"no synchronization\"".format(calc_time, current_clock().name))
             self.master.running_behind_warning_count = 0
+
+    def _remove_wakeup_call_from_parent_queue(self):
+        i = 0
+        while i < len(self.parent._queue):
+            if self.parent._queue[i].clock == self:
+                self.parent._queue.pop(i)
+            else:
+                i += 1
 
     def _handle_next_wakeup_call(self):
         # find the next wake up call
@@ -829,54 +918,81 @@ class Clock:
     def _advance_tempo_map_to_beat(self, beat):
         self.tempo_envelope.advance(beat - self.beat())
 
+    def _queue_has_wakeup_call(self, before_beat=None):
+        # checks if there's a wakeup call (optional before the given beat)
+        # uses the _queue_lock just in case there's a child clock currently recalculating it's wakeup call
+        with self._queue_lock:
+            return len(self._queue) > 0 and (before_beat is None or self._queue[0].t <= before_beat)
+
     def wait_for_children_to_finish(self):
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
+        if not self.alive:
+            raise RuntimeError("Cannot call wait; clock is no longer live.")
 
-        # wait for any and all children to schedule their next wake up call and call wait()
-        while not all(child._dormant for child in self._children):
-            # note that sleeping a tiny amount is better than a straight while loop,
-            # which slows down the other threads with its greediness
-            time.sleep(0.000001)
+        self._wait_for_children_to_finish_processing()
 
         # make sure any timestamps for this moment have all clocks represented in them
         self._complete_timestamp_data()
 
-        # while there are wake up calls left to do amongst the children
-        while len(self._queue) > 0:
-            self._handle_next_wakeup_call()
+        try:
+            # while there are wake up calls left to do amongst the children
+            while self._queue_has_wakeup_call():
+                self._handle_next_wakeup_call()
+
+            woken_early = False
+        except WokenEarlyException:
+            # clock was roused part-way through the wait call (usually from a thread outside the clock system)
+            time_passed = time.time() - self._last_sleep_time
+            beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+
+            if self.is_master():
+                # do this unless we were woken early and are not on the master clock (in that case, the master will be
+                # roused and catch up all the children, and our main goal is to recalculate the next wake up call)
+                self.tempo_envelope.advance(beats_passed)
+                self._synchronize_children()
+            else:
+                self.parent._queue_lock.acquire()
+                self._remove_wakeup_call_from_parent_queue()
+
+            # the wait keeper holds the clock in suspension, generally when the clock has been woken up early (using
+            # rouse_and_hold) and we're waiting to carry out a few commands before letting it go do its thing
+            self._wait_keeper.wait_for_clearance()
+
+            self.wait_for_children_to_finish()
 
     def wait_forever(self):
         while True:
             self.wait(1.0)
 
-    def rouse(self, suspend=False):
-        if current_clock() == self.master:
-            # if we're already on the master clock thread, it's already roused, since we could call this function
+    def rouse_and_hold(self, holding_clock=None):
+        if holding_clock is None:
+            holding_clock = self
+
+        if not self._dormant:
+            # if we're already awake, no need to do anything
             return
-        if self.is_master():
-            if suspend:
-                # this will cause the master clock to suspend once it reorients, until release_from_suspension is called
-                self._suspend_event.clear()
 
-            # if the master clock is waiting, rouse it and let it orient itself and its children
-            if self._dormant:
-                self._dormant = False
-                self._wait_event.set()  # this will trigger a WokenEarlyException in the master's wait call
+        # this will cause this clock to suspend once it reorients, until release_from_suspension is called
+        self._wait_keeper.issue_hold(holding_clock)
 
-            if suspend:
-                # if we're putting the clock into suspended animation, wait for it to have reoriented and suspended
-                while not self._suspended:
-                    time.sleep(0.000001)
-            else:
-                # otherwise, wait for it to have re-oriented and gone back to sleep
-                while not self._dormant:
-                    time.sleep(0.000001)
-        else:
-            self.master.rouse()
+        if self._dormant:
+            self._dormant = False
+            self._woken_early = True  # needed in child clocks to know they were woken early
+            self._wait_event.set()  # this will trigger a WokenEarlyException in the wait call
 
-    def release_from_suspension(self):
-        self._suspend_event.set()
+        while not self._wait_keeper.being_held:
+            time.sleep(0.000001)
+
+        if not self.is_master() and self.parent._dormant:
+            self.parent.rouse_and_hold(holding_clock)
+
+    def release_from_suspension(self, releasing_clock=None):
+        if releasing_clock is None:
+            releasing_clock = self
+        self._wait_keeper.release_hold(releasing_clock)
+        if not self.is_master():
+            self.parent.release_from_suspension(releasing_clock)
 
     ##################################################################################################################
     #                                                 Fast-forwarding
@@ -1039,3 +1155,41 @@ class TimeStamp:
             return self.wall_time < other.wall_time
         else:
             return self.time_in_master < other.time_in_master
+
+
+class WaitKeeper:
+    """
+    Used by a given clock to allow other clocks to put a hold on it so that it doesn't wait / calculate is next
+    wake up call yet. Built so that multiple clocks can issue a hold, and all of them have to release the clock.
+    """
+
+    def __init__(self):
+        self.blocking_clocks = []
+        self._hold_event = Event()
+        self._hold_event.set()  # by default, with no holds placed, let's us through
+        self.being_held = False
+
+    def issue_hold(self, clock=None):
+        clock = current_clock() if clock is None else clock
+        assert isinstance(clock, Clock)
+        # if clock in self.blocking_clocks:
+        #     raise RuntimeError("Cannot issue hold; clock {} has already issued a hold.".format(clock))
+        if clock not in self.blocking_clocks:
+            self.blocking_clocks.append(clock)
+        if len(self.blocking_clocks) > 0:
+            self._hold_event.clear()
+
+    def release_hold(self, clock=None):
+        clock = current_clock() if clock is None else clock
+        assert isinstance(clock, Clock)
+        # if clock not in self.blocking_clocks:
+        #     raise RuntimeError("Cannot release hold; clock {} never placed one.".format(clock))
+        if clock in self.blocking_clocks:
+            self.blocking_clocks.remove(clock)
+        if len(self.blocking_clocks) == 0:
+            self._hold_event.set()
+
+    def wait_for_clearance(self):
+        self.being_held = True
+        self._hold_event.wait()
+        self.being_held = False
