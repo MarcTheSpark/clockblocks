@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="clockblocks",
-    version="0.2.1",
+    version="0.3",
     author="Marc Evanstein",
     author_email="marc@marcevanstein.com",
     description="A python library for controlling the flow of musical time.",
