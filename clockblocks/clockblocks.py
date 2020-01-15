@@ -737,7 +737,17 @@ class Clock:
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
-    def wait(self, dt, units="beats"):
+    def wait(self, dt, units="beats", sub_call=False):
+        """
+        Causes the current thread to block for dt beats (or seconds if units="time") in this clock.
+
+        :param dt: the number of beats in this clock
+        :param units: either "beats" or "time". If time, then it ignores the rate of this clock, and waits in seconds
+            (or in parent clock beats, if this is a sub-clock)
+        :param sub_call: flag that wouldn't matter to the user, but indicates whether this wait call was called from
+            within another wait call.
+        :return: 0 if this wait call is uninterrupted, otherwise the amount of beats that remained when interrupted
+        """
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
         units = units.lower()
@@ -788,7 +798,13 @@ class Clock:
 
         # if the clock was roused mid-wait, wait the rest of the time
         if woken_early:
-            self.wait(end_beat - self.beat())
+            if sub_call:
+                return end_beat - self.beat()
+            else:
+                remainder = end_beat - self.beat()
+                while remainder > 0:
+                    remainder = self.wait(end_beat - self.beat(), sub_call=True)
+        return 0
 
     def _wait_for_children_to_finish_processing(self):
         while not all(child._dormant for child in self._children):
