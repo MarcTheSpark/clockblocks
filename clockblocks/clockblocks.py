@@ -371,7 +371,7 @@ class Clock:
     @property
     def rate(self):
         """
-        Sets the rate of this clock in beats / second
+        Sets the rate of this clock in beats / second.
         Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
         other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
@@ -1439,7 +1439,7 @@ class _WaitKeeper:
 
     def __init__(self):
         """
-        Used by a given clock to allow other clocks to put a hold on it so that it doesn't wait / calculate is next
+        Used by a given clock to allow other clocks to put a hold on it so that it doesn't wait / calculate its next
         wake up call yet. Built so that multiple clocks can issue a hold, and all of them have to release the clock.
         Plays important role in the "rouse_and_hold" process.
         """
