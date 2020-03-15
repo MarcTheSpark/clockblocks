@@ -1,3 +1,8 @@
+"""
+Module defining the central :class:`Clock` class, as well as the :class: `TimeStamp` class, which records the current
+beat in every clock at a given moment.
+"""
+
 from .tempo_envelope import *
 from expenvelope.utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
@@ -11,6 +16,7 @@ from .utilities import _PrintColors
 from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering, wraps
 import textwrap
+from typing import Union, Sequence, Iterator, Tuple, Callable
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -28,7 +34,7 @@ class WokenEarlyException(Exception):
 
 def tempo_modification(fn):
     """
-    This is a decorator for methods of Clock that alter tempo. While there's no issue if a clock's tempo is altered
+    Decorator applied to methods of Clock that alter tempo. While there's no issue if a clock's tempo is altered
     from its own thread, or even from the thread of a child clock, there would be an issue if it were to
     happen on a parent clock. (This is because the parent clock will have already ceded control to the child,
     and the child will have already scheduled its wakeup call, which may now be changing due to the tempo change.)
@@ -49,43 +55,48 @@ def tempo_modification(fn):
 
 
 class Clock:
+    """
+    Recursively nestable clock class. Clocks can fork child-clocks, which can in turn fork their own child-clock.
+    Only the master clock calls sleep; child-clocks instead register _WakeUpCalls with their parents, who
+    register wake-up calls with their parents all the way up to the master clock.
 
-    def __init__(self, name=None, parent=None, initial_rate=None, initial_tempo=None, initial_beat_length=None,
-                 timing_policy=0.98, synchronization_policy=None, pool_size=200):
-        """
-        Recursively nestable clock class. Clocks can fork child-clocks, which can in turn fork their own child-clock.
-        Only the master clock calls sleep; child-clocks instead register WakeUpCalls with their parents, who
-        register wake-up calls with their parents all the way up to the master clock.
+    :param name: (optional) can be useful for keeping track in confusing multi-threaded situations
+    :param parent: the parent clock for this clock; a value of None indicates the master clock
+    :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
+    :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
+    :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
+    :param timing_policy: either "relative", "absolute", or a float between 0 and 1 representing a balance between
+        the two. "relative" attempts to keeps each wait call as faithful as possible to what it should be. This can
+        result in the clock getting behind real time, since if heavy processing causes us to get behind on one note
+        we never catch up. "absolute" tries instead to stay faithful to the time since the clock began. If one wait
+        is too long due to heavy processing, later delays will be shorter to try to catch up. This can result in
+        inaccuracies in relative timing. Setting the timing policy to a float between 0 and 1 implements a hybrid
+        approach in which, when the clock gets behind, it is allowed to catch up somewhat, but only to a certain
+        extent. (0 is equivalent to absolute timing, 1 is equivalent to relative timing.)
+    :param synchronization_policy: either None or one of "all relatives", "all descendants", "no synchronization",
+        or "inherit". Since a clock is woken up by its parent clock, it will always remain synchronized with
+        all parents / grandparents / etc; however, if you ask one of its children what time / beat it is on, it may
+        have old information, since it has been asleep. If the synchronization_policy is set to "no synchronization",
+        then we live with this, but if it is set to "all descendants" then we take the time (and CPU cycles) to catch
+        up all its descendants so that they read the correct time. Nevertheless, cousin clocks (other descendants of
+        this clock's parent) may still not be caught up, so the "all relatives" policy makes sure that all descendants
+        of the master clock - no matter how they are related to this clock - will have up-to-date information about
+        what time / beat they are on whenever this clock wakes up. This is the default setting, since it avoids
+        inaccurate information, but if there are a lot of clocks it may be valuable to turn off relative synchronization
+        if it's slowing things down. The value "inherit" means that this clock inherits its synchronization policy from
+        its master. If no value is specified, then it defaults to "all relatives" for the master clock and "inherit"
+        for all descendants, which in practice means that all clocks will synchronize with all relatives upon waking.
+    :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
+        has an effect if this is the master clock.
+    :ivar name: the name of this clock (string)
+    :ivar parent: the parent Clock to which this clock belongs (Clock, or None if master clock)
+    :ivar tempo_envelope: TempoEnvelope describing how this clock has changed or will change tempo
+    """
 
-        :param name: (optional) can be useful for keeping track in confusing multi-threaded situations
-        :param parent: the parent clock for this clock; a value of None indicates the master clock
-        :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
-        :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
-        :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
-        :param timing_policy: either "relative", "absolute", or a float between 0 and 1 representing a balance between
-            the two. "relative" attempts to keeps each wait call as faithful as possible to what it should be. This can
-            result in the clock getting behind real time, since if heavy processing causes us to get behind on one note
-            we never catch up. "absolute" tries instead to stay faithful to the time since the clock began. If one wait
-            is too long due to heavy processing, later delays will be shorter to try to catch up. This can result in
-            inaccuracies in relative timing. Setting the timing policy to a float between 0 and 1 implements a hybrid
-            approach in which, when the clock gets behind, it is allowed to catch up somewhat, but only to a certain extent.
-            (0 is equivalent to absolute timing, 1 is equivalent to relative timing.)
-        :param synchronization_policy: either None or one of "all relatives", "all descendants", "no synchronization",
-            or "inherit". Since a clock is woken up by its parent clock, it will always remain synchronized with
-            all parents / grandparents / etc; however, if you ask one of its children what time / beat it is on, it may
-            have old information, since it has been asleep. If the synchronization_policy is set to "no synchronization",
-            then we live with this, but if it is set to "all descendants" then we take the time (and CPU cycles) to catch
-            up all its descendants so that they read the correct time. Nevertheless, cousin clocks (other descendants of
-            this clock's parent) may still not be caught up, so the "all relatives" policy makes sure that all descendants
-            of the master clock - no matter how they are related to this clock - will have up-to-date information about
-            what time / beat they are on whenever this clock wakes up. This is the default setting, since it avoids
-            inaccurate information, but if there are a lot of clocks it may be valuable to turn off relative synchronization
-            if it's slowing things down. The value "inherit" means that this clock inherits its synchronization policy from
-            its master. If no value is specified, then it defaults to "all relatives" for the master clock and "inherit"
-            for all descendants, which in practice means that all clocks will synchronize with all relatives upon waking.
-        :param pool_size: the size of the process pool for unsynchronized forks, which are used for playing notes. Only
-            has an effect if this is the master clock.
-        """
+    def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
+                 initial_tempo: float = None, initial_beat_length: float = None,
+                 timing_policy: Union[str, float] = 0.98, synchronization_policy: str = None, pool_size: int = 200):
+
         self.name = name
         self.parent = parent
         if self.parent is not None and self not in self.parent._children:
@@ -159,13 +170,13 @@ class Clock:
     ##################################################################################################################
 
     @property
-    def master(self):
+    def master(self) -> 'Clock':
         """
         The master clock under which this clock operates (possibly itself)
         """
         return self if self.is_master() else self.parent.master
 
-    def is_master(self):
+    def is_master(self) -> bool:
         """
         Check if this is the master clock
 
@@ -173,7 +184,7 @@ class Clock:
         """
         return self.parent is None
 
-    def children(self):
+    def children(self) -> Sequence['Clock']:
         """
         Get all direct child clocks forked by this clock.
 
@@ -181,12 +192,11 @@ class Clock:
         """
         return tuple(self._children)
 
-    def iterate_inheritance(self, include_self=True):
+    def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
         """
         Iterate through parent, grandparent, etc. of this clock up until the master clock
 
         :param include_self: whether or not to include this clock in the iterator or start with the parent
-        :type include_self: bool
         :return: iterator going up the clock family tree up to the master clock
         """
 
@@ -197,17 +207,16 @@ class Clock:
             clock = clock.parent
             yield clock
 
-    def inheritance(self, include_self=True):
+    def inheritance(self, include_self: bool = True) -> Sequence['Clock']:
         """
         Get all parent, grandparent, etc. of this clock up until the master clock
 
         :param include_self: whether or not to include this clock in the iterator or start with the parent
-        :type include_self: bool
         :return: tuple containing the clock's inheritance
         """
         return tuple(self.iterate_inheritance(include_self))
 
-    def iterate_all_relatives(self, include_self=False):
+    def iterate_all_relatives(self, include_self: bool = False) -> Iterator['Clock']:
         """
         Iterate through all related clocks to this clock.
 
@@ -219,7 +228,7 @@ class Clock:
         else:
             return (c for c in self.master.iterate_descendants(True) if c is not self)
 
-    def iterate_descendants(self, include_self=False):
+    def iterate_descendants(self, include_self: bool = False) -> Iterator['Clock']:
         """
         Iterate through all children, grandchildren, etc. of this clock
 
@@ -233,7 +242,7 @@ class Clock:
             for descendant_of_child in child_clock.iterate_descendants():
                 yield descendant_of_child
 
-    def descendants(self):
+    def descendants(self) -> Sequence['Clock']:
         """
         Get all children, grandchildren, etc. of this clock
 
@@ -241,13 +250,13 @@ class Clock:
         """
         return tuple(self.iterate_descendants())
 
-    def print_family_tree(self):
+    def print_family_tree(self) -> None:
         """
         Print a hierarchical representation of this clock's family tree.
         """
         print(self.master._child_tree_string(self))
 
-    def _child_tree_string(self, highlight_clock=None):
+    def _child_tree_string(self, highlight_clock: 'Clock' = None) -> str:
         name_text = self.name if self.name is not None else "(UNNAMED)"
         if highlight_clock is self:
             name_text = _PrintColors.BOLD + name_text + _PrintColors.END
@@ -264,7 +273,7 @@ class Clock:
     ##################################################################################################################
 
     @property
-    def synchronization_policy(self):
+    def synchronization_policy(self) -> str:
         """
         Determines whether or not this clock actively updates the beat and time of related clocks when it wakes up.
         Allowable values are "all relatives", "all descendants", "no synchronization", and "inherit". If "inherit" then
@@ -290,7 +299,7 @@ class Clock:
                 return clock.synchronization_policy
 
     @property
-    def timing_policy(self):
+    def timing_policy(self) -> Union[str, float]:
         """
         Determines how this clock should respond to getting behind.
         Allowable values are "absolute", "relative" or a float between 0 and 1 representing a balance between
@@ -303,25 +312,26 @@ class Clock:
         assert value in ("absolute", "relative") or isinstance(value, (int, float)) and 0 <= value <= 1.
         self._timing_policy = value
 
-    def use_absolute_timing_policy(self):
+    def use_absolute_timing_policy(self) -> None:
         """
         This timing policy only cares about keeping the time since the clock start accurate to what it should be.
         The downside is that relative timings get distorted when it falls behind.
         """
         self._timing_policy = "absolute"
 
-    def use_relative_timing_policy(self):
+    def use_relative_timing_policy(self) -> None:
         """
         This timing policy only cares about making each individual wait call as accurate as possible.
         The downside is that long periods of calculation cause the clock to drift and get behind.
         """
         self._timing_policy = "relative"
 
-    def use_mixed_timing_policy(self, absolute_relative_mix: float):
+    def use_mixed_timing_policy(self, absolute_relative_mix: float)  -> None:
         """
         Balance considerations of relative timing and absolute timing accuracy according to the given coefficient
+
         :param absolute_relative_mix: a float representing the minimum proportion of the ideal wait time we are willing
-        to wait in order to catch up to the correct absolute time since the clock started.
+            to wait in order to catch up to the correct absolute time since the clock started.
         """
         if not (0.0 <= absolute_relative_mix <= 1.0):
             raise ValueError("Mix coefficient should be between 0 (fully absolute timing policy) "
@@ -332,7 +342,7 @@ class Clock:
     #                                               Timing Properties
     ##################################################################################################################
 
-    def time(self):
+    def time(self) -> float:
         """
         How much time has passed since this clock was created.
         Either in seconds, if this is the master clock, or in beats in the parent clock, if this clock was the result
@@ -340,22 +350,22 @@ class Clock:
         """
         return self.tempo_envelope.time()
 
-    def beat(self):
+    def beat(self) -> float:
         """
         How many beats have passed since this clock was created.
         """
         return self.tempo_envelope.beat()
 
-    def time_in_master(self):
+    def time_in_master(self) -> float:
         """
         How much time (in seconds) has passed since the master clock was created.
         """
         return self.master.time()
 
     @property
-    def beat_length(self):
+    def beat_length(self) -> float:
         """
-        Sets the length of a beat in this clock in seconds.
+        The length of a beat in this clock in seconds.
         Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
         other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
@@ -369,9 +379,9 @@ class Clock:
         self.tempo_envelope.beat_length = b
 
     @property
-    def rate(self):
+    def rate(self) -> float:
         """
-        Sets the rate of this clock in beats / second.
+        The rate of this clock in beats / second.
         Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
         other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
@@ -385,9 +395,9 @@ class Clock:
         self.tempo_envelope.rate = r
 
     @property
-    def tempo(self):
+    def tempo(self) -> float:
         """
-        Sets the rate of this clock in beats / minute
+        The rate of this clock in beats / minute
         Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
         other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
@@ -400,7 +410,7 @@ class Clock:
     def tempo(self, t):
         self.tempo_envelope.tempo = t
 
-    def absolute_rate(self):
+    def absolute_rate(self) -> float:
         """
         The rate of this clock in beats / (true) second, accounting for the rates of all parent clocks.
         (As opposed to rate, which just gives the rate relative to the parent clock.)
@@ -408,14 +418,14 @@ class Clock:
         absolute_rate = self.rate if self.parent is None else (self.rate * self.parent.absolute_rate())
         return absolute_rate
 
-    def absolute_tempo(self):
+    def absolute_tempo(self) -> float:
         """
         The tempo of this clock in beats / (true) minute, accounting for the rates of all parent clocks.
         (As opposed to tempo, which just gives the tempo relative to the parent clock.)
         """
         return self.absolute_rate() * 60
 
-    def absolute_beat_length(self):
+    def absolute_beat_length(self) -> float:
         """
         The beat length of this clock in (true) seconds, accounting for the rates of all parent clocks.
         (As opposed to beat_length, which just gives the length in parent beats.)
@@ -427,8 +437,9 @@ class Clock:
     ##################################################################################################################
 
     @tempo_modification
-    def set_beat_length_target(self, beat_length_target, duration, curve_shape=0, metric_phase_target=None,
-                               duration_units="beats", truncate=True):
+    def set_beat_length_target(self, beat_length_target: float, duration: float, curve_shape: float = 0,
+                               metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                               duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat length for this clock to reach in duration beats/seconds (with the unit defined by
         duration_units).
@@ -448,8 +459,9 @@ class Clock:
                                                    duration_units, truncate)
 
     @tempo_modification
-    def set_rate_target(self, rate_target, duration, curve_shape=0, metric_phase_target=None,
-                        duration_units="beats", truncate=True):
+    def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
+                        metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                        duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target rate for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
 
@@ -468,8 +480,9 @@ class Clock:
                                             duration_units, truncate)
 
     @tempo_modification
-    def set_tempo_target(self, tempo_target, duration, curve_shape=0, metric_phase_target=None,
-                         duration_units="beats", truncate=True):
+    def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
+                         metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                         duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target tempo for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
 
@@ -488,8 +501,10 @@ class Clock:
                                              duration_units, truncate)
 
     @tempo_modification
-    def set_beat_length_targets(self, beat_length_targets, durations, curve_shapes=None, metric_phase_targets=None,
-                                duration_units="beats", truncate=True, loop=False):
+    def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
+                                curve_shapes: Sequence[float] = None,
+                                metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                                duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
         of the argument.
@@ -497,7 +512,7 @@ class Clock:
         :param beat_length_targets: list of the target beat_lengths
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
         :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segement (or None to ignore metric phase)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting these targets.
@@ -518,8 +533,10 @@ class Clock:
         )
 
     @tempo_modification
-    def set_rate_targets(self, rate_targets, durations, curve_shapes=None, metric_phase_targets=None,
-                                duration_units="beats", truncate=True, loop=False):
+    def set_rate_targets(self, rate_targets: Sequence[float], durations: Sequence[float],
+                         curve_shapes: Sequence[float] = None,
+                         metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                         duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
         of the argument.
@@ -540,8 +557,10 @@ class Clock:
             self._loop_segments(self.tempo_envelope.segments[-len(rate_targets):])
 
     @tempo_modification
-    def set_tempo_targets(self, tempo_targets, durations, curve_shapes=None, metric_phase_targets=None,
-                          duration_units="beats", truncate=True, loop=False):
+    def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
+                          curve_shapes: Sequence[float] = None,
+                          metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                          duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
         of the argument.
@@ -561,7 +580,7 @@ class Clock:
         if loop:
             self._loop_segments(self.tempo_envelope.segments[-len(tempo_targets):])
 
-    def stop_looping_tempo_targets(self):
+    def stop_looping_tempo_targets(self) -> None:
         """
         If we set up a looping list of tempo targets, this stops that looping process. It also stops extending any
         tempo function that we set up to go indefinitely.
@@ -571,8 +590,9 @@ class Clock:
     # --------------------------------------------- Tempo Functions -------------------------------------------------
 
     @tempo_modification
-    def apply_beat_length_function(self, function, domain_start=0, domain_end=None, duration_units="beats",
-                                   truncate=True, loop=False, extension_increment=1.0, resolution_multiple=2):
+    def apply_beat_length_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
+                                   duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                                   extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
         """
         Applies a function to be used to set the beat_length (and therefore rate and tempo) of this clock.
 
@@ -596,8 +616,9 @@ class Clock:
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
     @tempo_modification
-    def apply_rate_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=True,
-                            loop=False, extension_increment=1.0, resolution_multiple=2):
+    def apply_rate_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
+                            duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                            extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
         """
         Applies a function to be used to set the rate (and therefore beat_length and tempo) of this clock.
 
@@ -621,8 +642,9 @@ class Clock:
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
     @tempo_modification
-    def apply_tempo_function(self, function, domain_start=0, domain_end=None, duration_units="beats", truncate=True,
-                             loop=False, extension_increment=1.0, resolution_multiple=2):
+    def apply_tempo_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
+                             duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                             extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
         """
         Applies a function to be used to set the tempo (and therefore beat_length and rate) of this clock.
 
@@ -645,9 +667,10 @@ class Clock:
                                    duration_units=duration_units, truncate=truncate, loop=loop,
                                    extension_increment=extension_increment, resolution_multiple=resolution_multiple)
 
-    def _apply_tempo_function(self, function, domain_start=0, domain_end=None, units="beatlength",
-                              duration_units="beats", truncate=False, loop=False, extension_increment=1.0,
-                              resolution_multiple=2):
+    def _apply_tempo_function(self, function, domain_start: float = 0, domain_end: float = None,
+                              units: str = "beatlength", duration_units: str = "beats", truncate: bool = False,
+                              loop: bool = False, extension_increment: float = 1.0,
+                              resolution_multiple: int = 2) -> None:
         # truncate removes any segments that extend into the future
         if truncate:
             self.tempo_envelope.remove_segments_after(self.beat())
@@ -684,7 +707,7 @@ class Clock:
     #                                                   Forking
     ##################################################################################################################
 
-    def _run_in_pool(self, target, args, kwargs):
+    def _run_in_pool(self, target: Callable, args, kwargs) -> None:
         if self.master._pool_semaphore.acquire(blocking=False):
             semaphore = self.master._pool_semaphore
             self.master._pool.apply_async(target, args=args, kwds=kwargs, callback=lambda _: semaphore.release())
@@ -693,8 +716,8 @@ class Clock:
                             "result. You can increase the number of threads in the pool to avoid this.")
             threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
-    def fork(self, process_function, args=(), kwargs=None, name=None,
-             initial_rate=None, initial_tempo=None, initial_beat_length=None):
+    def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
+             initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None) -> 'Clock':
         """
         Spawns a parallel process running on a child clock.
 
@@ -775,7 +798,7 @@ class Clock:
             self.release_from_suspension()
         return child
 
-    def kill(self):
+    def kill(self) -> None:
         """
         Ends the process forked on this clock and all child processes.
         If this is the master clock, since it wasn't forked, this simply kills all child processes.
@@ -787,7 +810,7 @@ class Clock:
                 child.kill()
 
     @property
-    def alive(self):
+    def alive(self) -> bool:
         """
         Whether or not this clock is still running
 
@@ -795,7 +818,7 @@ class Clock:
         """
         return not self._killed
 
-    def fork_unsynchronized(self, process_function, args=(), kwargs=None):
+    def fork_unsynchronized(self, process_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
         """
         Spawns a parallel process, but as an asynchronous thread, not on a child clock.
         (Still makes use of this clock's ThreadPool, so it's quicker to spawn than creating a new Thread)
@@ -818,7 +841,7 @@ class Clock:
     #                                             Waiting (the guts)
     ##################################################################################################################
 
-    def _wait_in_parent(self, dt):
+    def _wait_in_parent(self, dt: float) -> None:
         """
         If master clock, sleeps precisely for dt seconds (with adjustments based on timing policy / fast forwarding)
         Otherwise registers a wake up time with parent clock and pauses execution.
@@ -911,7 +934,7 @@ class Clock:
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
-    def wait(self, dt, units="beats", sub_call=False):
+    def wait(self, dt: float, units: str = "beats", sub_call: bool = False) -> float:
         """
         Causes the current thread to block for dt beats (or seconds if units="time") in this clock.
 
@@ -980,7 +1003,7 @@ class Clock:
                     remainder = self.wait(end_beat - self.beat(), sub_call=True)
         return 0
 
-    def _wait_for_children_to_finish_processing(self):
+    def _wait_for_children_to_finish_processing(self) -> None:
         while not all(child._dormant for child in self._children):
             # note that sleeping a tiny amount is better than a straight while loop,
             # which slows down the other threads with its greediness
@@ -1023,7 +1046,7 @@ class Clock:
         next_wake_up_call.clock._wait_event.set()
         self._wait_for_child_to_finish_processing(next_wake_up_call.clock)
 
-    def _wait_for_child_to_finish_processing(self, child_clock):
+    def _wait_for_child_to_finish_processing(self, child_clock: 'Clock') -> None:
         # wait for the child clock that we woke up either to finish completely or to finish processing
         while child_clock in self._children and not child_clock._dormant:
             # note that sleeping a tiny amount is better than a straight while loop,
@@ -1114,7 +1137,7 @@ class Clock:
         with self._queue_lock:
             return len(self._queue) > 0 and (before_beat is None or self._queue[0].t <= before_beat)
 
-    def wait_for_children_to_finish(self):
+    def wait_for_children_to_finish(self) -> None:
         """
         Causes this thread to block until all forked child processes have finished.
         """
@@ -1154,7 +1177,7 @@ class Clock:
 
             self.wait_for_children_to_finish()
 
-    def wait_forever(self):
+    def wait_forever(self) -> None:
         """
         Causes this thread to block forever.
         Generally called from a parent clock when actions are being carried out on child clocks, or as a result of
@@ -1163,7 +1186,7 @@ class Clock:
         while True:
             self.wait(1.0)
 
-    def rouse_and_hold(self, holding_clock=None):
+    def rouse_and_hold(self, holding_clock: 'Clock' = None) -> None:
         """
         Rouse this clock if it is dormant, but keep it suspended until release_from_suspension is called.
         Generally this would not be called by the user, but it is useful for callback functions operating outside
@@ -1195,7 +1218,7 @@ class Clock:
         if not self.is_master() and self.parent._dormant:
             self.parent.rouse_and_hold(holding_clock)
 
-    def release_from_suspension(self, releasing_clock=None):
+    def release_from_suspension(self, releasing_clock: 'Clock' = None) -> None:
         """
         Called after "rouse_and_hold" to release the roused clock.
 
@@ -1213,7 +1236,7 @@ class Clock:
     #                                                 Fast-forwarding
     ##################################################################################################################
 
-    def fast_forward_to_time(self, t):
+    def fast_forward_to_time(self, t: float) -> None:
         """
         Fast forward clock, skipping instantaneously to the time of t seconds. (Only available on the master clock.)
 
@@ -1225,7 +1248,7 @@ class Clock:
             raise ValueError("Cannot fast-forward to a time in the past.")
         self._fast_forward_goal = t
 
-    def fast_forward_in_time(self, t):
+    def fast_forward_in_time(self, t: float) -> None:
         """
         Fast forward clock, skipping ahead instantaneously by t seconds. (Only available on the master clock.)
 
@@ -1233,7 +1256,7 @@ class Clock:
         """
         self.fast_forward_to_time(self.time() + t)
 
-    def fast_forward_to_beat(self, b):
+    def fast_forward_to_beat(self, b: float) -> None:
         """
         Fast forward clock, skipping instantaneously to beat b. (Only available on the master clock.)
 
@@ -1242,7 +1265,7 @@ class Clock:
         assert b > self.beat(), "Cannot fast-forward to a beat in the past."
         self.fast_forward_in_beats(b - self.beat())
 
-    def fast_forward_in_beats(self, b):
+    def fast_forward_in_beats(self, b: float) -> None:
         """
         Fast forward clock, skipping ahead instantaneously by b beats. (Only available on the master clock.)
 
@@ -1250,7 +1273,7 @@ class Clock:
         """
         self.fast_forward_in_time(self.tempo_envelope.get_wait_time(b))
 
-    def is_fast_forwarding(self):
+    def is_fast_forwarding(self) -> bool:
         """
         Determine if the clock is fast-forwarding.
 
@@ -1263,7 +1286,7 @@ class Clock:
     #                                                 Other Utilities
     ##################################################################################################################
 
-    def log_processing_time(self):
+    def log_processing_time(self) -> None:
         """
         Enables logging statements about calculation time between wait calls.
         """
@@ -1272,7 +1295,7 @@ class Clock:
                             " (i.e. call logging.getLogger().setLevel(20))")
         self._log_processing_time = True
 
-    def stop_logging_processing_time(self):
+    def stop_logging_processing_time(self) -> None:
         """
         Disables logging statements about calculation time between wait calls.
         """
@@ -1305,7 +1328,8 @@ class Clock:
             clock = clock.parent
         return clock._get_time_increments_from_beat_increments(increments)
 
-    def extract_absolute_tempo_envelope(self, start_beat=0, step_size=0.1, tolerance=0.005):
+    def extract_absolute_tempo_envelope(self, start_beat: float = 0, step_size: float = 0.1,
+                                        tolerance: float = 0.005) -> TempoEnvelope:
         """
         Extracts this clock's absolute TempoEnvelope (as opposed to the TempoEnvelope relative to parent clock).
         Used when creating a score from this clock's point of view.
@@ -1362,13 +1386,18 @@ class Clock:
 
 @total_ordering
 class TimeStamp:
+    """
+    A TimeStamp stores the beat of every :class:`Clock` within a family of clocks, at a specific moment.
 
-    def __init__(self, clock=None):
-        """
-        TimeStamp that makes note of the time in every clock related to the given clock.
+    :param clock: any clock in the family of clocks we are interested in; if None, the clock is captured implicitly
+        from the thread
+    :ivar wall_time: the system time (given by time.time()) when this time stamp was created
+    :ivar time_in_master: the time in the master clock when this time stamp was created
+    :ivar beats_in_clocks: dictionary mapping every clock in the family tree to its beat when the TimeStamp was created.
+    """
 
-        :param clock: a Clock; if None, the clock implicitly from the thread
-        """
+    def __init__(self, clock: Clock = None):
+
         clock = current_clock() if clock is None else clock
 
         if clock is None or not isinstance(clock, Clock):
@@ -1399,23 +1428,23 @@ class TimeStamp:
             }
             clock.master.time_stamp_data[self.time_in_master] = self.beats_in_clocks
 
-    def beat_in_clock(self, clock: Clock):
+    def beat_in_clock(self, clock: Clock) -> float:
         """
         Get what beat it was in the given clock at the moment represented by this TimeStamp.
 
         :param clock: the clock we are curious about.
-        :return: (float) the beat in that clock.
+        :return: the beat in that clock.
         """
         if clock in self.beats_in_clocks:
             return self.beats_in_clocks[clock]
         raise ValueError("Invalid clock: not found in TimeStamp")
 
-    def time_in_clock(self, clock: Clock):
+    def time_in_clock(self, clock: Clock) -> float:
         """
         Get what time it was in the given clock at the moment represented by this TimeStamp.
 
         :param clock: the clock we are curious about.
-        :return: (float) the time in that clock.
+        :return: the time in that clock.
         """
         if clock.is_master():
             return self.time_in_master
@@ -1436,13 +1465,13 @@ class TimeStamp:
 
 
 class _WaitKeeper:
+    """
+    Used by a given clock to allow other clocks to put a hold on it so that it doesn't wait / calculate its next
+    wake up call yet. Built so that multiple clocks can issue a hold, and all of them have to release the clock.
+    Plays important role in the "rouse_and_hold" process.
+    """
 
     def __init__(self):
-        """
-        Used by a given clock to allow other clocks to put a hold on it so that it doesn't wait / calculate its next
-        wake up call yet. Built so that multiple clocks can issue a hold, and all of them have to release the clock.
-        Plays important role in the "rouse_and_hold" process.
-        """
         self.blocking_clocks = []
         self._hold_event = Event()
         self._hold_event.set()  # by default, with no holds placed, let's us through

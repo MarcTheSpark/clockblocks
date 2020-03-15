@@ -1,10 +1,22 @@
+"""
+Utilities for logging and debugging processes operating on multiple clocks. (Helps keep track of the order of events.)
+"""
+
 from .utilities import current_clock
 import time
 
 multi_thread_log = []
 
 
-def log_multi(position, *comment_args):
+def log_multi(position: str, *comment_args) -> None:
+    """
+    Add a log entry with the given position tag.
+
+    :param position: a tag to represent the position in the code where the log is happening
+    :param comment_args: arguments alternating between variable names and variable values. For instance, if we call
+        :code:`log_multi("position_tag", "x", x, "y", y)` when x is 7 and y is 42, the log entry will read
+        "Clock (clock) at checkpoint position_tag: x=7, y=42".
+    """
     # useful for keeping track of the order of events between different threads
     comment = ": "
     for i in range(0, len(comment_args), 2):
@@ -19,7 +31,7 @@ def log_multi(position, *comment_args):
     ))
 
 
-def print_multi_log(how_many):
+def print_multi_log(how_many: int) -> None:
     # prints out a trace of the last events logged
     print("--- MULTI-THREAD_LOG ---")
     for comment in multi_thread_log[-how_many:]:
