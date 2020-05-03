@@ -1,10 +1,10 @@
 """
-Module defining the central :class:`Clock` class, as well as the :class: `TimeStamp` class, which records the current
+Module defining the central :class:`Clock` class, as well as the :class:`TimeStamp` class, which records the current
 beat in every clock at a given moment.
 """
 
 from .tempo_envelope import *
-from expenvelope.utilities import _get_extrema_and_inflection_points
+from expenvelope._utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
 from multiprocessing.pool import ThreadPool
 from threading import Lock
@@ -507,7 +507,7 @@ class Clock:
                                 duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
-        of the argument.
+        of the arguments.
 
         :param beat_length_targets: list of the target beat_lengths
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
@@ -539,7 +539,7 @@ class Clock:
                          duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
-        of the argument.
+        of the arguments.
 
         :param rate_targets: list of the target rates
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
@@ -563,7 +563,7 @@ class Clock:
                           duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
-        of the argument.
+        of the arguments.
 
         :param tempo_targets: list of the target tempos
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)

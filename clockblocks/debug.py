@@ -32,6 +32,11 @@ def log_multi(position: str, *comment_args) -> None:
 
 
 def print_multi_log(how_many: int) -> None:
+    """
+    Prints out a trace of the last how_many log statements
+
+    :param how_many: number of statements to print out.
+    """
     # prints out a trace of the last events logged
     print("--- MULTI-THREAD_LOG ---")
     for comment in multi_thread_log[-how_many:]:
@@ -39,7 +44,10 @@ def print_multi_log(how_many: int) -> None:
     print("--- END LOG ---")
 
 
-def clear_multi_log():
+def clear_multi_log() -> None:
+    """
+    Clears the multi-clock log.
+    """
     multi_thread_log.clear()
 
 
@@ -47,13 +55,27 @@ calc_time_starts = {}
 calc_time_durations = {}
 
 
-def log_calc_time_start(tag):
+def log_calc_time_start(tag: str) -> None:
+    """
+    Utility to see how long certain stretches of code are taking on different clocks. This call marks the beginning of
+    the stretch of code and :function:log_calc_time_end marks the end of the stretch of code. Summaries of how long
+    each tagged stretch took are printed at the end of each wait in the master clock.
+
+    :param tag: name used to represent the stretch of code of interest.
+    """
     if tag not in calc_time_starts:
         calc_time_starts[tag] = {}
     calc_time_starts[tag][current_clock()] = time.time()
 
 
-def log_calc_time_end(tag):
+def log_calc_time_end(tag: str) -> None:
+    """
+    Utility to see how long certain stretches of code are taking on different clocks. This call marks the end of the
+    stretch of code and :function:log_calc_time_start marks the beginning of the stretch of code. Summaries of how long
+    each tagged stretch took are printed at the end of each wait in the master clock.
+
+    :param tag: name used to represent the stretch of code of interest.
+    """
     if tag not in calc_time_starts or current_clock() not in calc_time_starts[tag]:
         raise KeyError("log_calc_time_end called without prior log_calc_time_start.")
     if tag not in calc_time_durations:
@@ -67,6 +89,13 @@ def log_calc_time_end(tag):
 
 
 def _print_and_clear_debug_calc_times():
+    """
+    Prints a summary of how long different tagged stretches of code took to execute on each clock. Also prints tag
+    totals and the total time for all tags on all clocks. Used in combination with :function:log_calc_time_start and
+    :function:log_calc_time_end, which are used to mark the start and end point of each tag.
+
+    Note that this is called automatically by the clock when log_calc_time_start and log_calc_time_end are being used.
+    """
     global calc_time_starts, calc_time_durations
     if len(calc_time_durations) == 0:
         calc_time_starts.clear()
