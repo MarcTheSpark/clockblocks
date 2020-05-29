@@ -13,12 +13,12 @@ from typing import Union, Sequence, Tuple
 
 class TempoEnvelope(Envelope):
     r"""
-    A subclass of :class:`expenvelope.envelope.Envelope` that is specifically designed for representing changing tempo
+    A subclass of :class:`~expenvelope.envelope.Envelope` that is specifically designed for representing changing tempo
     curves. The underlying envelope represents beat length as a function of the current beat. A TempoEnvelopes also has
     a notion of the current beat and time and has methods for advancing time.
 
     :param initial_rate_or_segments: the rate to initialize this tempo envelope with, or a list of
-        :class:`expenvelope.envelope_segment.EnvelopeSegment`\ s to initialize it with. (Note that these need
+        :class:`~expenvelope.envelope_segment.EnvelopeSegment`\ s to initialize it with. (Note that these need
         to represent beat length as a function of the current beat.)
     """
 
@@ -31,7 +31,7 @@ class TempoEnvelope(Envelope):
             super().__init__(initial_rate_or_segments)
         else:
             super().__init__()
-            self._initialize(1 / initial_rate_or_segments)
+            self._initialize((1 / initial_rate_or_segments, ))
         self._t = 0.0
         self._beat = 0.0
 
@@ -433,13 +433,13 @@ class TempoEnvelope(Envelope):
                                     metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
         """
         Sets the goal (time) metric phase at the given beat. So, for instance, if we called
-        set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
-        beat 5. If we called set_metric_phase_target_at_beat(7, 1.25, 3), this would mean that at beat 7, we would want
-        to be at time 1.25, 4.25, 7.25, etc.
+        ``adjust_metric_phase_at_beat(5, 0.5)``, this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
+        beat 5. If we called ``adjust_metric_phase_at_beat(7, 1.25, 3)``, this would mean that at beat 7, we would
+        want to be at time 1.25, 4.25, 7.25, etc.
 
         :param beat: The beat at which to have the given phase in time
-        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one
-        :return True, if the adjustment is possible, False if not
+        :param metric_phase_target: either a :class:`MetricPhaseTarget`, or the argument to construct one
+        :return: True, if the adjustment is possible, False if not
         """
         if beat > self.length() or beat <= self.beat():
             raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
@@ -544,13 +544,13 @@ class TempoEnvelope(Envelope):
                                     metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
         """
         Sets the goal (beat) metric phase at the given time. So, for instance, if we called
-        set_metric_phase_target_at_beat(5, 0.5), this would mean that we want to be at beat 1.5, 2.5, 3.5 etc. at
-        time 5. If we called set_metric_phase_target_at_beat(7, 1.25, 3), this would mean that at time 7, we would want
+        ``adjust_metric_phase_at_time(5, 0.5)``, this would mean that at time 5 we want to be at beat 1.5, 2.5, 3.5
+        etc. If we called ``adjust_metric_phase_at_time(7, 1.25, 3)``, this would mean that at time 7, we would want
         to be at beat 1.25, 4.25, 7.25, etc.
 
         :param target_time: The time at which to have the given phase in beat
         :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one
-        :return True, if the adjustment is possible, False if not
+        :return: True, if the adjustment is possible, False if not
         """
 
         envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
@@ -683,7 +683,8 @@ class TempoEnvelope(Envelope):
     ##################################################################################################################
 
     @staticmethod
-    def convert_units(values: Sequence[float], input_units: str, output_units: str) -> Sequence[float]:
+    def convert_units(values: Union[float, Sequence[float]], input_units: str,
+                      output_units: str) -> Union[float, Sequence[float]]:
         """
         Utility method to convert values between unites of tempo, rate and beat length.
 
@@ -754,7 +755,7 @@ class TempoEnvelope(Envelope):
 
         :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
         :param durations: durations of the curve segments in the units specified by the `duration_units` argument
-        :param curve_shapes: see :func:`expenvelope.envelope.Envelope.from_levels_and_durations`
+        :param curve_shapes: see :func:`~expenvelope.envelope.Envelope.from_levels_and_durations`
         :param offset: beat offset for the start of this TempoEnvelope (inherited from Envelope, probably not useful)
         :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
         :param duration_units: either "beats" or "time", determining how we interpret the durations given
@@ -795,7 +796,7 @@ class TempoEnvelope(Envelope):
         """
         Construct a TempoEnvelope from a list that can take a number of formats
 
-        :param constructor_list: see :func:`expenvelope.envelope.Envelope.from_list`
+        :param constructor_list: see :func:`~expenvelope.envelope.Envelope.from_list`
         :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
         :param duration_units: either "beats" or "time", determining how we interpret the durations given
         :return: a TempoEnvelope, constructed accordingly
@@ -850,11 +851,11 @@ class TempoEnvelope(Envelope):
 
         :param function: A function from beat/time to tempo/rate/beat length, as defined by the `duration_units` and
             `units` parameters.
-        :param domain_start: see :func:`expenvelope.envelope.Envelope.from_function`
-        :param domain_end: see :func:`expenvelope.envelope.Envelope.from_function`
-        :param resolution_multiple: see :func:`expenvelope.envelope.Envelope.from_function`
-        :param key_point_precision: see :func:`expenvelope.envelope.Envelope.from_function`
-        :param key_point_iterations: see :func:`expenvelope.envelope.Envelope.from_function`
+        :param domain_start: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param domain_end: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param resolution_multiple: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param key_point_precision: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param key_point_iterations: see :func:`~expenvelope.envelope.Envelope.from_function`
         :param units: one of "tempo", "rate" or "beat length", determining how we interpret the function output
         :param duration_units: either "beats" or "time", determining how we interpret the function input
         :return: a TempoEnvelope, constructed accordingly
@@ -895,7 +896,7 @@ class TempoEnvelope(Envelope):
             raise ImportError("Could not find matplotlib, which is needed for plotting.")
 
         fig, ax = plt.subplots()
-        x_values, y_values = env_to_plot.get_graphable_point_pairs(resolution)
+        x_values, y_values = env_to_plot._get_graphable_point_pairs(resolution)
         ax.plot(x_values, TempoEnvelope.convert_units(y_values, "beat length", units))
         if show_segment_divisions:
             ax.plot(env_to_plot.times, TempoEnvelope.convert_units(env_to_plot.levels, "beat length", units), 'o')
@@ -947,7 +948,7 @@ class MetricPhaseTarget:
         else:
             return MetricPhaseTarget(value)
 
-    def _get_nearest_matches(self, t, offset=0) -> Tuple[float, float]:
+    def _get_nearest_matches(self, t: float, offset: float = 0) -> Tuple[float, float]:
         floored_value = math.floor(t / self.divisor) * self.divisor
         closest_below = None
         closest_above = None
@@ -964,7 +965,7 @@ class MetricPhaseTarget:
                     closest_above = this_value
                     min_dist_above = this_value - t
         # return the closest above and below in order of closeness
-        return closest_below, closest_above if min_dist_below <= min_dist_above else closest_above, closest_below
+        return (closest_below, closest_above) if min_dist_below <= min_dist_above else (closest_above, closest_below)
 
     def get_nearest_matching_beats(self, beat: float) -> Tuple[float, float]:
         """

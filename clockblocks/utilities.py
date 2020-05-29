@@ -47,7 +47,7 @@ def sleep_precisely(secs: float, interruption_event: Event = None) -> None:
 
 def current_clock() -> Union['clock_module.Clock', None]:
     """
-    Get the :class:`clockblocks.clock.Clock` active on the current thread (or None if none is active)
+    Get the :class:`~clockblocks.clock.Clock` active on the current thread (or None if none is active)
     """
     # utility for getting the clock we are currently using (we attach it to the thread when it's started)
     current_thread = threading.current_thread()
@@ -58,11 +58,11 @@ def current_clock() -> Union['clock_module.Clock', None]:
 
 def wait(dt: float, units="beats") -> None:
     """
-    Calls :func:`clockblocks.clock.Clock.wait` on the clock that is currently active on the thread. Defaults to
+    Calls :func:`~clockblocks.clock.Clock.wait` on the clock that is currently active on the thread. Defaults to
     :func:`time.sleep` when no clock is active.
 
     :param dt: duration to wait
-    :param units: either "beats" or "time" (see :func:`clockblocks.clock.Clock.wait`)
+    :param units: either "beats" or "time" (see :func:`~clockblocks.clock.Clock.wait`)
     """
     c = current_clock()
     if c is not None:
@@ -78,13 +78,13 @@ def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, n
     """
     Spawns a parallel process running on a child clock of the currently active clock.
 
-    :param process_function: see :func:`clockblocks.clock.Clock.fork`
-    :param name: see :func:`clockblocks.clock.Clock.fork`
-    :param initial_rate: see :func:`clockblocks.clock.Clock.fork`
-    :param initial_tempo: see :func:`clockblocks.clock.Clock.fork`
-    :param initial_beat_length: see :func:`clockblocks.clock.Clock.fork`
-    :param args: see :func:`clockblocks.clock.Clock.fork`
-    :param kwargs: see :func:`clockblocks.clock.Clock.fork`
+    :param process_function: see :func:`~clockblocks.clock.Clock.fork`
+    :param name: see :func:`~clockblocks.clock.Clock.fork`
+    :param initial_rate: see :func:`~clockblocks.clock.Clock.fork`
+    :param initial_tempo: see :func:`~clockblocks.clock.Clock.fork`
+    :param initial_beat_length: see :func:`~clockblocks.clock.Clock.fork`
+    :param args: see :func:`~clockblocks.clock.Clock.fork`
+    :param kwargs: see :func:`~clockblocks.clock.Clock.fork`
     :return: the clock of the newly forked process
     """
     clock = current_clock()

@@ -3,7 +3,7 @@ Module defining the central :class:`Clock` class, as well as the :class:`TimeSta
 beat in every clock at a given moment.
 """
 
-from .tempo_envelope import *
+from .tempo_envelope import MetricPhaseTarget, TempoEnvelope
 from expenvelope._utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
 from multiprocessing.pool import ThreadPool
@@ -11,12 +11,13 @@ from threading import Lock
 import logging
 from copy import deepcopy
 import inspect
-from .utilities import *
-from .utilities import _PrintColors
+from .utilities import sleep_precisely_until, current_clock, _PrintColors
 from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering, wraps
 import textwrap
 from typing import Union, Sequence, Iterator, Tuple, Callable
+import time
+import threading
 
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
@@ -326,7 +327,7 @@ class Clock:
         """
         self._timing_policy = "relative"
 
-    def use_mixed_timing_policy(self, absolute_relative_mix: float)  -> None:
+    def use_mixed_timing_policy(self, absolute_relative_mix: float) -> None:
         """
         Balance considerations of relative timing and absolute timing accuracy according to the given coefficient
 
@@ -1156,7 +1157,6 @@ class Clock:
             while self._queue_has_wakeup_call():
                 self._handle_next_wakeup_call()
 
-            woken_early = False
         except WokenEarlyException:
             # clock was roused part-way through the wait call (usually from a thread outside the clock system)
             time_passed = time.time() - self._last_sleep_time
@@ -1473,7 +1473,7 @@ class _WaitKeeper:
 
     def __init__(self):
         self.blocking_clocks = []
-        self._hold_event = Event()
+        self._hold_event = threading.Event()
         self._hold_event.set()  # by default, with no holds placed, let's us through
         self.being_held = False
 
