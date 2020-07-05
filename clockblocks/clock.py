@@ -806,9 +806,8 @@ class Clock:
         """
         self._killed = True
         self._wait_event.set()
-        if self.is_master():
-            for child in self.children():
-                child.kill()
+        for child in self.children():
+            child.kill()
 
     @property
     def alive(self) -> bool:

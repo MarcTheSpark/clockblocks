@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="clockblocks",
-    version="0.5",
+    version="0.5.1",
     author="Marc Evanstein",
     author_email="marc@marcevanstein.com",
     description="A python library for controlling the flow of musical time.",
@@ -13,7 +13,7 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="https://github.com/MarcTheSpark/clockblocks",
     packages=setuptools.find_packages(),
-    install_requires=['expenvelope >= 0.2'],
+    install_requires=['expenvelope >= 0.6'],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
