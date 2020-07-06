@@ -8,6 +8,6 @@ clarifies which clock logging messages are occurring under; and the `utilities` 
 utility functions.
 """
 
-from .clock import Clock, TimeStamp
+from .clock import Clock, TimeStamp, DeadClockError, ClockKilledError
 from .tempo_envelope import TempoEnvelope, MetricPhaseTarget
 from .utilities import sleep_precisely, sleep_precisely_until, current_clock, wait, fork, fork_unsynchronized

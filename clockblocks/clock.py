@@ -23,12 +23,22 @@ import threading
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
 
 
-class ClockKilledException(Exception):
+class ClockblocksError(Exception):
+    """Base class for clockblocks errors."""
+    pass
+
+
+class ClockKilledError(ClockblocksError):
     """Exception raised when a clock is killed, allowing us to exit the process forked on it."""
     pass
 
 
-class WokenEarlyException(Exception):
+class DeadClockError(ClockblocksError):
+    """Exception raised when a clock is asked to do something after it was killed."""
+    pass
+
+
+class WokenEarlyError(ClockblocksError):
     """Exception raised when master clock is woken up during its wait call."""
     pass
 
@@ -738,7 +748,7 @@ class Clock:
         :return: the clock of the spawned child process
         """
         if not self.alive:
-            raise RuntimeError("Cannot call fork from a clock that is no longer running.")
+            raise DeadClockError("Cannot call fork from a clock that is no longer running.")
 
         # If we're calling fork from a non clock thread, or from the thread of a parent clock, we need to
         # rouse this clock, since it will be asleep.
@@ -768,7 +778,8 @@ class Clock:
                 """
                 The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
                 it at will. When and if "kill" is called on the clock, its wait_event is set free and it immediately
-                raises a ClockKilledException, which exits us from the process.
+                raises a ClockKilledError, which exits us from the process. (It's also possible, but unlikely, that
+                we will get a DeadClockError, if we were just in the process of calling wait.)
                 """
                 try:
                     if len(args) == num_positional_parameters - 1:
@@ -778,7 +789,9 @@ class Clock:
                     else:
                         # otherwise we just pass the arguments as given
                         process_function(*args, **kwds)
-                except ClockKilledException:
+                except ClockKilledError:
+                    pass
+                except DeadClockError:
                     pass
 
                 self._children.remove(child)
@@ -914,7 +927,7 @@ class Clock:
                 self._dormant = False
                 if self._wait_event.is_set():
                     self._wait_event.clear()
-                    raise WokenEarlyException()
+                    raise WokenEarlyError()
         else:
             self.parent._queue.append(_WakeUpCall(self.parent.beat() + dt, self))
             self.parent._queue.sort(key=lambda x: x.t)
@@ -927,10 +940,10 @@ class Clock:
             if self._woken_early:
                 self._woken_early = False
                 self._wait_event.clear()
-                raise WokenEarlyException()
+                raise WokenEarlyError()
 
             if self._killed:
-                raise ClockKilledException()
+                raise ClockKilledError()
             self._wait_event.clear()
         self._last_sleep_time = time.time()
 
@@ -951,7 +964,7 @@ class Clock:
         if units not in ("beats", "time"):
             raise ValueError("Invalid value of \"{}\" for units. Must be either \"beats\" or \"time\".".format(units))
         if not self.alive:
-            raise RuntimeError("Cannot call wait; clock is no longer running.")
+            raise DeadClockError("Cannot call wait; clock is no longer running.")
 
         self._wait_for_children_to_finish_processing()
 
@@ -972,7 +985,7 @@ class Clock:
             self._wait_in_parent(self.tempo_envelope.get_wait_time(end_beat - self.beat()))
             beats_passed = end_beat - self.beat()
             woken_early = False
-        except WokenEarlyException:
+        except WokenEarlyError:
             # clock was roused part-way through the wait call (usually from a thread outside the clock system)
             time_passed = time.time() - self._last_sleep_time
             self._last_sleep_time = time.time()
@@ -1144,7 +1157,7 @@ class Clock:
         if self._start_time is None:
             self._last_sleep_time = self._start_time = time.time()
         if not self.alive:
-            raise RuntimeError("Cannot call wait; clock is no longer live.")
+            raise DeadClockError("Cannot call wait; clock is no longer live.")
 
         self._wait_for_children_to_finish_processing()
 
@@ -1156,7 +1169,7 @@ class Clock:
             while self._queue_has_wakeup_call():
                 self._handle_next_wakeup_call()
 
-        except WokenEarlyException:
+        except WokenEarlyError:
             # clock was roused part-way through the wait call (usually from a thread outside the clock system)
             time_passed = time.time() - self._last_sleep_time
             beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
