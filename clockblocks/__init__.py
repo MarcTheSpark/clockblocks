@@ -10,4 +10,5 @@ utility functions.
 
 from .clock import Clock, TimeStamp, DeadClockError, ClockKilledError
 from .tempo_envelope import TempoEnvelope, MetricPhaseTarget
-from .utilities import sleep_precisely, sleep_precisely_until, current_clock, wait, fork, fork_unsynchronized
+from .utilities import sleep_precisely, sleep_precisely_until, current_clock, wait, fork, fork_unsynchronized, \
+    wait_forever, wait_for_children_to_finish

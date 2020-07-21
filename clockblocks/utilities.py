@@ -71,6 +71,31 @@ def wait(dt: float, units="beats") -> None:
         time.sleep(dt)
 
 
+def wait_forever() -> None:
+    """
+    Calls :func:`~clockblocks.clock.Clock.wait_forever` on the clock that is currently active on the thread; generally,
+    this is called when there are child clocks running and we want to keep the main script alive while the action takes
+    place on the child clocks.
+    """
+    c = current_clock()
+    if c is not None:
+        current_clock().wait_forever()
+    else:
+        while True:
+            time.sleep(1)
+
+
+def wait_for_children_to_finish() -> None:
+    """
+    Calls :func:`~clockblocks.clock.Clock.wait_for_children_to_finish` on the clock that is currently active on the
+    thread; generally, this is called when there are child clocks running and we want to keep the main script alive
+    while the action takes place on the child clocks.
+    """
+    c = current_clock()
+    if c is not None:
+        current_clock().wait_for_children_to_finish()
+
+
 def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
          initial_rate: float = None, initial_tempo: float = None,
          initial_beat_length: float = None) -> 'clock_module.Clock':
