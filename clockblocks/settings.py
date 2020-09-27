@@ -1,3 +1,7 @@
+"""
+Global preferences and settings for clockblocks.
+"""
+
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 #  This file is part of SCAMP (Suite for Computer-Assisted Music in Python)                      #
 #  Copyright © 2020 Marc Evanstein <marc@marcevanstein.com>.                                     #
@@ -14,25 +18,11 @@
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
-import setuptools
-
-with open("README.md", "r") as fh:
-    long_description = fh.read()
-
-setuptools.setup(
-    name="clockblocks",
-    version="0.5.5",
-    author="Marc Evanstein",
-    author_email="marc@marcevanstein.com",
-    description="A python library for controlling the flow of musical time.",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://git.sr.ht/~marcevanstein/clockblocks",
-    packages=setuptools.find_packages(),
-    install_requires=['expenvelope >= 0.6.5'],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-        "Operating System :: OS Independent",
-    ],
-)
+#: Throw a warning when the master clock is running more than this many seconds behind on a longer wait call
+running_behind_warning_threshold_long = 0.010
+#: Throw a warning when the master clock is running more than this many seconds behind on a short/zero-length wait call
+running_behind_warning_threshold_short = 0.025
+#: Throw a warning when catching up child clocks takes longer than this, and master clock is running behind
+catching_up_child_clocks_threshold_min = 0.001
+#: Throw a warning when catching up child clocks takes longer than this, but master clock is not running behind
+catching_up_child_clocks_threshold_max = 0.005

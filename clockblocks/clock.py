@@ -34,7 +34,8 @@ import textwrap
 from typing import Union, Sequence, Iterator, Tuple, Callable
 import time
 import threading
-
+from .settings import catching_up_child_clocks_threshold_min, catching_up_child_clocks_threshold_max, \
+    running_behind_warning_threshold_long, running_behind_warning_threshold_short
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
 
@@ -923,9 +924,17 @@ class Clock:
                 print("MASTER SCHEDULED WAIT TIME: {}, TOTAL PROCESSING TIME: {}".format(
                     dt, time.time() - self._last_sleep_time))
 
-            # in case processing took so long that we are already past the time we were supposed to stop sleeping,
-            # we throw a warning that we're getting behind and don't try to sleep at all
-            if stop_sleeping_time < time.time() - 0.01:
+            # in case processing took so long that we are already significantly past the time we were supposed to stop
+            # sleeping, we throw a warning that we're getting behind and don't try to sleep at all. The threshold for
+            # what is too far behind is set in the settings, and varies depending on how long the wait call is. We
+            # actually give *more* leeway by default if the wait call is very short, because otherwise warnings get
+            # thrown when clocks almost coincide.
+            running_behind_threshold = running_behind_warning_threshold_long if dt > 0.1 else \
+                running_behind_warning_threshold_short if dt <= 0 else \
+                (1 - dt / 0.1) * (running_behind_warning_threshold_short - running_behind_warning_threshold_long) + \
+                running_behind_warning_threshold_long
+
+            if stop_sleeping_time < time.time() - running_behind_threshold:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
                 logging.warning(
                     "Clock is running noticeably behind real time ({} s) on a wait call of {} s; "
@@ -1046,7 +1055,8 @@ class Clock:
         elif self._resolve_synchronization_policy() == "all descendants":
             self._catch_up_children()
         calc_time = time.time() - start
-        if calc_time > (0.003 if self.master._running_behind_warning_count == 0 else 0.001):
+        if calc_time > (catching_up_child_clocks_threshold_max if self.master._running_behind_warning_count == 0
+                        else catching_up_child_clocks_threshold_min):
             # throw a warning if catching up child clocks is being slow. Be more picky if the master is getting behind
             logging.warning("Catching up child clocks is taking a little while ({} seconds to be precise) on "
                             "clock {}. \nUnless you are recording on a child or cousin clock, you can safely turn this "
