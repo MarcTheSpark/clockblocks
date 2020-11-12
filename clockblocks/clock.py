@@ -31,7 +31,7 @@ from .utilities import sleep_precisely_until, current_clock, _PrintColors
 from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering, wraps
 import textwrap
-from typing import Union, Sequence, Iterator, Tuple, Callable
+from typing import Union, Sequence, Iterator, Tuple, Callable, TypeVar
 import time
 import threading
 from .settings import catching_up_child_clocks_threshold_min, catching_up_child_clocks_threshold_max, \
@@ -80,6 +80,9 @@ def tempo_modification(fn):
             fn(self, *args, **kwargs)
             self.release_from_suspension()
     return wrapper
+
+
+T = TypeVar('T', bound='Clock')
 
 
 class Clock:
@@ -866,6 +869,23 @@ class Clock:
                 logging.exception(e)
 
         self._run_in_pool(_process, args, kwargs)
+
+    def run_as_server(self) -> T:
+        """
+        Runs this clock on a parallel thread so that it can act as a server. This is the approach that should be taken
+        if running clockblocks from an interactive terminal session. Simply type :code:`c = Clock().run_as_server()`
+
+        :return: self
+        """
+        def run_server():
+            threading.current_thread().__clock__ = self
+            while True:
+                current_clock().wait_forever()
+
+        threading.Thread(target=run_server, daemon=True).start()
+        # don't have the thread that called this recognize the Session as its clock anymore
+        threading.current_thread().__clock__ = None
+        return self
 
     ##################################################################################################################
     #                                             Waiting (the guts)
