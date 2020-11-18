@@ -149,7 +149,7 @@ class Clock:
             initial_rate = initial_rate if initial_rate is not None \
                 else 1 / initial_beat_length if initial_beat_length is not None else initial_tempo / 60
         # tempo envelope, in seconds since I was created
-        self.tempo_envelope = TempoEnvelope(initial_rate)
+        self.tempo_envelope = TempoEnvelope(initial_rate, units="rate")
 
         # how long had my parent been around when I was created
         self.parent_offset = self.parent.beat() if self.parent is not None else 0
@@ -556,7 +556,7 @@ class Clock:
             self._loop_segments(self.tempo_envelope.segments[-len(beat_length_targets):])
 
     def _loop_segments(self, segments_to_loop):
-        self._envelope_loop_or_function = TempoEnvelope.from_levels_and_durations(
+        self._envelope_loop_or_function = TempoEnvelope(
             [s.start_level for s in segments_to_loop] + [segments_to_loop[-1].end_level],
             [s.duration for s in segments_to_loop],
             [s.curve_shape for s in segments_to_loop],
@@ -1420,7 +1420,7 @@ class Clock:
                 _, beat_change = tempo_envelope.advance(beat_change)
             return beat_change / step
 
-        output_curve = TempoEnvelope(initial_rate_or_segments=initial_rate)
+        output_curve = TempoEnvelope(initial_rate, units="rate")
 
         while any(tempo_envelope.beat() < tempo_envelope.length() for tempo_envelope in tempo_envelopes):
             # we step twice for half the step size so that we can get a halfway point to use to guide curvature

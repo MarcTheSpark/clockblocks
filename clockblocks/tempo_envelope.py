@@ -33,23 +33,149 @@ class TempoEnvelope(Envelope):
     curves. The underlying envelope represents beat length as a function of the current beat. A TempoEnvelopes also has
     a notion of the current beat and time and has methods for advancing time.
 
-    :param initial_rate_or_segments: the rate to initialize this tempo envelope with, or a list of
-        :class:`~expenvelope.envelope_segment.EnvelopeSegment`\ s to initialize it with. (Note that these need
-        to represent beat length as a function of the current beat.)
+    :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
+    :param durations: durations of the curve segments in the units specified by the `duration_units` argument
+    :param curve_shapes: see :func:`~expenvelope.envelope.Envelope.from_levels_and_durations`
+    :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
+    :param duration_units: either "beats" or "time", determining how we interpret the durations given
     """
 
-    def __init__(self, initial_rate_or_segments: Union[float, Sequence[EnvelopeSegment]] = 1.0):
+    def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
+                 curve_shapes: Sequence[Union[float, str]] = None,
+                 units: str = "tempo", duration_units: str = "beats"):
+        if units not in ("tempo", "rate", "beatlength"):
+            raise ValueError("Units must be either \"tempo\" or \"rate\" or \"beatlength\".")
+        if duration_units not in ("beats", "time"):
+            raise ValueError("Duration units must be either \"beats\" or \"time\".")
 
-        # This is built on a envelope of beat length (units = s / beat, or really parent_beats / beat)
-        if isinstance(initial_rate_or_segments, list):
-            # this allows for compatibility with the Envelope constructor, helping class methods to work appropriately
-            assert all(isinstance(x, EnvelopeSegment) for x in initial_rate_or_segments)
-            super().__init__(initial_rate_or_segments)
-        else:
-            super().__init__()
-            self._initialize((1 / initial_rate_or_segments, ))
+        super(TempoEnvelope, self).__init__(
+            TempoEnvelope.convert_units(levels, units, "beatlength"), durations, curve_shapes, 0
+        )
+
+        if duration_units == "time":
+            self.convert_durations_to_times()
+
         self._t = 0.0
         self._beat = 0.0
+
+    ##################################################################################################################
+    #                                                Class Methods
+    ##################################################################################################################
+
+    @classmethod
+    def from_levels_and_durations(cls, levels: Sequence = (0, 0), durations: Sequence[float] = (0,),
+                                  curve_shapes: Sequence[Union[float, str]] = None,
+                                  units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+        """
+        Constructs a TempoEnvelope from the given levels, durations and curve shapes, using the specified units.
+
+        :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
+        :param durations: durations of the curve segments in the units specified by the `duration_units` argument
+        :param curve_shapes: see :func:`~expenvelope.envelope.Envelope.from_levels_and_durations`
+        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
+        :param duration_units: either "beats" or "time", determining how we interpret the durations given
+        :return: a TempoEnvelope, constructed accordingly
+        """
+        return cls(levels, durations, curve_shapes, units=units, duration_units=duration_units)
+
+    @classmethod
+    def from_levels(cls, levels: Sequence[float], length: float = 1.0, units: str = "tempo",
+                    duration_units: str = "beats") -> 'TempoEnvelope':
+        """
+        Constructs a TempoEnvelope from the given levels and total length, using the specified units.
+
+        :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
+        :param length: total length of the tempo curve, in the units specified by the `duration_units` argument
+        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
+        :param duration_units: either "beats" or "time", determining how we interpret the durations given
+        :return: a TempoEnvelope, constructed accordingly
+        """
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beats\" or \"time\"."
+        return cls(
+            *TempoEnvelope._levels_and_length_to_levels_durations_and_curves(levels, length),
+            units=units, duration_units=duration_units
+        )
+
+    @classmethod
+    def from_list(cls, constructor_list: Sequence, units: str = "tempo",
+                  duration_units: str = "beats") -> 'TempoEnvelope':
+        """
+        Construct a TempoEnvelope from a list that can take a number of formats
+
+        :param constructor_list: see :func:`~expenvelope.envelope.Envelope.from_list`
+        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
+        :param duration_units: either "beats" or "time", determining how we interpret the durations given
+        :return: a TempoEnvelope, constructed accordingly
+        """
+        assert hasattr(constructor_list, "__len__")
+        if hasattr(constructor_list[0], "__len__"):
+            # we were given levels and durations, and possibly curvature values
+            if len(constructor_list) == 2:
+                if hasattr(constructor_list[1], "__len__"):
+                    # given levels and durations
+                    return cls.from_levels_and_durations(constructor_list[0], constructor_list[1],
+                                                         units=units, duration_units=duration_units)
+                else:
+                    # given levels and the total length
+                    return cls.from_levels(constructor_list[0], length=constructor_list[1],
+                                           units=units, duration_units=duration_units)
+
+            elif len(constructor_list) >= 3:
+                # given levels, durations, and curvature values
+                return cls.from_levels_and_durations(constructor_list[0], constructor_list[1], constructor_list[2],
+                                                     units=units, duration_units=duration_units)
+        else:
+            # just given levels
+            return cls.from_levels(constructor_list, units=units, duration_units=duration_units)
+
+    @classmethod
+    def from_points(cls, *points, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+        """
+        Construct an envelope from a list of (beat/time, tempo/rate/beat length) pairs. Units are defined by the
+        `units` and `duration_units` parameters.
+
+        :param points: list of points, each of which is of the form (time, value) or (time, value, curve_shape)
+        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the tempo values
+        :param duration_units: either "beats" or "time", determining how we interpret the time values
+        :return: a TempoEnvelope, constructed accordingly
+        """
+        levels, durations, curve_shapes, offset = TempoEnvelope._unwrap_points(*points)
+        if offset != 0:
+            raise ValueError("TempoEnvelope must start from beat/time zero; when constructing from points, the "
+                             "first point must be of the form (0, [start tempo], [optional curve shape]).")
+        return cls(levels, durations, curve_shapes, units=units, duration_units=duration_units)
+
+    @classmethod
+    def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2, key_point_precision=100,
+                      key_point_iterations=5, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+        """
+        Constructs a TempoEnvelope that approximates an arbitrary function. The domain of the function is in units
+        defined by the `duration_units` parameter, and the range is in units defined by the `units` parameter.
+
+        :param function: A function from beat/time to tempo/rate/beat length, as defined by the `duration_units` and
+            `units` parameters.
+        :param domain_start: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param domain_end: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param resolution_multiple: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param key_point_precision: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param key_point_iterations: see :func:`~expenvelope.envelope.Envelope.from_function`
+        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the function output
+        :param duration_units: either "beats" or "time", determining how we interpret the function input
+        :return: a TempoEnvelope, constructed accordingly
+        """
+        assert duration_units in ("beats", "time"), "Duration units must be either \"beats\" or \"time\"."
+        converted_function = (lambda x: TempoEnvelope.convert_units(function(x), units, "beatlength")) \
+            if units.lower().replace(" ", "") != "beatlength" else function
+        out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
+                                             key_point_precision, key_point_iterations)
+        if duration_units == "time":
+            return out_envelope.convert_durations_to_times()
+        else:
+            return out_envelope
+
+    ##################################################################################################################
+    #                                                Properties
+    ##################################################################################################################
 
     def time(self):
         """
@@ -759,134 +885,6 @@ class TempoEnvelope(Envelope):
         return self
 
     ##################################################################################################################
-    #                                                Class Methods
-    ##################################################################################################################
-
-    @classmethod
-    def from_levels_and_durations(cls, levels: Sequence = (0, 0), durations: Sequence[float] = (0,),
-                                  curve_shapes: Sequence[Union[float, str]] = None, offset: float = 0,
-                                  units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
-        """
-        Constructs a TempoEnvelope from the given levels, durations and curve shapes, using the specified units.
-
-        :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
-        :param durations: durations of the curve segments in the units specified by the `duration_units` argument
-        :param curve_shapes: see :func:`~expenvelope.envelope.Envelope.from_levels_and_durations`
-        :param offset: beat offset for the start of this TempoEnvelope (inherited from Envelope, probably not useful)
-        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
-        :param duration_units: either "beats" or "time", determining how we interpret the durations given
-        :return: a TempoEnvelope, constructed accordingly
-        """
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_levels_and_durations(TempoEnvelope.convert_units(levels, units, "beatlength"),
-                                                         durations, curve_shapes, offset)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
-    def from_levels(cls, levels: Sequence[float], length: float = 1.0, offset: float = 0, units: str = "tempo",
-                    duration_units: str = "beats") -> 'TempoEnvelope':
-        """
-        Constructs a TempoEnvelope from the given levels and total length, using the specified units.
-
-        :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
-        :param length: total length of the tempo curve, in the units specified by the `duration_units` argument
-        :param offset: beat offset for the start of this TempoEnvelope (inherited from Envelope, probably not useful)
-        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
-        :param duration_units: either "beats" or "time", determining how we interpret the durations given
-        :return: a TempoEnvelope, constructed accordingly
-        """
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_levels(TempoEnvelope.convert_units(levels, units, "beatlength"),
-                                           length=length, offset=offset)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
-    def from_list(cls, constructor_list: Sequence, units: str = "tempo",
-                  duration_units: str = "beats") -> 'TempoEnvelope':
-        """
-        Construct a TempoEnvelope from a list that can take a number of formats
-
-        :param constructor_list: see :func:`~expenvelope.envelope.Envelope.from_list`
-        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the levels given
-        :param duration_units: either "beats" or "time", determining how we interpret the durations given
-        :return: a TempoEnvelope, constructed accordingly
-        """
-        assert hasattr(constructor_list, "__len__")
-        if hasattr(constructor_list[0], "__len__"):
-            # we were given levels and durations, and possibly curvature values
-            if len(constructor_list) == 2:
-                if hasattr(constructor_list[1], "__len__"):
-                    # given levels and durations
-                    return cls.from_levels_and_durations(constructor_list[0], constructor_list[1],
-                                                         units=units, duration_units=duration_units)
-                else:
-                    # given levels and the total length
-                    return cls.from_levels(constructor_list[0], length=constructor_list[1],
-                                           units=units, duration_units=duration_units)
-
-            elif len(constructor_list) >= 3:
-                # given levels, durations, and curvature values
-                return cls.from_levels_and_durations(constructor_list[0], constructor_list[1], constructor_list[2],
-                                                     units=units, duration_units=duration_units)
-        else:
-            # just given levels
-            return cls.from_levels(constructor_list, units=units, duration_units=duration_units)
-
-    @classmethod
-    def from_points(cls, *points, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
-        """
-        Construct an envelope from a list of (beat/time, tempo/rate/beat length) pairs. Units are defined by the
-        `units` and `duration_units` parameters.
-
-        :param points: list of points, each of which is of the form (time, value) or (time, value, curve_shape)
-        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the tempo values
-        :param duration_units: either "beats" or "time", determining how we interpret the time values
-        :return: a TempoEnvelope, constructed accordingly
-        """
-        assert all(len(point) >= 2 for point in points)
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        out_envelope = super().from_points([(t, TempoEnvelope.convert_units(l, units, "beatlength"))
-                                            for (t, l) in points])
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    @classmethod
-    def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2, key_point_precision=100,
-                      key_point_iterations=5, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
-        """
-        Constructs a TempoEnvelope that approximates an arbitrary function. The domain of the function is in units
-        defined by the `duration_units` parameter, and the range is in units defined by the `units` parameter.
-
-        :param function: A function from beat/time to tempo/rate/beat length, as defined by the `duration_units` and
-            `units` parameters.
-        :param domain_start: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param domain_end: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param resolution_multiple: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_precision: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_iterations: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param units: one of "tempo", "rate" or "beat length", determining how we interpret the function output
-        :param duration_units: either "beats" or "time", determining how we interpret the function input
-        :return: a TempoEnvelope, constructed accordingly
-        """
-        assert duration_units in ("beats", "time"), "Duration units must be either \"beat\" or \"time\"."
-        converted_function = (lambda x: TempoEnvelope.convert_units(function(x), units, "beatlength")) \
-            if units.lower().replace(" ", "") != "beatlength" else function
-        out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
-                                             key_point_precision, key_point_iterations)
-        if duration_units == "time":
-            return out_envelope.convert_durations_to_times()
-        else:
-            return out_envelope
-
-    ##################################################################################################################
     #                                                Other Utilities
     ##################################################################################################################
 
@@ -926,7 +924,8 @@ class TempoEnvelope(Envelope):
         plt.show()
 
     def __repr__(self):
-        return "TempoEnvelope({}, {}, {})".format(self.levels, self.durations, self.curve_shapes)
+        return "TempoEnvelope({}, {}, {})".format(
+            TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes)
 
 
 class MetricPhaseTarget:
