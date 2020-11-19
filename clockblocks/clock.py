@@ -36,6 +36,8 @@ import time
 import threading
 from .settings import catching_up_child_clocks_threshold_min, catching_up_child_clocks_threshold_max, \
     running_behind_warning_threshold_long, running_behind_warning_threshold_short
+from numbers import Real
+
 
 _WakeUpCall = namedtuple("WakeUpCall", "t clock")
 
@@ -748,7 +750,8 @@ class Clock:
             threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
 
     def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
-             initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None) -> 'Clock':
+             initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
+             schedule_at: Union[float, MetricPhaseTarget] = None) -> 'Clock':
         """
         Spawns a parallel process running on a child clock.
 
@@ -765,6 +768,13 @@ class Clock:
         :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
         :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
         :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
+        :param schedule_at: either a beat or a :class:`~clockblocks.tempo_envelope.MetricPhaseTarget` specifying when we
+            want this forked process to begin. The default value of None indicates that it is to begin immediately. A
+            float indicates the beat in this clock at which the process is to start (should be in the future).
+            Alternatively, a MetricPhaseTarget can be used to specify where in a regular cycle the process should begin.
+            For instance, if we want to sync every fork to 3/4 time, MetricPhaseTarget(0, 3) would start a process on
+            the downbeat, MetricPhaseTarget(1, 3) would start it on beat 2, and MetricPhaseTarget(2.5, 3) would start it
+            halfway through beat 3.
         :return: the clock of the spawned child process
         """
         if not self.alive:
@@ -782,6 +792,20 @@ class Clock:
 
         child = Clock(name, parent=self, initial_rate=initial_rate, initial_tempo=initial_tempo,
                       initial_beat_length=initial_beat_length)
+
+        if schedule_at is None:
+            start_delay = 0
+        elif isinstance(schedule_at, Real):
+            start_delay = schedule_at - self.beat()
+            if start_delay < 0:
+                logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
+                start_delay = 0
+        else:  # it's a MetricPhaseTarget
+            if not isinstance(schedule_at, MetricPhaseTarget):
+                raise ValueError("`schedule_at` must be either a float or a MetricPhaseTarget")
+            # get_nearest_matching_beats returns the nearest match below and above, in order of nearness
+            # we want the match above, since it's in the future, so we use max
+            start_delay = max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
 
         def _process(*args, **kwds):
             try:
@@ -802,6 +826,15 @@ class Clock:
                 we will get a DeadClockError, if we were just in the process of calling wait.)
                 """
                 try:
+                    if start_delay > 0:
+                        # if there's a start delay, then we start the clock on a negative beat and time
+                        # so that both arrive at zero when when the forked process starts
+                        child.tempo_envelope._t = -start_delay
+                        # child.tempo_envelope.segments[0].start_level is the initial beat length, so this
+                        # modifies the start beat proportionally to arrive at zero
+                        child.tempo_envelope._beat = -start_delay / child.tempo_envelope.segments[0].start_level
+                        child.parent_offset += start_delay
+                        child.wait(start_delay, units="time")
                     if len(args) == num_positional_parameters - 1:
                         # if the process_function we have been takes one more argument than
                         # provided then we pass the clock as the first argument
