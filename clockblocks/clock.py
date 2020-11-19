@@ -547,7 +547,7 @@ class Clock:
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting these targets.
-        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
         self.tempo_envelope.set_beat_length_targets(beat_length_targets, durations, curve_shapes, metric_phase_targets,
@@ -579,7 +579,7 @@ class Clock:
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting these targets.
-        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
         self.tempo_envelope.set_rate_targets(rate_targets, durations, curve_shapes, metric_phase_targets,
@@ -603,7 +603,7 @@ class Clock:
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting these targets.
-        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_looping_tempo_targets
+        :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
         self.tempo_envelope.set_tempo_targets(tempo_targets, durations, curve_shapes, metric_phase_targets,
@@ -611,7 +611,7 @@ class Clock:
         if loop:
             self._loop_segments(self.tempo_envelope.segments[-len(tempo_targets):])
 
-    def stop_looping_tempo_targets(self) -> None:
+    def stop_tempo_loop_or_function(self) -> None:
         """
         If we set up a looping list of tempo targets, this stops that looping process. It also stops extending any
         tempo function that we set up to go indefinitely.
