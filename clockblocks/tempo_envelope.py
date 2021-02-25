@@ -199,6 +199,9 @@ class TempoEnvelope(Envelope):
     @beat_length.setter
     def beat_length(self, beat_length):
         self.truncate()
+        if len(self.segments) == 1 and self.length() == 0:
+            # if this is an essentially empty tempo envelope, reset its starting beat_length to the given value
+            self.segments[0].start_level = self.segments[0].end_level = beat_length
         self.append_segment(beat_length, 0)
 
     def _bring_up_to_date(self, beat: float = None) -> 'TempoEnvelope':

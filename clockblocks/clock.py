@@ -790,6 +790,8 @@ class Clock:
 
         kwargs = {} if kwargs is None else kwargs
 
+        name = process_function.__name__ if name is None else name
+
         child = Clock(name, parent=self, initial_rate=initial_rate, initial_tempo=initial_tempo,
                       initial_beat_length=initial_beat_length)
 
@@ -1233,40 +1235,44 @@ class Clock:
         """
         Causes this thread to block until all forked child processes have finished.
         """
-        if self._start_time is None:
-            self._last_sleep_time = self._start_time = time.time()
-        if not self.alive:
-            raise DeadClockError("Cannot call wait; clock is no longer live.")
+        done = False
+        while not done:
+            if self._start_time is None:
+                self._last_sleep_time = self._start_time = time.time()
+            if not self.alive:
+                raise DeadClockError("Cannot call wait; clock is no longer live.")
 
-        self._wait_for_children_to_finish_processing()
+            self._wait_for_children_to_finish_processing()
 
-        # make sure any timestamps for this moment have all clocks represented in them
-        self._complete_timestamp_data()
+            # make sure any timestamps for this moment have all clocks represented in them
+            self._complete_timestamp_data()
 
-        try:
-            # while there are wake up calls left to do amongst the children
-            while self._queue_has_wakeup_call():
-                self._handle_next_wakeup_call()
+            try:
+                # while there are wake up calls left to do amongst the children
+                while self._queue_has_wakeup_call():
+                    self._handle_next_wakeup_call()
+                done = True
+            except WokenEarlyError:
+                # clock was roused part-way through the wait call (usually from a thread outside the clock system)
 
-        except WokenEarlyError:
-            # clock was roused part-way through the wait call (usually from a thread outside the clock system)
-            time_passed = time.time() - self._last_sleep_time
-            beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+                time_passed = time.time() - self._last_sleep_time
+                self._last_sleep_time = time.time()
+                beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
 
-            if self.is_master():
-                # do this unless we were woken early and are not on the master clock (in that case, the master will be
-                # roused and catch up all the children, and our main goal is to recalculate the next wake up call)
-                self.tempo_envelope.advance(beats_passed)
-                self._synchronize_children()
-            else:
-                self.parent._queue_lock.acquire()
-                self._remove_wakeup_call_from_parent_queue()
+                if self.is_master():
+                    # do this unless we were woken early and are not on the master clock (in that case, the master will
+                    # be roused and catch up all the children, and our main goal is to recalculate the next wake up call)
 
-            # the wait keeper holds the clock in suspension, generally when the clock has been woken up early (using
-            # rouse_and_hold) and we're waiting to carry out a few commands before letting it go do its thing
-            self._wait_keeper.wait_for_clearance()
+                    self.tempo_envelope.advance(beats_passed)
+                    self._synchronize_children()
+                else:
+                    self.parent._queue_lock.acquire()
+                    self._remove_wakeup_call_from_parent_queue()
 
-            self.wait_for_children_to_finish()
+                # the wait keeper holds the clock in suspension, generally when the clock has been woken up early (using
+                # rouse_and_hold) and we're waiting to carry out a few commands before letting it go do its thing
+                self._wait_keeper.wait_for_clearance()
+                # if woken early, done is False, so we re-enter the loop
 
     def wait_forever(self) -> None:
         """
