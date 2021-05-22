@@ -790,7 +790,8 @@ class Clock:
 
         kwargs = {} if kwargs is None else kwargs
 
-        name = process_function.__name__ if name is None else name
+        name = (process_function.__name__ if hasattr(process_function, '__name__') else "UNNAMED") \
+            if name is None else name
 
         child = Clock(name, parent=self, initial_rate=initial_rate, initial_tempo=initial_tempo,
                       initial_beat_length=initial_beat_length)

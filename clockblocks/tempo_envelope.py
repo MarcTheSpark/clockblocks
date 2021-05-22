@@ -926,6 +926,15 @@ class TempoEnvelope(Envelope):
         ax.set_title('Graph of TempoEnvelope' if title is None else title)
         plt.show()
 
+    @classmethod
+    def _from_dict(cls, json_dict):
+        curve_shapes = None if 'curve_shapes' not in json_dict else json_dict['curve_shapes']
+        if 'length' in json_dict:
+            return cls.from_levels(json_dict['levels'], json_dict['length'])
+        else:
+            return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
+                                                 curve_shapes)
+
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(
             TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes)
