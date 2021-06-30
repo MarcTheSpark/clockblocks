@@ -10,3 +10,4 @@ tasks:
      cd clockblocks
      git remote add github git@github.com:MarcTheSpark/clockblocks.git
      git push github --all --follow-tags
+     git push github --tags

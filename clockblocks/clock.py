@@ -877,6 +877,8 @@ class Clock:
         self._wait_event.set()
         for child in self.children():
             child.kill()
+        if self.is_master():
+            self._pool.terminate()
 
     @property
     def alive(self) -> bool:
