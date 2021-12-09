@@ -19,7 +19,7 @@ beat in every clock at a given moment.
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
-from .tempo_envelope import MetricPhaseTarget, TempoEnvelope
+from .tempo_envelope import MetricPhaseTarget, TempoEnvelope, TempoHistory
 from expenvelope._utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
 from multiprocessing.pool import ThreadPool
@@ -123,7 +123,7 @@ class Clock:
         has an effect if this is the master clock.
     :ivar name: the name of this clock (string)
     :ivar parent: the parent Clock to which this clock belongs (Clock, or None if master clock)
-    :ivar tempo_envelope: TempoEnvelope describing how this clock has changed or will change tempo
+    :ivar tempo_history: TempoHistory describing how this clock has changed or will change tempo
     """
 
     def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
@@ -151,7 +151,7 @@ class Clock:
             initial_rate = initial_rate if initial_rate is not None \
                 else 1 / initial_beat_length if initial_beat_length is not None else initial_tempo / 60
         # tempo envelope, in seconds since I was created
-        self.tempo_envelope = TempoEnvelope(initial_rate, units="rate")
+        self.tempo_history = TempoHistory(initial_rate, units="rate")
 
         # how long had my parent been around when I was created
         self.parent_offset = self.parent.beat() if self.parent is not None else 0
@@ -381,13 +381,13 @@ class Clock:
         Either in seconds, if this is the master clock, or in beats in the parent clock, if this clock was the result
         of a call to fork.
         """
-        return self.tempo_envelope.time()
+        return self.tempo_history.time()
 
     def beat(self) -> float:
         """
         How many beats have passed since this clock was created.
         """
-        return self.tempo_envelope.beat()
+        return self.tempo_history.beat()
 
     def time_in_master(self) -> float:
         """
@@ -404,12 +404,12 @@ class Clock:
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
         in the parent clock.
         """
-        return self.tempo_envelope.beat_length
+        return self.tempo_history.beat_length
 
     @beat_length.setter
     @tempo_modification
     def beat_length(self, b):
-        self.tempo_envelope.beat_length = b
+        self.tempo_history.beat_length = b
 
     @property
     def rate(self) -> float:
@@ -420,12 +420,12 @@ class Clock:
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
         in the parent clock.
         """
-        return self.tempo_envelope.rate
+        return self.tempo_history.rate
 
     @rate.setter
     @tempo_modification
     def rate(self, r):
-        self.tempo_envelope.rate = r
+        self.tempo_history.rate = r
 
     @property
     def tempo(self) -> float:
@@ -436,12 +436,12 @@ class Clock:
         Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
         in the parent clock.
         """
-        return self.tempo_envelope.tempo
+        return self.tempo_history.tempo
 
     @tempo.setter
     @tempo_modification
     def tempo(self, t):
-        self.tempo_envelope.tempo = t
+        self.tempo_history.tempo = t
 
     def absolute_rate(self) -> float:
         """
@@ -488,8 +488,8 @@ class Clock:
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting this goal.
         """
-        self.tempo_envelope.set_beat_length_target(beat_length_target, duration, curve_shape, metric_phase_target,
-                                                   duration_units, truncate)
+        self.tempo_history.set_beat_length_target(beat_length_target, duration, curve_shape, metric_phase_target,
+                                                  duration_units, truncate)
 
     @tempo_modification
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
@@ -509,8 +509,8 @@ class Clock:
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting this goal.
         """
-        self.tempo_envelope.set_rate_target(rate_target, duration, curve_shape, metric_phase_target,
-                                            duration_units, truncate)
+        self.tempo_history.set_rate_target(rate_target, duration, curve_shape, metric_phase_target,
+                                           duration_units, truncate)
 
     @tempo_modification
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
@@ -530,8 +530,8 @@ class Clock:
             seconds/parent beats.
         :param truncate: Whether or not to delete all future tempo plans before setting this goal.
         """
-        self.tempo_envelope.set_tempo_target(tempo_target, duration, curve_shape, metric_phase_target,
-                                             duration_units, truncate)
+        self.tempo_history.set_tempo_target(tempo_target, duration, curve_shape, metric_phase_target,
+                                            duration_units, truncate)
 
     @tempo_modification
     def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
@@ -552,10 +552,10 @@ class Clock:
         :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
-        self.tempo_envelope.set_beat_length_targets(beat_length_targets, durations, curve_shapes, metric_phase_targets,
-                                                    duration_units, truncate)
+        self.tempo_history.set_beat_length_targets(beat_length_targets, durations, curve_shapes, metric_phase_targets,
+                                                   duration_units, truncate)
         if loop:
-            self._loop_segments(self.tempo_envelope.segments[-len(beat_length_targets):])
+            self._loop_segments(self.tempo_history.segments[-len(beat_length_targets):])
 
     def _loop_segments(self, segments_to_loop):
         self._envelope_loop_or_function = TempoEnvelope(
@@ -584,10 +584,10 @@ class Clock:
         :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
-        self.tempo_envelope.set_rate_targets(rate_targets, durations, curve_shapes, metric_phase_targets,
-                                             duration_units, truncate)
+        self.tempo_history.set_rate_targets(rate_targets, durations, curve_shapes, metric_phase_targets,
+                                            duration_units, truncate)
         if loop:
-            self._loop_segments(self.tempo_envelope.segments[-len(rate_targets):])
+            self._loop_segments(self.tempo_history.segments[-len(rate_targets):])
 
     @tempo_modification
     def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
@@ -608,10 +608,10 @@ class Clock:
         :param loop: If true, loops the added sequence of targets indefinitely, or until stop_tempo_loop_or_function
             is called.
         """
-        self.tempo_envelope.set_tempo_targets(tempo_targets, durations, curve_shapes, metric_phase_targets,
-                                              duration_units, truncate)
+        self.tempo_history.set_tempo_targets(tempo_targets, durations, curve_shapes, metric_phase_targets,
+                                             duration_units, truncate)
         if loop:
-            self._loop_segments(self.tempo_envelope.segments[-len(tempo_targets):])
+            self._loop_segments(self.tempo_history.segments[-len(tempo_targets):])
 
     def stop_tempo_loop_or_function(self) -> None:
         """
@@ -706,10 +706,10 @@ class Clock:
                               resolution_multiple: int = 2) -> None:
         # truncate removes any segments that extend into the future
         if truncate:
-            self.tempo_envelope.remove_segments_after(self.beat())
+            self.tempo_history.remove_segments_after(self.beat())
 
         if domain_end is None:
-            self.tempo_envelope.append_envelope(
+            self.tempo_history.append_envelope(
                 TempoEnvelope.from_function(function, domain_start, domain_start + extension_increment,
                                             units=units, duration_units=duration_units,
                                             resolution_multiple=resolution_multiple))
@@ -723,16 +723,16 @@ class Clock:
                 duration_units=duration_units, resolution_multiple=resolution_multiple
             )
 
-            if self.tempo_envelope.length() == 0:
+            if self.tempo_history.length() == 0:
                 # if there's nothing to this clock's tempo envelope yet, we just replace it with the new one
-                self.tempo_envelope = envelope
+                self.tempo_history = envelope
                 if loop:
                     # but if we're looping the same envelope that we just set this clocks tempo_envelope to,
                     # we need to make a copy or we start adding an envelope to itself
                     self._envelope_loop_or_function = deepcopy(envelope)
             else:
                 # if we're just appending to an existing envelope, then we don't need to make a deep copy if we loop
-                self.tempo_envelope.append_envelope(envelope)
+                self.tempo_history.append_envelope(envelope)
                 if loop:
                     self._envelope_loop_or_function = envelope
 
@@ -832,10 +832,10 @@ class Clock:
                     if start_delay > 0:
                         # if there's a start delay, then we start the clock on a negative beat and time
                         # so that both arrive at zero when when the forked process starts
-                        child.tempo_envelope._t = -start_delay
-                        # child.tempo_envelope.segments[0].start_level is the initial beat length, so this
+                        child.tempo_history._t = -start_delay
+                        # child.tempo_history.segments[0].start_level is the initial beat length, so this
                         # modifies the start beat proportionally to arrive at zero
-                        child.tempo_envelope._beat = -start_delay / child.tempo_envelope.segments[0].start_level
+                        child.tempo_history._beat = -start_delay / child.tempo_history.segments[0].start_level
                         child.parent_offset += start_delay
                         child.wait(start_delay, units="time")
                     if len(args) == num_positional_parameters - 1:
@@ -1065,14 +1065,14 @@ class Clock:
 
             # if we exit the while loop, that means that there is no one in the queue (meaning no children),
             # or the first wake up call is scheduled for after this wait is to end. So we can safely wait.
-            self._wait_in_parent(self.tempo_envelope.get_wait_time(end_beat - self.beat()))
+            self._wait_in_parent(self.tempo_history.get_wait_time(end_beat - self.beat()))
             beats_passed = end_beat - self.beat()
             woken_early = False
         except WokenEarlyError:
             # clock was roused part-way through the wait call (usually from a thread outside the clock system)
             time_passed = time.time() - self._last_sleep_time
             self._last_sleep_time = time.time()
-            beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+            beats_passed = self.tempo_history.get_beat_wait_from_time_wait(time_passed)
             if self.parent is not None:
                 self.parent._queue_lock.acquire()
                 self._remove_wakeup_call_from_parent_queue()
@@ -1082,7 +1082,7 @@ class Clock:
         if not woken_early or self.is_master():
             # do this unless we were woken early and are not on the master clock (in that case, the master will be
             # roused and catch up all the children, and our main goal is to recalculate the next wake up call)
-            self.tempo_envelope.advance(beats_passed)
+            self.tempo_history.advance(beats_passed)
             self._synchronize_children()
 
         # the wait keeper holds the clock in suspension, generally when the clock has been woken up early (using
@@ -1135,7 +1135,7 @@ class Clock:
         next_wake_up_call = self._queue[0]
         wake_up_beat = next_wake_up_call.t
         beats_till_wake = wake_up_beat - self.beat()
-        self._wait_in_parent(self.tempo_envelope.get_wait_time(beats_till_wake))
+        self._wait_in_parent(self.tempo_history.get_wait_time(beats_till_wake))
         self._queue.pop(0)  # we only pop the wake up call if _wait_in_parent doesn't throw a WokenEarlyException
         self._advance_tempo_map_to_beat(wake_up_beat)
         # tell the process of the clock being woken to go ahead and do it's thing
@@ -1163,12 +1163,12 @@ class Clock:
         # when we catch up the children, they also have to recursively catch up their children, etc.
         for child in self._children:
             if (child.parent_offset + child.time()) < self.beat():
-                child.tempo_envelope.advance_time(self.beat() - (child.parent_offset + child.time()))
+                child.tempo_history.advance_time(self.beat() - (child.parent_offset + child.time()))
                 child._catch_up_children()
 
     def _get_wait_end_beat(self, dt, units):
         end_beat = self.beat() + dt if units == "beats" \
-            else self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+            else self.beat() + self.tempo_history.get_beat_wait_from_time_wait(dt)
 
         # if we have a looping tempo envelope or an endless tempo function, and we're going right up
         # to or past the end of what's already been charted out, then we extend it before waiting
@@ -1177,7 +1177,7 @@ class Clock:
         if extension_needed and units == "time":
             # if we're using time units, and we added an extention, then we need to recalculate the end time based on
             # the new information about how the tempo envelope extends
-            end_beat = self.beat() + self.tempo_envelope.get_beat_wait_from_time_wait(dt)
+            end_beat = self.beat() + self.tempo_history.get_beat_wait_from_time_wait(dt)
 
         return end_beat
 
@@ -1190,11 +1190,11 @@ class Clock:
         """
         extension_needed = False
 
-        while beat_to_extend_to >= self.tempo_envelope.end_time() and self._envelope_loop_or_function is not None:
+        while beat_to_extend_to >= self.tempo_history.end_time() and self._envelope_loop_or_function is not None:
             extension_needed = True
 
             if isinstance(self._envelope_loop_or_function, TempoEnvelope):
-                self.tempo_envelope.append_envelope(self._envelope_loop_or_function)
+                self.tempo_history.append_envelope(self._envelope_loop_or_function)
             else:
                 function, domain_start, extension_increment, function_units, \
                     function_duration_units, resolution_multiple = self._envelope_loop_or_function
@@ -1207,13 +1207,13 @@ class Clock:
                 for k in range(resolution_multiple):
                     piece_start = domain_start + k * increment
                     piece_end = domain_start + (k + 1) * increment
-                    self.tempo_envelope.append_segment(
+                    self.tempo_history.append_segment(
                         TempoEnvelope.convert_units(function(piece_end), function_units, "beatlength"), increment,
                         halfway_level=TempoEnvelope.convert_units(function((piece_start + piece_end) / 2),
                                                                   function_units, "beatlength")
                     )
                     if function_duration_units == "time":
-                        segment = self.tempo_envelope.segments[-1]
+                        segment = self.tempo_history.segments[-1]
                         modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
                                                                                                     segment.end_time)
                         segment.end_time = segment.start_time + modified_segment_length
@@ -1226,7 +1226,7 @@ class Clock:
         return extension_needed
 
     def _advance_tempo_map_to_beat(self, beat):
-        self.tempo_envelope.advance(beat - self.beat())
+        self.tempo_history.advance(beat - self.beat())
 
     def _queue_has_wakeup_call(self, before_beat=None):
         # checks if there's a wakeup call (optional before the given beat)
@@ -1260,13 +1260,13 @@ class Clock:
 
                 time_passed = time.time() - self._last_sleep_time
                 self._last_sleep_time = time.time()
-                beats_passed = self.tempo_envelope.get_beat_wait_from_time_wait(time_passed)
+                beats_passed = self.tempo_history.get_beat_wait_from_time_wait(time_passed)
 
                 if self.is_master():
                     # do this unless we were woken early and are not on the master clock (in that case, the master will
                     # be roused and catch up all the children, and our main goal is to recalculate the next wake up call)
 
-                    self.tempo_envelope.advance(beats_passed)
+                    self.tempo_history.advance(beats_passed)
                     self._synchronize_children()
                 else:
                     self.parent._queue_lock.acquire()
@@ -1371,7 +1371,7 @@ class Clock:
 
         :param b: number of beats to fast forward by
         """
-        self.fast_forward_in_time(self.tempo_envelope.get_wait_time(b))
+        self.fast_forward_in_time(self.tempo_history.get_wait_time(b))
 
     def is_fast_forwarding(self) -> bool:
         """
@@ -1406,7 +1406,7 @@ class Clock:
         time_increments = []
         for increment in increments:
             time_increments.append(
-                (self.tempo_envelope.value_at(beat) + self.tempo_envelope.value_at(beat + increment)) / 2 * increment
+                (self.tempo_history.value_at(beat) + self.tempo_history.value_at(beat + increment)) / 2 * increment
             )
             beat += increment
             self._extend_looping_envelopes_if_needed(beat)
@@ -1431,40 +1431,40 @@ class Clock:
     def extract_absolute_tempo_envelope(self, start_beat: float = 0, step_size: float = 0.1,
                                         tolerance: float = 0.005) -> TempoEnvelope:
         """
-        Extracts this clock's absolute TempoEnvelope (as opposed to the TempoEnvelope relative to parent clock).
+        Extracts this clock's absolute TempoHistory (as opposed to the TempoHistory relative to parent clock).
         Used when creating a score from this clock's point of view.
 
-        :param start_beat: where on the TempoEnvelope to start
+        :param start_beat: where on the TempoHistory to start
         :param step_size: granularity
         :param tolerance: error tolerance with which we allow a step to simply extend the previous segment rather than
             create a new one.
-        :return: A TempoEnvelope representing the true variation of tempo on this clock, as filtered through the
+        :return: A TempoHistory representing the true variation of tempo on this clock, as filtered through the
             changing rates of its parents.
         """
         if self.is_master():
             # if this is the master clock, no extraction is necessary; just use its tempo curve
-            return self.tempo_envelope
+            return self.tempo_history.as_tempo_envelope()
 
         clocks = self.inheritance()
 
-        tempo_envelopes = [deepcopy(clock.tempo_envelope) for clock in clocks]
-        tempo_envelopes[0].go_to_beat(start_beat)
-        initial_rate = tempo_envelopes[0].rate
+        tempo_histories = [deepcopy(clock.tempo_history) for clock in clocks]
+        tempo_histories[0].go_to_beat(start_beat)
+        initial_rate = tempo_histories[0].rate
 
-        for i in range(1, len(tempo_envelopes)):
+        for i in range(1, len(tempo_histories)):
             # for each clock, its parent_offset + the time it would take to get to its current beat = its parent's beat
-            tempo_envelopes[i].go_to_beat(clocks[i-1].parent_offset + tempo_envelopes[i-1].time())
-            initial_rate *= tempo_envelopes[i].rate
+            tempo_histories[i].go_to_beat(clocks[i-1].parent_offset + tempo_histories[i-1].time())
+            initial_rate *= tempo_histories[i].rate
 
         def step_and_get_beat_length(step):
             beat_change = step
-            for tempo_envelope in tempo_envelopes:
-                _, beat_change = tempo_envelope.advance(beat_change)
+            for tempo_history in tempo_histories:
+                _, beat_change = tempo_history.advance(beat_change)
             return beat_change / step
 
         output_curve = TempoEnvelope(initial_rate, units="rate")
 
-        while any(tempo_envelope.beat() < tempo_envelope.length() for tempo_envelope in tempo_envelopes):
+        while any(tempo_envelope.beat() < tempo_envelope.length() for tempo_envelope in tempo_histories):
             # we step twice for half the step size so that we can get a halfway point to use to guide curvature
             start_level = output_curve.end_level()
             halfway_level = step_and_get_beat_length(step_size / 2)
@@ -1473,7 +1473,7 @@ class Clock:
                 # so long as that halfway point is between the start and end levels, we use it as a guide
                 output_curve.append_segment(end_level, step_size, tolerance=tolerance, halfway_level=halfway_level)
             else:
-                # but if it's not, then this represent a turn around and we just use two linear segments
+                # but if it's not, then this represents a turn around and we just use two linear segments
                 output_curve.append_segment(halfway_level, step_size / 2, tolerance=tolerance)
                 output_curve.append_segment(end_level, step_size / 2, tolerance=tolerance)
 

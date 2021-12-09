@@ -45,4 +45,4 @@ while clock.beat() < 20:
     log_timing()
     clock.wait(1)
 
-clock.tempo_envelope.show_plot(title="Example TempoEnvelope", units="beatlength", y_range=(0, 2.5), resolution=200)
+clock.tempo_history.show_plot(title="Example TempoHistory", units="beatlength", y_range=(0, 2.5), resolution=200)

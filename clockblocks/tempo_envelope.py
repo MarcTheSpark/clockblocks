@@ -1,6 +1,7 @@
 """
-Module defining the :class:`TempoEnvelope` class for describing a time-varying tempo, as well as the
-:class:`MetricPhaseTarget` class, which specifies a goal arrival point within the beat (or meter) cycle.
+Module defining the :class:`TempoEnvelope` class for describing a time-varying tempo, the :class:`TempoHistory` class,
+which adds to that a tracking of the current beat and time, and the :class:`MetricPhaseTarget` class, which specifies a
+goal arrival point within the beat (or meter) cycle.
 """
 
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
@@ -30,8 +31,10 @@ from typing import Union, Sequence, Tuple
 class TempoEnvelope(Envelope):
     r"""
     A subclass of :class:`~expenvelope.envelope.Envelope` that is specifically designed for representing changing tempo
-    curves. The underlying envelope represents beat length as a function of the current beat. A TempoEnvelopes also has
-    a notion of the current beat and time and has methods for advancing time.
+    curves. The underlying envelope represents beat length as a function of the current beat, which means that the
+    area under the curve represents how much time should pass from one beat to the next (beats * sec/beat = sec).
+    Although the methods take a "units" argument, which can be "beatlength", "tempo", or "rate", these are always
+    converted to beat length in the underlying representation
 
     :param levels: levels of the curve segments (i.e. tempo values) in the units specified by the `units` argument
     :param durations: durations of the curve segments in the units specified by the `duration_units` argument
@@ -43,20 +46,19 @@ class TempoEnvelope(Envelope):
     def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
                  curve_shapes: Sequence[Union[float, str]] = None,
                  units: str = "tempo", duration_units: str = "beats"):
+        units = units.lower().replace(" ", "")
         if units not in ("tempo", "rate", "beatlength"):
             raise ValueError("Units must be either \"tempo\" or \"rate\" or \"beatlength\".")
         if duration_units not in ("beats", "time"):
             raise ValueError("Duration units must be either \"beats\" or \"time\".")
 
+        # Whatever units are given, convert them to the underlying beatlength curve when creating the TempoEnvelope
         super(TempoEnvelope, self).__init__(
             TempoEnvelope.convert_units(levels, units, "beatlength"), durations, curve_shapes, 0
         )
 
         if duration_units == "time":
             self.convert_durations_to_times()
-
-        self._t = 0.0
-        self._beat = 0.0
 
     ##################################################################################################################
     #                                                Class Methods
@@ -174,12 +176,203 @@ class TempoEnvelope(Envelope):
             return out_envelope
 
     ##################################################################################################################
-    #                                                Properties
+    #                                               Basic Functionality
+    ##################################################################################################################
+
+    def beat_length_at(self, beat: float, from_left: bool = False) -> float:
+        """
+        Get the beat length at the given beat. If the beat length jumps at the given beat, the default is to return the
+        beat length after the jump, though this can be overridden with the `from_left` argument.
+
+        :param beat: the beat at which to get the beat length
+        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
+        """
+        return self.value_at(beat, from_left)
+
+    def rate_at(self, beat: float, from_left: bool = False) -> float:
+        """
+        Get the beat rate (in beats/second) at the given beat. If the rate jumps at the given beat, the default is to
+        return the rate after the jump, though this can be overridden with the `from_left` argument.
+
+        :param beat: the beat at which to get the rate
+        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
+        """
+        return 1 / self.beat_length_at(beat, from_left)
+
+    def tempo_at(self, beat: float, from_left: bool = False) -> float:
+        """
+        Get the tempo (in beats/minute) at the given beat. If the tempo jumps at the given beat, the default is to
+        return the tempo after the jump, though this can be overridden with the `from_left` argument.
+
+        :param beat: the beat at which to get the tempo
+        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
+        """
+        return self.rate_at(beat, from_left) * 60
+
+    def extend_to(self, beat: float) -> 'TempoEnvelope':
+        """
+        Extends the end of this TempoEnvelope to the given beat (if needed) by adding a constant segment at the end.
+        """
+        if self.length() < beat:
+            # no explicit segments have been made for a while, insert a constant segment to bring us up to date
+            self.append_segment(self.end_level(), beat - self.length())
+        return self
+
+    def truncate_at(self, beat: float) -> 'TempoEnvelope':
+        """
+        Removes all segments after the given beat and adds a constant segment if necessary to bring us up to that beat.
+
+        :param beat: the beat that we are truncating the tempo envelope after
+        :return: self, for chaining purposes
+        """
+        self.remove_segments_after(beat)
+        self.extend_to(beat)
+        return self
+
+    ##################################################################################################################
+    #                                             Conversion Utilities
+    ##################################################################################################################
+
+    @staticmethod
+    def convert_units(values: Union[float, Sequence[float]], input_units: str,
+                      output_units: str) -> Union[float, Sequence[float]]:
+        """
+        Utility method to convert values between unites of tempo, rate and beat length.
+
+        :param values: value or list of values in terms of the input_units
+        :param input_units: current units of the given values (either "tempo", "rate", or "beat length")
+        :param output_units: desired units to convert to (either "tempo", "rate", or "beat length")
+        :return: the list of values, converted to output units
+        """
+        in_units = input_units.lower().replace(" ", "")
+        out_units = output_units.lower().replace(" ", "")
+        assert in_units in ("tempo", "rate", "beatlength") and out_units in ("tempo", "rate", "beatlength"), \
+            "Invalid value of {} for units. Must be \"tempo\", \"rate\" or \"beat length\"".format(input_units)
+        if in_units == out_units:
+            return values
+        else:
+            convert_input_to_beat_length = (lambda x: 1 / x) if in_units == "rate" \
+                else (lambda x: 60 / x) if in_units == "tempo" else (lambda x: x)
+            convert_beat_length_to_output = (lambda x: 1 / x) if out_units == "rate" \
+                else (lambda x: 60 / x) if out_units == "tempo" else (lambda x: x)
+            if hasattr(values, "__len__"):
+                return tuple(convert_beat_length_to_output(convert_input_to_beat_length(x)) for x in values)
+            else:
+                return convert_beat_length_to_output(convert_input_to_beat_length(values))
+
+    def convert_durations_to_times(self):
+        """
+        Warps this tempo_curve so that all the locations of key points get re-interpreted as times instead of beat
+        locations. For instance, a tempo curve where the rate hovers around 2 will see a segment of length 3 get
+        stretched into a segment of length 6, since if it's supposed to take 3 seconds, it would take 6 beats.
+        Pretty confusing, but when we want to construct a tempo curve specifying the *times* that changes occur rather
+        than the beats, we can first construct it as though the durations were in beats, then call this function
+        to warp it so that the durations are in time.
+
+        :return: self, altered accordingly
+        """
+
+        # this is a little confusing, like everything else about this function, but it represents the start beat of
+        # the curve, which gets scaled inversely to the initial beat length, since a long initial beat length means
+        # it won't take that many beats to get to the desired time.
+        t = self.start_time() / self.start_level()
+        for segment in self.segments:
+            """
+            The following has been condensed into a single statement for efficiency:
+
+            actual_time_duration = segment.integrate_segment(segment.start_time, segment.end_time)
+            # the segment duration is currently in beats, but it also represents the duration we would like
+            # the segment to have in time. so the scale factor is desired time duration / actual time duration
+            scale_factor = segment.duration / actual_time_duration
+            # here's we're scaling the duration to now last as long in time as it used to in beats
+            modified_segment_length = scale_factor * segment.duration
+            """
+            modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
+                                                                                        segment.end_time)
+            segment.start_time = t
+            t = segment.end_time = t + modified_segment_length
+        return self
+
+    ##################################################################################################################
+    #                                                Other Utilities
+    ##################################################################################################################
+
+    def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
+                  x_range=None, y_range=None):
+        """
+        Shows a plot of this TempoEnvelope using matplotlib.
+
+        :param title: A title to give the plot.
+        :param resolution: number of points to use per envelope segment
+        :param show_segment_divisions: Whether to place dots at the division points between envelope segments
+        :param units: one of "tempo", "rate" or "beat length", determining the units of the y-axis
+        :param x_range: min and max value shown on the x-axis
+        :param y_range: min and max value shown on the y-axis
+        """
+        # if we're past the end of the envelope, we want to plot that as a final constant segment
+        # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
+        if x_range is None:
+            x_range = self.start_time(), self.end_time()
+        env_to_plot = deepcopy(self).extend_to(x_range[1]) if self.end_time() < x_range[1] else self
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("Could not find matplotlib, which is needed for plotting.")
+
+        fig, ax = plt.subplots()
+        x_values, y_values = env_to_plot._get_graphable_point_pairs(resolution)
+        ax.plot(x_values, TempoEnvelope.convert_units(y_values, "beat length", units))
+        if show_segment_divisions:
+            ax.plot(env_to_plot.times, TempoEnvelope.convert_units(env_to_plot.levels, "beat length", units), 'o')
+        plt.xlabel("Beat")
+        plt.ylabel("Tempo" if units == "tempo" else "Rate" if units == "rate" else "Beat Length")
+        plt.xlim(x_range)
+        if y_range is not None:
+            plt.ylim(y_range)
+        ax.set_title('Graph of TempoEnvelope' if title is None else title)
+        plt.show()
+
+    @classmethod
+    def _from_dict(cls, json_dict):
+        curve_shapes = None if 'curve_shapes' not in json_dict else json_dict['curve_shapes']
+        if 'length' in json_dict:
+            return cls.from_levels(json_dict['levels'], json_dict['length'])
+        else:
+            return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
+                                                 curve_shapes)
+
+    def __repr__(self):
+        return "TempoEnvelope({}, {}, {})".format(
+            TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes)
+
+
+class TempoHistory(TempoEnvelope):
+    r"""
+    Subclass of TempoEnvelope that keeps track of a current beat and time, and provides functionality for moving
+    forward a certain number of beats or seconds, and/or setting tempo target(s) to reach in the future.
+
+    :param levels: see :class:`TempoEnvelope`
+    :param durations: see :class:`TempoEnvelope`
+    :param curve_shapes: see :class:`TempoEnvelope`
+    :param units: see :class:`TempoEnvelope`
+    :param duration_units: see :class:`TempoEnvelope`
+    :param beat: Where to set the current beat
+    """
+
+    def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
+                 curve_shapes: Sequence[Union[float, str]] = None,
+                 units: str = "tempo", duration_units: str = "beats", beat: float = 0.0):
+        super().__init__(levels, durations, curve_shapes, units, duration_units)
+        self.go_to_beat(beat)
+
+    ##################################################################################################################
+    #                                                 Basic Properties
     ##################################################################################################################
 
     def time(self):
         """
-        The current time. Time is found by integrating under the beatlength curve: seconds/beat * beats = seconds.
+        The current time. Time is found by integrating under the beat length curve: seconds/beat * beats = seconds.
         """
         return self._t
 
@@ -194,7 +387,7 @@ class TempoEnvelope(Envelope):
         """
         The current beat length.
         """
-        return self.value_at(self._beat)
+        return self.beat_length_at(self._beat)
 
     @beat_length.setter
     def beat_length(self, beat_length):
@@ -202,38 +395,8 @@ class TempoEnvelope(Envelope):
         if len(self.segments) == 1 and self.length() == 0:
             # if this is an essentially empty tempo envelope, reset its starting beat_length to the given value
             self.segments[0].start_level = self.segments[0].end_level = beat_length
-        self.append_segment(beat_length, 0)
-
-    def _bring_up_to_date(self, beat: float = None) -> 'TempoEnvelope':
-        beat = self.beat() if beat is None else beat
-        # brings us up-to-date by adding a constant segment in case we haven't had a segment for a while
-        if self.length() < beat:
-            # no explicit segments have been made for a while, insert a constant segment to bring us up to date
-            self.append_segment(self.end_level(), beat - self.length())
-        return self
-
-    def truncate(self, beat: float = None) -> 'TempoEnvelope':
-        """
-        Removes all segments after beat (which defaults to the current beat) and adds a constant segment if necessary
-        to being us up to that beat.
-
-        :param beat: the beat that we are truncating the tempo envelope after
-        :return: self, for chaining purposes
-        """
-        beat = self.beat() if beat is None else beat
-        self.remove_segments_after(beat)
-        self._bring_up_to_date(beat)
-        return self
-
-    def beat_length_at(self, beat: float, from_left: bool = False) -> float:
-        """
-        Get the beat length at the given beat. If the beat length jumps at the given beat, the default is to return the
-        beat length after the jump, though this can be overridden with the `from_left` argument.
-
-        :param beat: the beat at which to get the beat length
-        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
-        """
-        return self.value_at(beat, from_left)
+        else:
+            self.append_segment(beat_length, 0)
 
     @property
     def rate(self):
@@ -246,16 +409,6 @@ class TempoEnvelope(Envelope):
     def rate(self, rate):
         self.beat_length = 1/rate
 
-    def rate_at(self, beat: float, from_left: bool = False) -> float:
-        """
-        Get the beat rate (in beats/second) at the given beat. If the rate jumps at the given beat, the default is to
-        return the rate after the jump, though this can be overridden with the `from_left` argument.
-
-        :param beat: the beat at which to get the rate
-        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
-        """
-        return 1 / self.beat_length_at(beat, from_left)
-
     @property
     def tempo(self):
         """
@@ -266,16 +419,6 @@ class TempoEnvelope(Envelope):
     @tempo.setter
     def tempo(self, tempo):
         self.rate = tempo / 60
-
-    def tempo_at(self, beat: float, from_left: bool = False) -> float:
-        """
-        Get the tempo (in beats/minute) at the given beat. If the tempo jumps at the given beat, the default is to
-        return the tempo after the jump, though this can be overridden with the `from_left` argument.
-
-        :param beat: the beat at which to get the tempo
-        :param from_left: whether to evaluate from the right or left-hand side of the beat in question
-        """
-        return self.rate_at(beat, from_left) * 60
 
     ##################################################################################################################
     #                                                Tempo Changes
@@ -307,7 +450,7 @@ class TempoEnvelope(Envelope):
         if truncate:
             self.remove_segments_after(self.beat())
         # add a flat segment up to the current beat if needed
-        self._bring_up_to_date()
+        self.extend_to(self.beat())
 
         self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target, duration_units)
 
@@ -372,7 +515,7 @@ class TempoEnvelope(Envelope):
         if truncate:
             self.remove_segments_after(self.beat())
         # add a flat segment up to the current beat if needed
-        self._bring_up_to_date()
+        self.extend_to(self.beat())
 
         if metric_phase_targets is None:
             # no segments have phase targets, so it's simple
@@ -621,7 +764,7 @@ class TempoEnvelope(Envelope):
         adjustable_segments = self.segments[self._get_index_of_segment_at(self.beat(), right_most=True):
                                             self._get_index_of_segment_at(beat_to_adjust, left_most=True) + 1]
         goal_total_time = desired_time - self.time()
-        result = TempoEnvelope._adjust_segments_time_duration(adjustable_segments, goal_total_time)
+        result = TempoHistory._adjust_segments_time_duration(adjustable_segments, goal_total_time)
 
         if result == "no change":
             # it worked, but we didn't have to change anything
@@ -633,7 +776,7 @@ class TempoEnvelope(Envelope):
             return True
         else:
             # the adjustment failed, so return to the old segments before interpolation
-            # and return false to signal the failure
+            # and return False to signal the failure
             self.segments = back_up
             return False
 
@@ -792,8 +935,8 @@ class TempoEnvelope(Envelope):
 
     def get_beat_wait_from_time_wait(self, seconds: float) -> float:
         """
-        Get the amount of beats we would have to wait to wait for the given number of seconds, starting at the current
-        point in the TempoEnvelope.
+        Get the amount of beats we would have to wait in order to wait for the given number of seconds, starting at
+        the current point in the TempoHistory.
 
         :param seconds: how many seconds to wait
         :return: how many beats that would correspond to
@@ -824,120 +967,35 @@ class TempoEnvelope(Envelope):
         return self
 
     ##################################################################################################################
-    #                                             Conversion Utilities
+    #                                                   Utilities
     ##################################################################################################################
 
-    @staticmethod
-    def convert_units(values: Union[float, Sequence[float]], input_units: str,
-                      output_units: str) -> Union[float, Sequence[float]]:
+    def truncate(self) -> 'TempoEnvelope':
         """
-        Utility method to convert values between unites of tempo, rate and beat length.
+        Removes all segments after the current beat.
 
-        :param values: a list of values in terms of the input_units
-        :param input_units: current units of the given values (either "tempo", "rate", or "beat length")
-        :param output_units: desired units to convert to (either "tempo", "rate", or "beat length")
-        :return: the list of values, converted to output units
+        :return: self, for chaining purposes
         """
-        in_units = input_units.lower().replace(" ", "")
-        out_units = output_units.lower().replace(" ", "")
-        assert in_units in ("tempo", "rate", "beatlength") and out_units in ("tempo", "rate", "beatlength"), \
-            "Invalid value of {} for units. Must be \"tempo\", \"rate\" or \"beat length\"".format(input_units)
-        if in_units == out_units:
-            return values
-        else:
-            convert_input_to_beat_length = (lambda x: 1 / x) if in_units == "rate" \
-                else (lambda x: 60 / x) if in_units == "tempo" else (lambda x: x)
-            convert_beat_length_to_output = (lambda x: 1 / x) if out_units == "rate" \
-                else (lambda x: 60 / x) if out_units == "tempo" else (lambda x: x)
-            if hasattr(values, "__len__"):
-                return tuple(convert_beat_length_to_output(convert_input_to_beat_length(x)) for x in values)
-            else:
-                return convert_beat_length_to_output(convert_input_to_beat_length(values))
-
-    def convert_durations_to_times(self):
-        """
-        Warps this tempo_curve so that all of the locations of key points get re-interpreted as times instead of beat
-        locations. For instance, a tempo curve where the rate hovers around 2 will see a segment of length 3 get
-        stretched into a segment of length 6, since if it's supposed to take 3 seconds, it would take 6 beats.
-        Pretty confusing, but when we want to construct a tempo curve specifying the *times* that changes occur rather
-        than the beats, we can first construct it as though the durations were in beats, then call this function
-        to warp it so that the durations are in time.
-
-        :return: self, altered accordingly
-        """
-
-        # this is a little confusing, like everything else about this function, but it represents the start beat of
-        # the curve, which gets scaled inversely to the initial beat length, since a long initial beat length means
-        # it won't take that many beats to get to the desired time.
-        t = self.start_time() / self.start_level()
-        for segment in self.segments:
-            """
-            The following has been condensed into a single statement for efficiency:
-
-            actual_time_duration = segment.integrate_segment(segment.start_time, segment.end_time)
-            # the segment duration is currently in beats, but it also represents the duration we would like
-            # the segment to have in time. so the scale factor is desired time duration / actual time duration
-            scale_factor = segment.duration / actual_time_duration
-            # here's we're scaling the duration to now last as long in time as it used to in beats
-            modified_segment_length = scale_factor * segment.duration
-            """
-            modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
-                                                                                        segment.end_time)
-            segment.start_time = t
-            t = segment.end_time = t + modified_segment_length
-        return self
-
-    ##################################################################################################################
-    #                                                Other Utilities
-    ##################################################################################################################
+        return self.truncate_at(self._beat)
 
     def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
                   x_range=None, y_range=None):
+        title = "Graph of TempoHistory" if title is None else title
+        super().show_plot(title, resolution, show_segment_divisions, units,
+                          (min(0, self.start_time()), max(self.end_time(), self.beat()))
+                          if x_range is None else x_range, y_range)
+
+    def as_tempo_envelope(self) -> TempoEnvelope:
         """
-        Shows a plot of this TempoEnvelope using matplotlib.
-
-        :param title: A title to give the plot.
-        :param resolution: number of points to use per envelope segment
-        :param show_segment_divisions: Whether or not to place dots at the division points between envelope segments
-        :param units: one of "tempo", "rate" or "beat length", determining the units of the y-axis
-        :param x_range: min and max value shown on the x-axis
-        :param y_range: min and max value shown on the y-axis
+        Converts this TempoHistory to a simpler TempoEnvelope (removing reference to current beat and time)
         """
-        # if we're past the end of the envelope, we want to plot that as a final constant segment
-        # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
-        env_to_plot = deepcopy(self)._bring_up_to_date() if self.end_time() < self.beat() else self
-
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("Could not find matplotlib, which is needed for plotting.")
-
-        fig, ax = plt.subplots()
-        x_values, y_values = env_to_plot._get_graphable_point_pairs(resolution)
-        ax.plot(x_values, TempoEnvelope.convert_units(y_values, "beat length", units))
-        if show_segment_divisions:
-            ax.plot(env_to_plot.times, TempoEnvelope.convert_units(env_to_plot.levels, "beat length", units), 'o')
-        plt.xlabel("Beat")
-        plt.ylabel("Tempo" if units == "tempo" else "Rate" if units == "rate" else "Beat Length")
-        if x_range is not None:
-            plt.xlim(x_range)
-        if y_range is not None:
-            plt.ylim(y_range)
-        ax.set_title('Graph of TempoEnvelope' if title is None else title)
-        plt.show()
-
-    @classmethod
-    def _from_dict(cls, json_dict):
-        curve_shapes = None if 'curve_shapes' not in json_dict else json_dict['curve_shapes']
-        if 'length' in json_dict:
-            return cls.from_levels(json_dict['levels'], json_dict['length'])
-        else:
-            return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
-                                                 curve_shapes)
+        return TempoEnvelope(self.levels, self.durations, self.curve_shapes, "beatlength")
 
     def __repr__(self):
-        return "TempoEnvelope({}, {}, {})".format(
-            TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes)
+        return "TempoHistory({}, {}, {}{})".format(
+            TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes,
+            ", beat={}".format(self._beat) if self._beat != 0 else ""
+        )
 
 
 class MetricPhaseTarget:

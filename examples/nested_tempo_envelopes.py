@@ -40,8 +40,10 @@ master.set_rate_target(1, 40, truncate=False)
 master.fast_forward_in_time(40)
 master.wait_for_children_to_finish()
 
-master.tempo_envelope.show_plot(show_segment_divisions=False)
-child_1.tempo_envelope.show_plot(show_segment_divisions=False)
-child_2.tempo_envelope.show_plot(show_segment_divisions=False)
-child_1.extract_absolute_tempo_envelope().show_plot(show_segment_divisions=False)
-child_2.extract_absolute_tempo_envelope().show_plot(show_segment_divisions=False)
+master.tempo_history.show_plot(title="Master tempo history", show_segment_divisions=False)
+child_1.tempo_history.show_plot(title="Child 1 tempo history", show_segment_divisions=False)
+child_2.tempo_history.show_plot(title="Child 2 tempo history", show_segment_divisions=False)
+child_1.extract_absolute_tempo_envelope().show_plot(title="Child 1 absolute tempo envelope",
+                                                    show_segment_divisions=False)
+child_2.extract_absolute_tempo_envelope().show_plot(title="Child 2 absolute tempo envelope",
+                                                    show_segment_divisions=False)
