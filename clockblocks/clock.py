@@ -84,6 +84,12 @@ def tempo_modification(fn):
     return wrapper
 
 
+def _threadpool_error_callback(e):
+    # callback function for all errors arising from the ThreadPool
+    # without this, they get swallowed up!
+    raise e
+
+
 T = TypeVar('T', bound='Clock')
 
 
@@ -743,7 +749,8 @@ class Clock:
     def _run_in_pool(self, target: Callable, args, kwargs) -> None:
         if self.master._pool_semaphore.acquire(blocking=False):
             semaphore = self.master._pool_semaphore
-            self.master._pool.apply_async(target, args=args, kwds=kwargs, callback=lambda _: semaphore.release())
+            self.master._pool.apply_async(target, args=args, kwds=kwargs, callback=lambda _: semaphore.release(),
+                                          error_callback=_threadpool_error_callback)
         else:
             logging.warning("Ran out of threads in the master clock's ThreadPool; small thread creation delays may "
                             "result. You can increase the number of threads in the pool to avoid this.")
@@ -751,7 +758,7 @@ class Clock:
 
     def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
-             schedule_at: Union[float, MetricPhaseTarget] = None) -> 'Clock':
+             schedule_at: Union[float, MetricPhaseTarget] = None, done_callback: Callable = None) -> 'Clock':
         """
         Spawns a parallel process running on a child clock.
 
@@ -775,6 +782,7 @@ class Clock:
             For instance, if we want to sync every fork to 3/4 time, MetricPhaseTarget(0, 3) would start a process on
             the downbeat, MetricPhaseTarget(1, 3) would start it on beat 2, and MetricPhaseTarget(2.5, 3) would start it
             halfway through beat 3.
+        :param done_callback: a callback function to be invoked when the clock has terminated
         :return: the clock of the spawned child process
         """
         if not self.alive:
@@ -811,49 +819,48 @@ class Clock:
             start_delay = max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
 
         def _process(*args, **kwds):
+            # set the implicit variable __clock__ in this thread
+            threading.current_thread().__clock__ = child
+            # make sure we have been given a reasonable number of arguments, and see if
+            # the number given suggests an expected first clock argument
+            process_function_signature = inspect.signature(process_function)
+            num_positional_parameters = len([
+                param for param in process_function_signature.parameters if
+                process_function_signature.parameters[param].default == inspect.Parameter.empty
+            ])
+
+            """
+            The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
+            it at will. When and if "kill" is called on the clock, its wait_event is set free and it immediately
+            raises a ClockKilledError, which exits us from the process. (It's also possible, but unlikely, that
+            we will get a DeadClockError, if we were just in the process of calling wait.)
+            """
             try:
-                # set the implicit variable __clock__ in this thread
-                threading.current_thread().__clock__ = child
-                # make sure we have been given a reasonable number of arguments, and see if
-                # the number given suggests an expected first clock argument
-                process_function_signature = inspect.signature(process_function)
-                num_positional_parameters = len([
-                    param for param in process_function_signature.parameters if
-                    process_function_signature.parameters[param].default == inspect.Parameter.empty
-                ])
+                if start_delay > 0:
+                    # if there's a start delay, then we start the clock on a negative beat and time
+                    # so that both arrive at zero when the forked process starts
+                    child.tempo_history._t = -start_delay
+                    # child.tempo_history.segments[0].start_level is the initial beat length, so this
+                    # modifies the start beat proportionally to arrive at zero
+                    child.tempo_history._beat = -start_delay / child.tempo_history.segments[0].start_level
+                    child.parent_offset += start_delay
+                    child.wait(start_delay, units="time")
+                if len(args) == num_positional_parameters - 1:
+                    # if the process_function we have been takes one more argument than
+                    # provided then we pass the clock as the first argument
+                    process_function(child, *args, **kwds)
+                else:
+                    # otherwise we just pass the arguments as given
+                    process_function(*args, **kwds)
+            except ClockKilledError:
+                pass
+            except DeadClockError:
+                pass
 
-                """
-                The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
-                it at will. When and if "kill" is called on the clock, its wait_event is set free and it immediately
-                raises a ClockKilledError, which exits us from the process. (It's also possible, but unlikely, that
-                we will get a DeadClockError, if we were just in the process of calling wait.)
-                """
-                try:
-                    if start_delay > 0:
-                        # if there's a start delay, then we start the clock on a negative beat and time
-                        # so that both arrive at zero when when the forked process starts
-                        child.tempo_history._t = -start_delay
-                        # child.tempo_history.segments[0].start_level is the initial beat length, so this
-                        # modifies the start beat proportionally to arrive at zero
-                        child.tempo_history._beat = -start_delay / child.tempo_history.segments[0].start_level
-                        child.parent_offset += start_delay
-                        child.wait(start_delay, units="time")
-                    if len(args) == num_positional_parameters - 1:
-                        # if the process_function we have been takes one more argument than
-                        # provided then we pass the clock as the first argument
-                        process_function(child, *args, **kwds)
-                    else:
-                        # otherwise we just pass the arguments as given
-                        process_function(*args, **kwds)
-                except ClockKilledError:
-                    pass
-                except DeadClockError:
-                    pass
-
-                self._children.remove(child)
-                child._killed = True
-            except Exception as e:
-                logging.exception(e)
+            self._children.remove(child)
+            child._killed = True
+            if done_callback is not None:
+                done_callback()
         self._run_in_pool(_process, args, kwargs)
 
         # Allow the new child to run until it hits a wait call. This is quite important; if we don't do this,
@@ -901,10 +908,7 @@ class Clock:
         kwargs = {} if kwargs is None else kwargs
 
         def _process(*args, **kwargs):
-            try:
-                process_function(*args, **kwargs)
-            except Exception as e:
-                logging.exception(e)
+            process_function(*args, **kwargs)
 
         self._run_in_pool(_process, args, kwargs)
 
@@ -1136,7 +1140,10 @@ class Clock:
         wake_up_beat = next_wake_up_call.t
         beats_till_wake = wake_up_beat - self.beat()
         self._wait_in_parent(self.tempo_history.get_wait_time(beats_till_wake))
-        self._queue.pop(0)  # we only pop the wake up call if _wait_in_parent doesn't throw a WokenEarlyException
+        # we only pop the wake up call if _wait_in_parent doesn't throw a WokenEarlyException
+        # also, note that this used to be self._queue.pop(0), but occasionally this
+        # would cause an error when a different wake up call made its way in from another thread
+        self._queue.remove(next_wake_up_call)
         self._advance_tempo_map_to_beat(wake_up_beat)
         # tell the process of the clock being woken to go ahead and do it's thing
         next_wake_up_call.clock._dormant = False  # this flag tells us when that process hits a new wait
@@ -1284,7 +1291,10 @@ class Clock:
         callback functions.
         """
         while True:
-            self.wait(1.0)
+            try:
+                self.wait(1.0)
+            except DeadClockError:
+                break
 
     def rouse_and_hold(self, holding_clock: 'Clock' = None) -> None:
         """
