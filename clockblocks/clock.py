@@ -999,8 +999,9 @@ class Clock:
             if stop_sleeping_time < time.time() - running_behind_threshold:
                 # if we're more than 10 ms behind, throw a warning: this starts to get noticeable
                 logging.warning(
-                    "Clock is running noticeably behind real time ({} s) on a wait call of {} s; "
+                    "Clock {} (beat={}) is running noticeably behind real time ({} s) on a wait call of {} s; "
                     "probably processing is too heavy.".format(
+                        self.name, self.beat(),
                         round(time.time() - stop_sleeping_time, 5), round(dt, 5))
                 )
                 self._running_behind_warning_count += 1
