@@ -44,3 +44,28 @@ def current_clock():
     if not hasattr(current_thread, '__clock__'):
         return None
     return threading.current_thread().__clock__
+
+
+def wait(dt: float, units="beats") -> None:
+    c = current_clock()
+    if c is not None:
+        current_clock().wait(dt, units=units)
+    else:
+        time.sleep(dt)
+
+
+def snap_float_to_nice_decimal(x: float, order_of_magnitude_difference=7) -> float:
+    """
+    If x is near to a nice decimal, this rounds it. E.g., given a number like 8.01399999999999214, we want to round
+    it to 8.014. We do this by comparing what we get if we round coarsely to what we get if we round precisely,
+    where order_of_magnitude_difference represents how much more precise the precise round is than the course round.
+    If they're the same, then we should be rounding.
+
+    :param x: number to snap
+    :param order_of_magnitude_difference: how many orders of magnitude we compare rounding across
+    :return: the rounded value
+    """
+    for first_place in range(0, 17 - order_of_magnitude_difference):
+        if round(x, first_place) == round(x, first_place + order_of_magnitude_difference):
+            return round(x, first_place)
+    return x
