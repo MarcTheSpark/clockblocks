@@ -1,7 +1,7 @@
 """
-Module defining the :class:`TempoEnvelope` class for describing a time-varying tempo, :class:`TempoHistory` class, which
-adds to that a tracking of the current beat and time, and :class:`MetricPhaseTarget` class, which specifies a goal
-arrival point within the beat (or meter) cycle.
+Module defining the :class:`TempoEnvelope` class for describing a time-varying tempo, the :class:`TempoHistory` class,
+which adds to that a tracking of the current beat and time, and the :class:`MetricPhaseTarget` class, which specifies a
+goal arrival point within the beat (or meter) cycle.
 """
 
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
@@ -348,23 +348,34 @@ class TempoEnvelope(Envelope):
 
 
 class TempoHistory(TempoEnvelope):
+    r"""
+    Subclass of TempoEnvelope that keeps track of a current beat and time, and provides functionality for moving
+    forward a certain number of beats or seconds, and/or setting tempo target(s) to reach in the future.
+
+    :param levels: see :class:`TempoEnvelope`
+    :param durations: see :class:`TempoEnvelope`
+    :param curve_shapes: see :class:`TempoEnvelope`
+    :param units: see :class:`TempoEnvelope`
+    :param duration_units: see :class:`TempoEnvelope`
+    :param beat: Where to set the current beat
+    """
 
     def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
                  curve_shapes: Sequence[Union[float, str]] = None,
                  units: str = "tempo", duration_units: str = "beats", beat: float = 0.0):
-        """
-        Subclass of TempoEnvelope that keeps track of a current beat and time, and provides functionality for moving
-        forward a certain number of beats or seconds, and/or setting tempo target(s) to reach in the future.
-
-        :param levels: see :class:`TempoEnvelope`
-        :param durations: see :class:`TempoEnvelope`
-        :param curve_shapes: see :class:`TempoEnvelope`
-        :param units: see :class:`TempoEnvelope`
-        :param duration_units: see :class:`TempoEnvelope`
-        :param beat: Where to set the current beat
-        """
         super().__init__(levels, durations, curve_shapes, units, duration_units)
         self.go_to_beat(beat)
+
+    @classmethod
+    def from_tempo_envelope(cls, tempo_envelope: TempoEnvelope, beat: float = 0.0):
+        """
+        Constructs a TempoHistory from a TempoEnvelope.
+
+        :param tempo_envelope: the TempoEnvelope to copy
+        :param beat: the beat to start this TempoHistory on
+        """
+        return cls(tempo_envelope.levels, tempo_envelope.durations, tempo_envelope.curve_shapes,
+                   units="beatlength", beat=beat)
 
     ##################################################################################################################
     #                                                 Basic Properties
@@ -985,7 +996,10 @@ class TempoHistory(TempoEnvelope):
                           (min(0, self.start_time()), max(self.end_time(), self.beat()))
                           if x_range is None else x_range, y_range)
 
-    def as_tempo_envelope(self):
+    def as_tempo_envelope(self) -> TempoEnvelope:
+        """
+        Converts this TempoHistory to a simpler TempoEnvelope (removing reference to current beat and time)
+        """
         return TempoEnvelope(self.levels, self.durations, self.curve_shapes, "beatlength")
 
     def __repr__(self):
