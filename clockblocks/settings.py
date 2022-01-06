@@ -19,10 +19,10 @@ Global preferences and settings for clockblocks.
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
 #: Throw a warning when the master clock is running more than this many seconds behind on a longer wait call
-running_behind_warning_threshold_long = 0.010
+running_behind_warning_threshold_long = 0.01
 #: Throw a warning when the master clock is running more than this many seconds behind on a short/zero-length wait call
-running_behind_warning_threshold_short = 0.025
+running_behind_warning_threshold_short = 0.05
 #: Throw a warning when catching up child clocks takes longer than this, and master clock is running behind
-catching_up_child_clocks_threshold_min = 0.001
+catching_up_child_clocks_threshold_min = 0.005
 #: Throw a warning when catching up child clocks takes longer than this, but master clock is not running behind
-catching_up_child_clocks_threshold_max = 0.005
+catching_up_child_clocks_threshold_max = 0.02

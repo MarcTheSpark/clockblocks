@@ -76,11 +76,12 @@ def tempo_modification(fn):
         self._envelope_loop_or_function = None
         if current_clock() == self or (current_clock() is not None
                                        and self in current_clock().iterate_inheritance()):
-            fn(self, *args, **kwargs)
+            return fn(self, *args, **kwargs)
         else:
             self.rouse_and_hold()
-            fn(self, *args, **kwargs)
+            result = fn(self, *args, **kwargs)
             self.release_from_suspension()
+            return result
     return wrapper
 
 
@@ -631,7 +632,9 @@ class Clock:
     @tempo_modification
     def apply_beat_length_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
                                    duration_units: str = "beats", truncate: bool = True, loop: bool = False,
-                                   extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
+                                   extension_increment: float = 2.0, scanning_step_size: float = 0.05,
+                                   key_point_resolution_multiple: int = 2, iterations: int = 6,
+                                   min_key_point_distance: float = 1e-7) -> None:
         """
         Applies a function to be used to set the beat_length (and therefore rate and tempo) of this clock.
 
@@ -648,16 +651,23 @@ class Clock:
             of the domain when we come to the end of it.
         :param extension_increment: if domain_end is None, then this defines how far in advance we extend the function
             at any given time.
-        :param resolution_multiple: determines how precisely the function is to be approximated
+        :param scanning_step_size: see :func:`Envelope.from_function`
+        :param key_point_resolution_multiple: see :func:`Envelope.from_function`
+        :param iterations: see :func:`Envelope.from_function`
+        :param min_key_point_distance: see :func:`Envelope.from_function`
         """
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+                                   extension_increment=extension_increment, scanning_step_size=scanning_step_size,
+                                   key_point_resolution_multiple=key_point_resolution_multiple,
+                                   iterations=iterations, min_key_point_distance=min_key_point_distance)
 
     @tempo_modification
     def apply_rate_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
                             duration_units: str = "beats", truncate: bool = True, loop: bool = False,
-                            extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
+                            extension_increment: float = 2.0, scanning_step_size: float = 0.05,
+                            key_point_resolution_multiple: int = 2, iterations: int = 6,
+                            min_key_point_distance: float = 1e-7) -> None:
         """
         Applies a function to be used to set the rate (and therefore beat_length and tempo) of this clock.
 
@@ -674,16 +684,23 @@ class Clock:
             of the domain when we come to the end of it.
         :param extension_increment: if domain_end is None, then this defines how far in advance we extend the function
             at any given time.
-        :param resolution_multiple: determines how precisely the function is to be approximated
+        :param scanning_step_size: see :func:`Envelope.from_function`
+        :param key_point_resolution_multiple: see :func:`Envelope.from_function`
+        :param iterations: see :func:`Envelope.from_function`
+        :param min_key_point_distance: see :func:`Envelope.from_function`
         """
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="rate",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+                                   extension_increment=extension_increment, scanning_step_size=scanning_step_size,
+                                   key_point_resolution_multiple=key_point_resolution_multiple,
+                                   iterations=iterations, min_key_point_distance=min_key_point_distance)
 
     @tempo_modification
     def apply_tempo_function(self, function: Callable, domain_start: float = 0, domain_end: float = None,
                              duration_units: str = "beats", truncate: bool = True, loop: bool = False,
-                             extension_increment: float = 1.0, resolution_multiple: int = 2) -> None:
+                             extension_increment: float = 2.0, scanning_step_size: float = 0.05,
+                             key_point_resolution_multiple: int = 2, iterations: int = 6,
+                             min_key_point_distance: float = 1e-7) -> None:
         """
         Applies a function to be used to set the tempo (and therefore beat_length and rate) of this clock.
 
@@ -700,33 +717,46 @@ class Clock:
             of the domain when we come to the end of it.
         :param extension_increment: if domain_end is None, then this defines how far in advance we extend the function
             at any given time.
-        :param resolution_multiple: determines how precisely the function is to be approximated
+        :param scanning_step_size: see :func:`Envelope.from_function`
+        :param key_point_resolution_multiple: see :func:`Envelope.from_function`
+        :param iterations: see :func:`Envelope.from_function`
+        :param min_key_point_distance: see :func:`Envelope.from_function`
         """
         self._apply_tempo_function(function, domain_start=domain_start, domain_end=domain_end, units="tempo",
                                    duration_units=duration_units, truncate=truncate, loop=loop,
-                                   extension_increment=extension_increment, resolution_multiple=resolution_multiple)
+                                   extension_increment=extension_increment, scanning_step_size=scanning_step_size,
+                                   key_point_resolution_multiple=key_point_resolution_multiple,
+                                   iterations=iterations, min_key_point_distance=min_key_point_distance)
 
     def _apply_tempo_function(self, function, domain_start: float = 0, domain_end: float = None,
                               units: str = "beatlength", duration_units: str = "beats", truncate: bool = False,
-                              loop: bool = False, extension_increment: float = 1.0,
-                              resolution_multiple: int = 2) -> None:
+                              loop: bool = False, extension_increment: float = 2.0, scanning_step_size: float = 0.05,
+                              key_point_resolution_multiple: int = 2, iterations: int = 6,
+                              min_key_point_distance: float = 1e-7) -> None:
         # truncate removes any segments that extend into the future
         if truncate:
             self.tempo_history.remove_segments_after(self.beat())
+        # make sure that we're caught up to the current beat
+        self.tempo_history.extend_to(self.beat())
 
         if domain_end is None:
             self.tempo_history.append_envelope(
                 TempoEnvelope.from_function(function, domain_start, domain_start + extension_increment,
                                             units=units, duration_units=duration_units,
-                                            resolution_multiple=resolution_multiple))
+                                            scanning_step_size=scanning_step_size,
+                                            min_key_point_distance=min_key_point_distance, iterations=iterations,
+                                            key_point_resolution_multiple=key_point_resolution_multiple))
+
             # add a note to use this function, starting where we left off, and going by the same extension increment
             # when we get to the end of the envelope
             self._envelope_loop_or_function = (function, domain_start + extension_increment, extension_increment,
-                                               units, duration_units, resolution_multiple)
+                                               units, duration_units, scanning_step_size, min_key_point_distance,
+                                               iterations, key_point_resolution_multiple)
         else:
             envelope = TempoEnvelope.from_function(
-                function, domain_start, domain_end, units=units,
-                duration_units=duration_units, resolution_multiple=resolution_multiple
+                function, domain_start, domain_end, units=units, duration_units=duration_units,
+                scanning_step_size=scanning_step_size, min_key_point_distance=min_key_point_distance,
+                iterations=iterations, key_point_resolution_multiple=key_point_resolution_multiple
             )
 
             if self.tempo_history.length() == 0:
@@ -1183,7 +1213,7 @@ class Clock:
         extension_needed = self._extend_looping_envelopes_if_needed(end_beat)
 
         if extension_needed and units == "time":
-            # if we're using time units, and we added an extention, then we need to recalculate the end time based on
+            # if we're using time units, and we added an extension, then we need to recalculate the end time based on
             # the new information about how the tempo envelope extends
             end_beat = self.beat() + self.tempo_history.get_beat_wait_from_time_wait(dt)
 
@@ -1205,21 +1235,27 @@ class Clock:
                 self.tempo_history.append_envelope(self._envelope_loop_or_function)
             else:
                 function, domain_start, extension_increment, function_units, \
-                    function_duration_units, resolution_multiple = self._envelope_loop_or_function
+                  function_duration_units, scanning_step_size, min_key_point_distance, iterations, \
+                  key_point_resolution_multiple = self._envelope_loop_or_function
 
                 next_key_point = _get_extrema_and_inflection_points(
                     function, domain_start, domain_start + extension_increment,
                     return_on_first_point=True, iterations=4)
 
-                increment = (next_key_point - domain_start) / resolution_multiple
-                for k in range(resolution_multiple):
+                increment = (next_key_point - domain_start) / key_point_resolution_multiple
+                for k in range(key_point_resolution_multiple):
                     piece_start = domain_start + k * increment
                     piece_end = domain_start + (k + 1) * increment
-                    self.tempo_history.append_segment(
-                        TempoEnvelope.convert_units(function(piece_end), function_units, "beatlength"), increment,
-                        halfway_level=TempoEnvelope.convert_units(function((piece_start + piece_end) / 2),
-                                                                  function_units, "beatlength")
-                    )
+                    try:
+                        self.tempo_history.append_segment(
+                            TempoEnvelope.convert_units(function(piece_end), function_units, "beatlength"), increment,
+                            halfway_level=TempoEnvelope.convert_units(function((piece_start + piece_end) / 2),
+                                                                      function_units, "beatlength")
+                        )
+                    except ValueError as ve:
+                        self.tempo_history.append_segment(
+                            TempoEnvelope.convert_units(function(piece_end), function_units, "beatlength"), increment
+                        )
                     if function_duration_units == "time":
                         segment = self.tempo_history.segments[-1]
                         modified_segment_length = segment.duration ** 2 / segment.integrate_segment(segment.start_time,
@@ -1229,7 +1265,8 @@ class Clock:
                 # add a note to use this function, starting where we left off, and going by the same extension increment
                 # when we get to the end of the envelope
                 self._envelope_loop_or_function = (function, next_key_point, extension_increment,
-                                                   function_units, function_duration_units, resolution_multiple)
+                                                   function_units, function_duration_units, scanning_step_size,
+                                                   min_key_point_distance, iterations, key_point_resolution_multiple)
 
         return extension_needed
 

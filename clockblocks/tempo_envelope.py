@@ -148,8 +148,9 @@ class TempoEnvelope(Envelope):
         return cls(levels, durations, curve_shapes, units=units, duration_units=duration_units)
 
     @classmethod
-    def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2, key_point_precision=100,
-                      key_point_iterations=5, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+    def from_function(cls, function, domain_start=0, domain_end=1, units: str = "tempo", duration_units: str = "beats",
+                      scanning_step_size: float = 0.05, key_point_resolution_multiple: int = 2, iterations: int = 6,
+                      min_key_point_distance: float = 1e-7) -> 'TempoEnvelope':
         """
         Constructs a TempoEnvelope that approximates an arbitrary function. The domain of the function is in units
         defined by the `duration_units` parameter, and the range is in units defined by the `units` parameter.
@@ -158,18 +159,24 @@ class TempoEnvelope(Envelope):
             `units` parameters.
         :param domain_start: see :func:`~expenvelope.envelope.Envelope.from_function`
         :param domain_end: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param resolution_multiple: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_precision: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_iterations: see :func:`~expenvelope.envelope.Envelope.from_function`
         :param units: one of "tempo", "rate" or "beat length", determining how we interpret the function output
         :param duration_units: either "beats" or "time", determining how we interpret the function input
+        :param scanning_step_size: when analyzing the function for discontinuities, maxima and minima, inflection
+            points, etc., use this step size for the initial pass.
+        :param key_point_resolution_multiple: factor by which we add extra key points between the extrema and
+            inflection points to improve the curve fit.
+        :param iterations: when a potential key point is found, we zoom in and scan again in the viscinity of the point.
+            This determines how many iterations of zooming we do.
+        :param min_key_point_distance: after scanning for key points, any that are closer than this distance are merged.
         :return: a TempoEnvelope, constructed accordingly
         """
         assert duration_units in ("beats", "time"), "Duration units must be either \"beats\" or \"time\"."
         converted_function = (lambda x: TempoEnvelope.convert_units(function(x), units, "beatlength")) \
             if units.lower().replace(" ", "") != "beatlength" else function
-        out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
-                                             key_point_precision, key_point_iterations)
+        out_envelope = super().from_function(converted_function, domain_start, domain_end,
+                                             scanning_step_size=scanning_step_size,
+                                             key_point_resolution_multiple=key_point_resolution_multiple,
+                                             iterations=iterations, min_key_point_distance=min_key_point_distance)
         if duration_units == "time":
             return out_envelope.convert_durations_to_times()
         else:
