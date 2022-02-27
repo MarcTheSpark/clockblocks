@@ -18,6 +18,7 @@ beat in every clock at a given moment.
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+import itertools
 
 from .tempo_envelope import MetricPhaseTarget, TempoEnvelope, TempoHistory
 from expenvelope._utilities import _get_extrema_and_inflection_points
@@ -204,6 +205,12 @@ class Clock:
         self._running_behind_warning_count = 0
 
         self._killed = False
+
+        # used to assign priority to children
+        self._priority_counter = itertools.count()
+        # used to determine which sibling clock to resolve first. (By default, the parent supplies increasing
+        # priorities, so it's the one that was forked first
+        self.priority = 0 if self.is_master() else next(self.parent._priority_counter)
 
     ##################################################################################################################
     #                                                  Family Matters
@@ -1048,7 +1055,7 @@ class Clock:
                     raise WokenEarlyError()
         else:
             self.parent._queue.append(_WakeUpCall(self.parent.beat() + dt, self))
-            self.parent._queue.sort(key=lambda x: x.t)
+            self.parent._queue.sort(key=lambda wakeup_call: (wakeup_call.t, wakeup_call.clock.priority))
             if self.parent._queue_lock.locked():
                 # if the parent was told to wait while we removed and recalculated the new WakeUpCall, release it now
                 self.parent._queue_lock.release()
