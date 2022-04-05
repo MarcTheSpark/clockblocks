@@ -113,8 +113,8 @@ def wait_for_children_to_finish() -> None:
 
 
 def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
-         initial_rate: float = None, initial_tempo: float = None,
-         initial_beat_length: float = None) -> 'clock_module.Clock':
+         initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
+         schedule_at: Union[float, 'MetricPhaseTarget'] = None, done_callback: Callable = None) -> 'clock_module.Clock':
 
     """
     Spawns a parallel process running on a child clock of the currently active clock.
@@ -126,6 +126,8 @@ def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, n
     :param initial_beat_length: see :func:`~clockblocks.clock.Clock.fork`
     :param args: see :func:`~clockblocks.clock.Clock.fork`
     :param kwargs: see :func:`~clockblocks.clock.Clock.fork`
+    :param schedule_at: see :func:`~clockblocks.clock.Clock.fork`
+    :param done_callback: a callback function to be invoked when the clock has terminated
     :return: the clock of the newly forked process
     """
     clock = current_clock()
@@ -133,7 +135,8 @@ def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, n
         raise Exception("Cannot fork function: there is no running clock.")
     else:
         return clock.fork(process_function, name=name, initial_rate=initial_rate, initial_tempo=initial_tempo,
-                          initial_beat_length=initial_beat_length, args=args, kwargs=kwargs)
+                          initial_beat_length=initial_beat_length, args=args, kwargs=kwargs,
+                          schedule_at=schedule_at, done_callback=done_callback)
 
 
 def fork_unsynchronized(process_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:

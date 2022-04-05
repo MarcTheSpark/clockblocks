@@ -236,6 +236,12 @@ class TempoEnvelope(Envelope):
         self.extend_to(beat)
         return self
 
+    def time_at_beat(self, b):
+        return snap_float_to_nice_decimal(self.integrate_interval(0, b))
+
+    def beat_at_time(self, t):
+        return self.get_upper_integration_bound(0, t, max_error=0.00000001)
+
     ##################################################################################################################
     #                                             Conversion Utilities
     ##################################################################################################################
@@ -344,10 +350,10 @@ class TempoEnvelope(Envelope):
     def _from_dict(cls, json_dict):
         curve_shapes = None if 'curve_shapes' not in json_dict else json_dict['curve_shapes']
         if 'length' in json_dict:
-            return cls.from_levels(json_dict['levels'], json_dict['length'])
+            return cls.from_levels(json_dict['levels'], json_dict['length'], units="beatlength")
         else:
             return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
-                                                 curve_shapes)
+                                                 curve_shapes, units="beatlength")
 
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(
