@@ -1,171 +1,61 @@
+import math
 import threading
 import time
-from collections import namedtuple
-from typing import Callable
-
-from clockblocks import TempoEnvelope
-
-from utilities import sleep_precisely_until, current_clock, wait
-
-
-QueueEvent = namedtuple("QueueEvent", "t action")
-
-
-class Scheduler(threading.Thread):
-
-    def __init__(self, timing_policy=0.98, daemon=True):
-        super().__init__(daemon=daemon)
-        self._queue = []
-        self._wait_event = threading.Event()
-        self._hold_event = threading.Event()
-        self._ready_condition = threading.Condition()
-        self._hold_event.set()
-        # start time of this scheduler in seconds since epoch (result of time.time)
-        self._start_time = None
-        # last time this scheduler awoke from sleep in seconds since epoch (result of time.time)
-        self._last_wake_time = None
-        self.timing_policy = 0.98
-        self._t = 0
-        self._holding = False
-        self._performing_scheduled_action = False
-
-    def start(self) -> None:
-        self._start_time = self._last_wake_time = time.time()
-        super().start()
-
-    def run(self) -> None:
-        while True:
-            # notify all other threads that we've reached a new cycle (so self.time() is up-to-date)
-            with self._ready_condition:
-                self._ready_condition.notify_all()
-            # if another thread has called hold(), hold here until it calls release()
-            # 1) Hold phase
-            if not self._hold_event.is_set():
-                self._holding = True
-                self._hold_event.wait()
-                self._holding = False
-            # 2) processing queue item phase
-            self.process_next_queue_item()
-
-    def process_next_queue_item(self):
-        """
-        Looks at the next item in the queue, waits until it's scheduled time, and carries out its action
-        If there is no item in the queue, waits forever.
-        In either case, can be woken up early with a call to wake.
-        """
-        # process the next item in the queue
-        if len(self._queue) == 0:
-            # if there are no items in the queue, wait indefinitely until woken
-            self._wait_event.wait()
-            # ...then update the scheduler time based on when it was woken
-            self._t = time.time() - self._start_time
-            # ...and reset the wait event, so it's ready to go again
-            self._wait_event.clear()
-        else:
-            # if there are items in the queue, we can assume they are sorted by time, so consider the first one
-            t, action = self._queue[0]
-
-            # dt is how much time should have passed since the last queued action
-            dt = t - self._t
-            stop_sleeping_time = max(self._last_wake_time + dt * self.timing_policy, self._start_time + t)
-            sleep_precisely_until(stop_sleeping_time, self._wait_event)
-
-            # make note of when we woke up we'll try to stay true to this in the next wait
-            if self._wait_event.is_set():
-                # woken early, so do not pop the queue, we still need to wait for it
-                self._t = time.time() - self._start_time
-                self._wait_event.clear()  # clear the wait event so it continues to work
-            else:
-                # woken naturally because it reached the time at which the action should occur
-                self._queue.pop(0)
-                self._t = t
-                # note down when we woke, both in seconds since epoch, and in terms of scheduler time
-                self._last_wake_time = time.time()
-                self._performing_scheduled_action = True
-                action()
-                self._performing_scheduled_action = False
-
-    def time(self) -> float:
-        """
-        Returns the current time in the scheduler.
-        """
-        self.wake()
-        return self._t
-
-    def next_wakeup_time(self) -> float:
-        """
-        Returns the next scheduled action that the scheduler will wake up to perform (inf if there are none queued)
-        """
-        return float("inf") if len(self._queue) == 0 else self._queue[0].t
-
-    def schedule_action(self, t, action: Callable) -> None:
-        """
-        Schedule the given action to be called at the given time in the scheduler
-
-        :param t: time (since start of the scheduler) when action should occur
-        :param action: function to call
-        """
-        self._queue.append(QueueEvent(t, action))
-        self._queue.sort()
-        if t <= self.next_wakeup_time():
-            # if we're scheduling a new action before the next wake-up, we should wake
-            # the scheduler so that it can change its planned wakeup
-            self.wake()
-
-    def wake(self) -> None:
-        """
-        Wake the scheduler, and wait until it has finished updating its time.
-        If the scheduler is holding, we consider it already awake.
-        """
-        if not self._holding and not self._performing_scheduled_action:
-            # exit the wait
-            self._wait_event.set()
-            # ...and then allow the scheduler to catch up and update its time before returning
-            with self._ready_condition:
-                self._ready_condition.wait()
-
-    def wake_and_hold(self):
-        # we clear the hold event first so that the scheduler can't accidentally make it past before we clear it
-        self.hold()
-        self.wake()
-
-    def hold(self):
-        self._hold_event.clear()
-
-    def release(self):
-        if self._holding:
-            self._hold_event.set()
-
-
-_scheduler = None
-
-
-def get_scheduler():
-    global _scheduler
-    if _scheduler is None:
-        _scheduler = Scheduler(daemon=True)
-        _scheduler.start()
-    return _scheduler
+from cb2.scheduler import Scheduler, get_scheduler
+from cb2.tempo_envelope import TempoHistory, TempoEnvelope
+from utilities import wait
 
 
 class Clock:
 
-    def __init__(self, initial_rate=1):
+    def __init__(self, initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
+                 tempo_envelope: TempoEnvelope = None):
+        # setup scheduler
         self.scheduler = get_scheduler()
         self._start_time_in_scheduler = self.scheduler.time()
 
         threading.current_thread().__clock__ = self
-        self.beat = self.time = 0
+        self.tempo_history = Clock.setup_tempo_history(initial_rate, initial_tempo, initial_beat_length, tempo_envelope)
         self.rate = initial_rate
         self.wait_event = threading.Event()
 
+    @staticmethod
+    def setup_tempo_history(initial_rate, initial_tempo, initial_beat_length, tempo_envelope):
+        if initial_rate is initial_tempo is initial_beat_length is tempo_envelope is None:
+            # no tempo/rate/beat_length set, so set it to 60 bpm
+            return TempoHistory(1, units="beatlength")
+        else:
+            if not (initial_rate is None) + (initial_beat_length is None) + \
+                   (initial_tempo is None) + (tempo_envelope is None) == 3:
+                raise ValueError("Only one of initial_rate, initial_beat_length, initial_tempo, or initial_"
+                                 "tempo_envelope argument should be used.")
+            if tempo_envelope is not None:
+                # given a tempo_envelope to follow
+                return TempoHistory.from_tempo_envelope(tempo_envelope)
+            else:
+                # otherwise, get the initial beat length
+                if initial_rate is not None:
+                    initial_beat_length = 1 / initial_rate
+                elif initial_tempo is not None:
+                    initial_beat_length = 60 / initial_tempo
+                return TempoHistory(initial_beat_length, units="beatlength")
+
+    def beat(self):
+        return self.tempo_history.beat()
+
+    def time(self):
+        return self.tempo_history.time()
+
+    def tempo(self):
+        return self.tempo_history.tempo
+
     def wait(self, dt, units="beats"):
         if units == "beats":
-            wake_up_beat = self.beat + dt
-            wake_up_time = self.time + dt / self.rate
+            # wake_up_beat = self.beat() + dt  # TODO: NOT NEEDED?
+            wake_up_time = self.time() + self.tempo_history.get_wait_time(dt)
         else:
-            wake_up_beat = self.beat + dt * self.rate
-            wake_up_time = self.beat + dt
+            # wake_up_beat = self.beat() + self.tempo_history.get_beat_wait_from_time_wait(dt)   # TODO: NOT NEEDED?
+            wake_up_time = self.time() + dt
 
         # clear the wait_event so that it will block
         self.wait_event.clear()
@@ -177,15 +67,21 @@ class Clock:
         # release the scheduler to process other actions
         self.scheduler.release()
         # wait to be woken up by the scheduler
-        self.wait_event.wait()
+        self.wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
         # hold the scheduler until the next wait call is made and wake-up is scheduled
         self.scheduler.hold()
         # update beat and time
-        self.beat = wake_up_beat
-        self.time = wake_up_time
+        if units == "beats":
+            self.tempo_history.advance(dt)
+        else:
+            self.tempo_history.advance_time(dt)
+
+    def __getattr__(self, name):
+        return getattr(self.tempo_history, name)
 
 
 ########################################## DEMOS ########################################
+
 
 def scheduler_demo():
     scheduler = Scheduler(daemon=False)
@@ -206,42 +102,26 @@ def timing_policy_demo():
     # scheduler.timing_policy = 1  # relative
     # scheduler.timing_policy = 0.98  # compromise timing policy
     start = time.time()
+
     def print_time():
         print("scheduler time={}, actual time={}".format(scheduler.time(), time.time() - start))
     scheduler.start()
     # hold the scheduler and schedule a bunch of prints every second
     scheduler.hold()
-    for t in range(1, 20):
+    for t in range(1, 30):
         scheduler.schedule_action(t, print_time)
     # wait 1.5 seconds, which makes the first call 0.5 seconds behind
     time.sleep(1.5)
     # release the scheduler and watch it catch up (or not)
     scheduler.release()
 
-timing_policy_demo()
-exit()
 
-start = time.time()
+TempoEnvelope.from_function(lambda b: 120 + math.sin(b) * 80, domain_end=100)
+c = Clock()
+c.apply_function(lambda b: 60 + (10*b) % 200)
 
-print("Creating scheduler, waiting 2 seconds", time.time() - start, time.time() % 1000)
-get_scheduler()
+while True:
+    print(c.tempo_history)
+    print(c.beat(), c.tempo())
+    wait(1)
 
-time.sleep(2)
-
-
-def print_stuff(prefix, sleep):
-    Clock()
-    print(prefix, time.time() - start)
-    time.sleep(sleep)
-    while True:
-        wait(1)
-        print(prefix, time.time() - start)
-        wait(2)
-        print(prefix, time.time() - start)
-
-
-threading.Thread(target=print_stuff, args=("A:", 1.3)).start()
-time.sleep(0.5)
-threading.Thread(target=print_stuff, args=("B:", 1.6)).start()
-
-time.sleep(30)

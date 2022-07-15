@@ -19,13 +19,13 @@ goal arrival point within the beat (or meter) cycle.
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
-
+import dataclasses
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
 from .utilities import snap_float_to_nice_decimal, current_clock
 import logging
 import math
-from typing import Union, Sequence, Tuple
+from typing import Union, Sequence, Tuple, Callable
 
 
 class TempoEnvelope(Envelope):
@@ -43,7 +43,7 @@ class TempoEnvelope(Envelope):
     :param duration_units: either "beats" or "time", determining how we interpret the durations given
     """
 
-    def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
+    def __init__(self, levels: Union[float, Sequence[float]] = (60,), durations: Sequence[float] = (),
                  curve_shapes: Sequence[Union[float, str]] = None,
                  units: str = "tempo", duration_units: str = "beats"):
         units = units.lower().replace(" ", "")
@@ -148,8 +148,9 @@ class TempoEnvelope(Envelope):
         return cls(levels, durations, curve_shapes, units=units, duration_units=duration_units)
 
     @classmethod
-    def from_function(cls, function, domain_start=0, domain_end=1, resolution_multiple=2, key_point_precision=100,
-                      key_point_iterations=5, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+    def from_function(cls, function, domain_start=0, domain_end=1, units: str = "tempo", duration_units: str = "beats",
+                      scanning_step_size: float = 0.05, key_point_resolution_multiple: int = 2, iterations: int = 6,
+                      min_key_point_distance: float = 1e-7) -> 'TempoEnvelope':
         """
         Constructs a TempoEnvelope that approximates an arbitrary function. The domain of the function is in units
         defined by the `duration_units` parameter, and the range is in units defined by the `units` parameter.
@@ -158,18 +159,24 @@ class TempoEnvelope(Envelope):
             `units` parameters.
         :param domain_start: see :func:`~expenvelope.envelope.Envelope.from_function`
         :param domain_end: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param resolution_multiple: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_precision: see :func:`~expenvelope.envelope.Envelope.from_function`
-        :param key_point_iterations: see :func:`~expenvelope.envelope.Envelope.from_function`
         :param units: one of "tempo", "rate" or "beat length", determining how we interpret the function output
         :param duration_units: either "beats" or "time", determining how we interpret the function input
+        :param scanning_step_size: when analyzing the function for discontinuities, maxima and minima, inflection
+            points, etc., use this step size for the initial pass.
+        :param key_point_resolution_multiple: factor by which we add extra key points between the extrema and
+            inflection points to improve the curve fit.
+        :param iterations: when a potential key point is found, we zoom in and scan again in the viscinity of the point.
+            This determines how many iterations of zooming we do.
+        :param min_key_point_distance: after scanning for key points, any that are closer than this distance are merged.
         :return: a TempoEnvelope, constructed accordingly
         """
         assert duration_units in ("beats", "time"), "Duration units must be either \"beats\" or \"time\"."
         converted_function = (lambda x: TempoEnvelope.convert_units(function(x), units, "beatlength")) \
             if units.lower().replace(" ", "") != "beatlength" else function
-        out_envelope = super().from_function(converted_function, domain_start, domain_end, resolution_multiple,
-                                             key_point_precision, key_point_iterations)
+        out_envelope = super().from_function(converted_function, domain_start, domain_end,
+                                             scanning_step_size=scanning_step_size,
+                                             key_point_resolution_multiple=key_point_resolution_multiple,
+                                             iterations=iterations, min_key_point_distance=min_key_point_distance)
         if duration_units == "time":
             return out_envelope.convert_durations_to_times()
         else:
@@ -309,6 +316,13 @@ class TempoEnvelope(Envelope):
         :param x_range: min and max value shown on the x-axis
         :param y_range: min and max value shown on the y-axis
         """
+        self._construct_plot(title, resolution, show_segment_divisions, units, x_range, y_range).show()
+
+    def _construct_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
+                        x_range=None, y_range=None):
+        """
+        Constructs and returns (but doesn't show) a plot of this TempoEnvelope.
+        """
         # if we're past the end of the envelope, we want to plot that as a final constant segment
         # bring_up_to_date adds that segment, but we don't want to modify the original envelope, so we deepcopy
         if x_range is None:
@@ -331,7 +345,7 @@ class TempoEnvelope(Envelope):
         if y_range is not None:
             plt.ylim(y_range)
         ax.set_title('Graph of TempoEnvelope' if title is None else title)
-        plt.show()
+        return plt
 
     @classmethod
     def _from_dict(cls, json_dict):
@@ -347,8 +361,32 @@ class TempoEnvelope(Envelope):
             TempoEnvelope.convert_units(self.levels, "beatlength", "tempo"), self.durations, self.curve_shapes)
 
 
+@dataclasses.dataclass
+class FunctionFollowInfo:
+    func: Callable[[float], float]
+    next_domain_start: float
+    extension_increment: float
+    units: str
+    duration_units: str
+    scanning_step_size: float
+    min_key_point_distance: float
+    iterations: int
+    key_point_resolution_multiple: int
+    current_end_beat: float
+    current_end_time: float
+
+
+@dataclasses.dataclass
+class EnvelopeLoopInfo:
+    env: TempoEnvelope
+    length_in_beats: float
+    length_in_time: float
+    current_end_beat: float
+    current_end_time: float
+
+
 class TempoHistory(TempoEnvelope):
-    r"""
+    """
     Subclass of TempoEnvelope that keeps track of a current beat and time, and provides functionality for moving
     forward a certain number of beats or seconds, and/or setting tempo target(s) to reach in the future.
 
@@ -360,11 +398,13 @@ class TempoHistory(TempoEnvelope):
     :param beat: Where to set the current beat
     """
 
-    def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
+    def __init__(self, levels: Union[float, Sequence[float]] = (60,), durations: Sequence[float] = (),
                  curve_shapes: Sequence[Union[float, str]] = None,
                  units: str = "tempo", duration_units: str = "beats", beat: float = 0.0):
         super().__init__(levels, durations, curve_shapes, units, duration_units)
-        self.go_to_beat(beat)
+        self._t = self._beat = None
+        self.go_to_beat(beat)  # this sets _beat and _t
+        self.follow_func_or_envelope_loop: Union[FunctionFollowInfo, EnvelopeLoopInfo] = None
 
     @classmethod
     def from_tempo_envelope(cls, tempo_envelope: TempoEnvelope, beat: float = 0.0):
@@ -418,7 +458,7 @@ class TempoHistory(TempoEnvelope):
 
     @rate.setter
     def rate(self, rate):
-        self.beat_length = 1/rate
+        self.beat_length = 1 / rate
 
     @property
     def tempo(self):
@@ -434,6 +474,26 @@ class TempoHistory(TempoEnvelope):
     ##################################################################################################################
     #                                                Tempo Changes
     ##################################################################################################################
+
+    def append_envelope(self, envelope_to_append: TempoEnvelope, truncate: bool = False,
+                        loop: bool = False) -> TempoEnvelope:
+        # truncate removes any segments that extend into the future
+        if truncate:
+            self.remove_segments_after(self.beat())
+        # add a flat segment up to the current beat if needed
+        self.extend_to(self.beat())
+
+        super().append_envelope(envelope_to_append)
+        if loop:
+            self.follow_func_or_envelope_loop = EnvelopeLoopInfo(
+                envelope_to_append,
+                envelope_to_append.length(),
+                envelope_to_append.integrate_interval(envelope_to_append.start_time(), envelope_to_append.end_time()),
+                self.end_time(),
+                self.beat() + self.integrate_interval(self.beat(), self.end_time())
+            )
+            print(self.follow_func_or_envelope_loop)
+        return self
 
     def set_beat_length_target(self, beat_length_target: float, duration: float, curve_shape: float = 0,
                                metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
@@ -498,7 +558,7 @@ class TempoHistory(TempoEnvelope):
     def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
                                 curve_shapes: Sequence[float] = None,
                                 metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                                duration_units: str = "beats", truncate: bool = True) -> None:
+                                duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
         of the arguments.
@@ -510,6 +570,7 @@ class TempoHistory(TempoEnvelope):
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
+        :param loop: if true, loop these targets
         """
         num_targets = len(beat_length_targets)
         if duration_units not in ("beats", "time"):
@@ -547,7 +608,7 @@ class TempoHistory(TempoEnvelope):
             for beat_length_target, duration, curve_shape, metric_phase_target in \
                     zip(beat_length_targets, durations, curve_shapes, metric_phase_targets):
                 if metric_phase_target is None:
-                    # no metric phase target for this segment, but some segments do have metric phase targets
+                    # no metric phase target for this segment, but some segments do have metric phase targets,
                     # so we add it to our list of segments to adjust when we next have to adjust to a target
                     self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target, duration_units)
                     added_segment = self.segments[-1]
@@ -577,7 +638,7 @@ class TempoHistory(TempoEnvelope):
                     current_group_end_time += added_segment.integrate_segment(added_segment.start_time,
                                                                               added_segment.end_time)
 
-                    # ...and then we try to reach the target by adjusting all of the segments since the last adjustment
+                    # ...and then we try to reach the target by adjusting all the segments since the last adjustment
                     success = False  # did we successfully adjust?
                     if duration_units == "beats":
                         for goal_end_time in metric_phase_target.get_nearest_matching_times(current_group_end_time):
@@ -615,6 +676,15 @@ class TempoHistory(TempoEnvelope):
                         # also reset the group start and end beat/time
                         current_group_start_beat = current_group_end_beat
                         current_group_start_time = current_group_end_time
+        if loop:
+            envelope_to_loop = TempoEnvelope.from_segments(self.segments[-num_targets:])
+            self.follow_func_or_envelope_loop = EnvelopeLoopInfo(
+                envelope_to_loop,
+                envelope_to_loop.length(),
+                envelope_to_loop.integrate_interval(envelope_to_loop.start_time(), envelope_to_loop.end_time()),
+                self.end_time(),
+                self.beat() + self.integrate_interval(self.beat(), self.end_time())
+            )
 
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
                         metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
@@ -639,7 +709,7 @@ class TempoHistory(TempoEnvelope):
     def set_rate_targets(self, rate_targets: Sequence[float], durations: Sequence[float],
                          curve_shapes: Sequence[float] = None,
                          metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                         duration_units: str = "beats", truncate: bool = True) -> None:
+                         duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
         of the arguments.
@@ -651,9 +721,10 @@ class TempoHistory(TempoEnvelope):
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
+        :param loop: if true, loop these targets
         """
         self.set_beat_length_targets([1 / x for x in rate_targets], durations, curve_shapes, metric_phase_targets,
-                                     duration_units, truncate)
+                                     duration_units, truncate, loop)
 
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
                          metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
@@ -678,7 +749,7 @@ class TempoHistory(TempoEnvelope):
     def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
                           curve_shapes: Sequence[float] = None,
                           metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                          duration_units: str = "beats", truncate: bool = True) -> None:
+                          duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
         of the arguments.
@@ -690,9 +761,10 @@ class TempoHistory(TempoEnvelope):
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
+        :param loop: if true, loop these targets
         """
         self.set_beat_length_targets([60 / x for x in tempo_targets], durations, curve_shapes, metric_phase_targets,
-                                     duration_units, truncate)
+                                     duration_units, truncate, loop)
 
     # ----------------------------------------- Metric Phase adjustments ---------------------------------------------
 
@@ -919,6 +991,101 @@ class TempoHistory(TempoEnvelope):
             return False
 
     ##################################################################################################################
+    #                                           Functions and Envelope Loops
+    ##################################################################################################################
+
+    def apply_function(self, func: Callable[[float], float], domain_start: float = 0, domain_end: float = None,
+                       units: str = "tempo", duration_units: str = "beats", truncate: bool = False,
+                       loop: bool = False, extension_increment: float = 2.0, scanning_step_size: float = 0.05,
+                       key_point_resolution_multiple: int = 2, iterations: int = 6,
+                       min_key_point_distance: float = 1e-7) -> None:
+        """
+        Apply a function for this TempoEnvelope to follow. If domain_end is None, this causes us to follow this
+        function indefinitely; if a value is given for domain_end, then this appends an envelope that matches the
+        contour of the prescribed function over a finite domain.
+
+        :param func: a function (likely a lambda function) that maps a given beat/time to the desired
+            tempo/rate/beatlength at that moment. See the `units` and `duration_units` arguments, which allow you
+            to specify the units of the input and output of the function.
+        :param domain_start: what part of the function's domain to start at (defaults to 0)
+        :param domain_end: what part of the function's domain to end at (defaults to None, which causes the TempoHistory
+            to follow the function indefinitely, or until :func:`stop_follow_function_or_envelope_loop` is called.)
+        :param units: either "beats" or "time". If beats, then the `func` param specifies a mapping from beats to
+            tempo/rate/beatlength; if time, then it specifies a mapping from sections to tempo/rate/beatlength.
+        :param duration_units: one of ("tempo", "rate", "beatlength"). This determines the units of the output of the
+            `func` parameter.
+        :param truncate: if True, truncate any current projection of the TempoHistory into the future, and begin
+            following this function from the current moment. If False, start following the function from the end of
+            the current projection of the TempoHistory.
+        :param loop: Only relevant if domain_end is set. If so, this determines whether or not we loop the segment
+            of function.
+        :param extension_increment: Only relevant if domain_end is None. When following the tempo/rate/beatlength
+            function indefinitely, we project the function this far into the future, and only extend further as we
+            reach the end of what we have projected.
+        :param scanning_step_size: see :func:`expenvelope.Envelope.from_function`
+        :param key_point_resolution_multiple: see :func:`expenvelope.Envelope.from_function`
+        :param iterations: see :func:`expenvelope.Envelope.from_function`
+        :param min_key_point_distance: see :func:`expenvelope.Envelope.from_function`
+        """
+        # truncate removes any segments that extend into the future
+        if truncate:
+            self.remove_segments_after(self.beat())
+        # make sure that we're caught up to the current beat
+        self.extend_to(self.beat())
+
+        if domain_end is None:
+            # set the function follow info
+            self.follow_func_or_envelope_loop = FunctionFollowInfo(
+                func, domain_start, extension_increment, units, duration_units,
+                scanning_step_size, min_key_point_distance, iterations, key_point_resolution_multiple,
+                self.end_time(), self.time() + self.integrate_interval(self.beat(), self.end_time())
+            )
+            # and then extend the follow function
+            self._extend_follow_function()
+        else:
+            envelope = TempoEnvelope.from_function(
+                func, domain_start, domain_end, units=units, duration_units=duration_units,
+                scanning_step_size=scanning_step_size, min_key_point_distance=min_key_point_distance,
+                iterations=iterations, key_point_resolution_multiple=key_point_resolution_multiple
+            )
+
+            self.append_envelope(envelope, loop=loop, truncate=truncate)
+
+    def _extend_follow_function(self):
+        """Extend the function that we're following by the prescribed step size."""
+        func_envelope = TempoEnvelope.from_function(
+            self.follow_func_or_envelope_loop.func, self.follow_func_or_envelope_loop.next_domain_start,
+            self.follow_func_or_envelope_loop.next_domain_start + self.follow_func_or_envelope_loop.extension_increment,
+            units=self.follow_func_or_envelope_loop.units, duration_units=self.follow_func_or_envelope_loop.duration_units,
+            scanning_step_size=self.follow_func_or_envelope_loop.scanning_step_size,
+            min_key_point_distance=self.follow_func_or_envelope_loop.min_key_point_distance,
+            iterations=self.follow_func_or_envelope_loop.iterations,
+            key_point_resolution_multiple=self.follow_func_or_envelope_loop.key_point_resolution_multiple
+        )
+        self.follow_func_or_envelope_loop.current_end_beat += func_envelope.end_time()
+        self.follow_func_or_envelope_loop.current_end_time += func_envelope.integrate_interval(
+            func_envelope.start_time(), func_envelope.end_time())
+        self.follow_func_or_envelope_loop.next_domain_start += self.follow_func_or_envelope_loop.extension_increment
+        self.append_envelope(func_envelope)
+
+    def _extend_envelope_loop(self):
+        """Extend the envelope loop by appending the looping envelope once."""
+        self.follow_func_or_envelope_loop.current_end_beat += self.follow_func_or_envelope_loop.length_in_beats
+        self.follow_func_or_envelope_loop.current_end_time += self.follow_func_or_envelope_loop.length_in_time
+        self.append_envelope(self.follow_func_or_envelope_loop.env)
+
+    def _extend_function_or_envelope_loop(self):
+        """If we've applied a function or a looping envelope, extend it by one step size/copy"""
+        if isinstance(self.follow_func_or_envelope_loop, FunctionFollowInfo):
+            self._extend_follow_function()
+        else:
+            self._extend_envelope_loop()
+
+    def stop_follow_function_or_envelope_loop(self):
+        self.follow_func_or_envelope_loop = None
+        self.truncate()
+
+    ##################################################################################################################
     #                                                Advancing Time
     ##################################################################################################################
 
@@ -939,6 +1106,10 @@ class TempoHistory(TempoEnvelope):
         :param beats: how many beats to advance by
         :return: tuple of delta beats, delta time
         """
+        if self.follow_func_or_envelope_loop is not None:
+            while self.follow_func_or_envelope_loop.current_end_beat < self.beat() + beats:
+                self._extend_function_or_envelope_loop()
+
         wait_time = self.get_wait_time(beats)
         self._beat = snap_float_to_nice_decimal(self._beat + beats)
         self._t = snap_float_to_nice_decimal(self._t + wait_time)
@@ -962,6 +1133,10 @@ class TempoHistory(TempoEnvelope):
         :param seconds: how many seconds to advance by
         :return: tuple of delta beats, delta time
         """
+        if self.follow_func_or_envelope_loop is not None:
+            while self.follow_func_or_envelope_loop.current_end_time < self.time() + seconds:
+                self._extend_function_or_envelope_loop()
+
         beats = self.get_beat_wait_from_time_wait(seconds)
         self.advance(beats)
         return beats, seconds
@@ -990,11 +1165,28 @@ class TempoHistory(TempoEnvelope):
         return self.truncate_at(self._beat)
 
     def show_plot(self, title=None, resolution=25, show_segment_divisions=True, units="tempo",
-                  x_range=None, y_range=None):
+                  x_range=None, y_range=None, show_current_beat=True):
+        """
+        Shows a plot of this TempoHistory using matplotlib.
+
+        :param title: see :func:`TempoEnvelope.show_plot`
+        :param resolution: see :func:`TempoEnvelope.show_plot`
+        :param show_segment_divisions: see :func:`TempoEnvelope.show_plot`
+        :param units: see :func:`TempoEnvelope.show_plot`
+        :param x_range: see :func:`TempoEnvelope.show_plot`
+        :param y_range: see :func:`TempoEnvelope.show_plot`
+        :param show_current_beat: whether or not to show the current beat as a dashed line
+        """
         title = "Graph of TempoHistory" if title is None else title
-        super().show_plot(title, resolution, show_segment_divisions, units,
-                          (min(0, self.start_time()), max(self.end_time(), self.beat()))
-                          if x_range is None else x_range, y_range)
+        plt = self._construct_plot(
+            "Graph of TempoHistory" if title is None else title,
+            resolution, show_segment_divisions, units,
+            (min(0, self.start_time()), max(self.end_time(), self.beat())) if x_range is None else x_range, y_range
+        )
+
+        if show_current_beat:
+            plt.vlines(self.beat(), *plt.ylim(), colors="green", linestyles="dashed")
+        plt.show()
 
     def as_tempo_envelope(self) -> TempoEnvelope:
         """
@@ -1093,3 +1285,4 @@ class MetricPhaseTarget:
             (", " + str(self.divisor)) if self.divisor != 1 else "",
             ", True" if self.relative else "",
         )
+    
