@@ -9,15 +9,15 @@ from utilities import wait
 class Clock:
 
     def __init__(self, initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
-                 tempo_envelope: TempoEnvelope = None):
+                 tempo_envelope: TempoEnvelope = None, parent: 'Clock' = None):
         # setup scheduler
-        self.scheduler = get_scheduler()
-        self._start_time_in_scheduler = self.scheduler.time()
+        self._scheduler = get_scheduler()
+        self._start_time_in_scheduler = self._scheduler.time()
 
         threading.current_thread().__clock__ = self
-        self.tempo_history = Clock.setup_tempo_history(initial_rate, initial_tempo, initial_beat_length, tempo_envelope)
-        self.rate = initial_rate
-        self.wait_event = threading.Event()
+        self._tempo_history = Clock.setup_tempo_history(initial_rate, initial_tempo, initial_beat_length, tempo_envelope)
+        self._wait_event = threading.Event()
+        self.parent = parent
 
     @staticmethod
     def setup_tempo_history(initial_rate, initial_tempo, initial_beat_length, tempo_envelope):
@@ -40,44 +40,106 @@ class Clock:
                     initial_beat_length = 60 / initial_tempo
                 return TempoHistory(initial_beat_length, units="beatlength")
 
-    def beat(self):
-        return self.tempo_history.beat()
+    ##################################################################################################################
+    #                                        Boilerplate TempoHistory Functionality
+    ##################################################################################################################
 
-    def time(self):
-        return self.tempo_history.time()
+    def time(self) -> float:
+        """
+        How much time has passed since this clock was created.
+        Either in seconds, if this is the master clock, or in beats in the parent clock, if this clock was the result
+        of a call to fork.
+        """
+        return self._tempo_history.time()
 
-    def tempo(self):
-        return self.tempo_history.tempo
+    def beat(self) -> float:
+        """
+        How many beats have passed since this clock was created.
+        """
+        return self._tempo_history.beat()
+
+    # def time_in_master(self) -> float:
+    #     """
+    #     How much time (in seconds) has passed since the master clock was created.
+    #     """
+    #     return self.master.time()
+
+    @property
+    def beat_length(self) -> float:
+        """
+        The length of a beat in this clock in seconds.
+        Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
+        other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
+        Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
+        in the parent clock.
+        """
+        return self._tempo_history.beat_length
+
+    @beat_length.setter
+    def beat_length(self, b):
+        self._tempo_history.beat_length = b
+
+    @property
+    def rate(self) -> float:
+        """
+        The rate of this clock in beats / second.
+        Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
+        other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
+        Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
+        in the parent clock.
+        """
+        return self._tempo_history.rate
+
+    @rate.setter
+    def rate(self, r):
+        self._tempo_history.rate = r
+
+    @property
+    def tempo(self) -> float:
+        """
+        The rate of this clock in beats / minute
+        Note that beat_length, tempo and rate are interconnected properties, and that by setting one of them the
+        other two are automatically set in response according to the relationship: beat_length = 1/rate = 60/tempo.
+        Also, note that "seconds" refers to actual seconds only in the master clock; otherwise it refers to beats
+        in the parent clock.
+        """
+        return self._tempo_history.tempo
+
+    @tempo.setter
+    def tempo(self, t):
+        self._tempo_history.tempo = t
+
+    ##################################################################################################################
+    #                                                 Waiting
+    ##################################################################################################################
 
     def wait(self, dt, units="beats"):
         if units == "beats":
             # wake_up_beat = self.beat() + dt  # TODO: NOT NEEDED?
-            wake_up_time = self.time() + self.tempo_history.get_wait_time(dt)
+            wake_up_time = self.time() + self._tempo_history.get_wait_time(dt)
         else:
-            # wake_up_beat = self.beat() + self.tempo_history.get_beat_wait_from_time_wait(dt)   # TODO: NOT NEEDED?
+            # wake_up_beat = self.beat() + self._tempo_history.get_beat_wait_from_time_wait(dt)   # TODO: NOT NEEDED?
             wake_up_time = self.time() + dt
 
-        # clear the wait_event so that it will block
-        self.wait_event.clear()
-        # add the wake-up to the scheduler's queue
-        self.scheduler.schedule_action(
+        # clear the _wait_event so that it will block
+        self._wait_event.clear()
+        # add the wake-up to the _scheduler's queue
+        self._scheduler.schedule_action(
             self._start_time_in_scheduler + wake_up_time,
-            self.wait_event.set
+            self._wait_event.set
         )
-        # release the scheduler to process other actions
-        self.scheduler.release()
-        # wait to be woken up by the scheduler
-        self.wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
-        # hold the scheduler until the next wait call is made and wake-up is scheduled
-        self.scheduler.hold()
+        # release the _scheduler to process other actions
+        self._scheduler.release()
+        # wait to be woken up by the _scheduler
+        self._wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
+        # hold the _scheduler until the next wait call is made and wake-up is scheduled
+        self._scheduler.hold()
         # update beat and time
         if units == "beats":
-            self.tempo_history.advance(dt)
+            self._tempo_history.advance(dt)
         else:
-            self.tempo_history.advance_time(dt)
+            self._tempo_history.advance_time(dt)
 
-    def __getattr__(self, name):
-        return getattr(self.tempo_history, name)
 
 
 ########################################## DEMOS ########################################
@@ -118,10 +180,9 @@ def timing_policy_demo():
 
 TempoEnvelope.from_function(lambda b: 120 + math.sin(b) * 80, domain_end=100)
 c = Clock()
-c.apply_function(lambda b: 60 + (10*b) % 200)
+c._tempo_history.apply_function(lambda b: 60 + (10 * b) % 200)
 
 while True:
-    print(c.tempo_history)
-    print(c.beat(), c.tempo())
+    print(c.beat(), c.tempo)
     wait(1)
 

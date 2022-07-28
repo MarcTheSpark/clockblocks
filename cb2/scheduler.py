@@ -1,11 +1,11 @@
 import threading
 import time
 from collections import namedtuple
-from typing import Callable
+from typing import Callable, Any
 from cb2.utilities import sleep_precisely_until
 
 
-QueueEvent = namedtuple("QueueEvent", "t action")
+QueueEvent = namedtuple("QueueEvent", "t info action")
 
 
 class Scheduler(threading.Thread):
@@ -62,7 +62,7 @@ class Scheduler(threading.Thread):
             self._wait_event.clear()
         else:
             # if there are items in the queue, we can assume they are sorted by time, so consider the first one
-            t, action = self._queue[0]
+            t, _, action = self._queue[0]
 
             # dt is how much time should have passed since the last queued action
             dt = t - self._t
@@ -97,14 +97,16 @@ class Scheduler(threading.Thread):
         """
         return float("inf") if len(self._queue) == 0 else self._queue[0].t
 
-    def schedule_action(self, t, action: Callable) -> None:
+    def schedule_action(self, t, action: Callable, info: Any = None) -> None:
         """
         Schedule the given action to be called at the given time in the scheduler
 
         :param t: time (since start of the scheduler) when action should occur
         :param action: function to call
+        :param info: any additional information. Note that events at the same time stamp will end up being sorted based
+            on this parameter.
         """
-        self._queue.append(QueueEvent(t, action))
+        self._queue.append(QueueEvent(t, info, action))
         self._queue.sort()
         if t <= self.next_wakeup_time():
             # if we're scheduling a new action before the next wake-up, we should wake
