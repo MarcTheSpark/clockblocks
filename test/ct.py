@@ -11,12 +11,12 @@ c = Clock(initial_tempo=90)
 def other_clock():
     c2 = Clock()
     while True:
-        print("c2", c2.beat(), c2.tempo)
+        print("c2", c2.beat(), c2.time(), c2.tempo)
         c2.wait(1)
 
 threading.Thread(target=other_clock, daemon=True).start()
 
 while True:
-    print("c1", c.beat(), c.tempo)
+    print("c1", c.beat(), c.time(), c.tempo)
     c.wait(1)
 

@@ -4,8 +4,16 @@ from collections import namedtuple
 from enum import Enum, auto
 from typing import Any, Callable
 from cb2.utilities import sleep_precisely_until
+import logging
+from dataclasses import dataclass
 
-QueueEvent = namedtuple("QueueEvent", "t action metadata")
+logger = logging.getLogger(__name__)
+
+@dataclass
+class QueueEvent:
+    t: int
+    action: Callable[[], None]
+    metadata: Any
 
 
 class Stage(Enum):
@@ -69,7 +77,9 @@ class Scheduler(threading.Thread):
         return self._current_stage not in (Stage.INACTIVE, Stage.KILLED)
     
     def kill(self):
+        global _scheduler
         self._set_stage(Stage.KILLED)
+        _scheduler = None
 
     def next_wakeup_time(self) -> float:
         """
@@ -83,11 +93,14 @@ class Scheduler(threading.Thread):
         self._start_time = self._last_wake_time = time.time()
         try:
             while self._current_stage != Stage.KILLED:
+                logger.info("New scheduler cycle")
                 with self._updated_condition:
                     self._updated_condition.notifyAll()
                 self._set_stage(Stage.HOLDING)
+                logger.debug("Scheduler holding")
                 self._hold_event.wait()
                 self._set_stage(Stage.PROCESSING)
+                logger.debug("Scheduler processing queue item")
                 self._process_next_queue_item()
         except SchedulerKilledException:
             pass
@@ -100,10 +113,12 @@ class Scheduler(threading.Thread):
         """
         # process the next item in the queue
         if len(self._queue) == 0:
+            logger.debug("No item in scheduler queue; waiting until event is added.")
             self._set_stage(Stage.WAITING)
             # if there are no items in the queue, wait indefinitely until woken
             self._wait_event.wait()
             self._set_stage(Stage.PROCESSING)
+            logger.debug("Scheduler woken.")
             # ...then update the scheduler time based on when it was woken
             self._ideal_time = time.time() - self._start_time
             # ...and res    et the wait event, so it's ready to go again
@@ -111,8 +126,12 @@ class Scheduler(threading.Thread):
         else:
             # if there are items in the queue, we can assume they are sorted by time, so consider the first one
             queue_event = self._queue.pop(0)
+            logger.debug(f"Processing queue event {queue_event}")
+
             if queue_event.t < self._ideal_time:
                 self._set_stage(Stage.ACTING)
+                logger.debug(f"Event scheduled for {queue_event.t}, which is in the past (current time is "
+                             f"{self._ideal_time}). Performing action immediately.")
                 queue_event.action()
                 self._set_stage(Stage.PROCESSING)
                 return
@@ -121,12 +140,15 @@ class Scheduler(threading.Thread):
             dt = queue_event.t - self._ideal_time
             stop_sleeping_time = max(self._last_wake_time + dt * self.timing_policy, self._start_time + queue_event.t)
             self._set_stage(Stage.WAITING)
+            logger.debug(f"Waiting nominal {dt} in scheduler (actually {stop_sleeping_time - time.time()}).")
             sleep_precisely_until(stop_sleeping_time, self._wait_event)
             self._set_stage(Stage.PROCESSING)
             # make note of when we woke up we'll try to stay true to this in the next wait
             if self._wait_event.is_set():
                 # woken early, so update the time
                 self._ideal_time = time.time() - self._start_time
+                logger.debug(f"Scheduler woken early; updating time to {self._ideal_time}.")
+
                 # and re-add the event to the queue, since we still need to wait for it
                 self._schedule_queue_event(queue_event)
                 # finally, clear the wait event so it continues to work
@@ -137,6 +159,7 @@ class Scheduler(threading.Thread):
                 # note down when we woke, both in seconds since epoch, and in terms of scheduler time
                 self._last_wake_time = time.time()
                 self._set_stage(Stage.ACTING)
+                logger.debug(f"Scheduler woken at {self._ideal_time}. Performing action.")
                 queue_event.action()
                 self._set_stage(Stage.PROCESSING)
 

@@ -143,16 +143,16 @@ class Clock:
 
         # clear the _wait_event so that it will block
         self._wait_event.clear()
-        # add the wake-up to the _scheduler's queue
+        # add the wake-up to the scheduler's queue
         self._scheduler.schedule_action(
             self._start_time_in_scheduler + wake_up_time,
             self._wait_event.set
         )
-        # release the _scheduler to process other actions
+        # release the scheduler to process other actions
         self._scheduler.release()
-        # wait to be woken up by the _scheduler
+        # wait to be woken up by the scheduler
         self._wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
-        # hold the _scheduler until the next wait call is made and wake-up is scheduled
+        # hold the scheduler until the next wait call is made and wake-up is scheduled
         self._scheduler.hold()
         # update beat and time
         if units == "beats":
