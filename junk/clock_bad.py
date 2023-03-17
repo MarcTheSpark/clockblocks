@@ -16,6 +16,17 @@ class Clock:
                  initial_tempo: float = None, initial_beat_length: float = None, scheduler: Scheduler = None):
         self.name = name
         self.parent = parent
+
+        # get a default (shared) scheduler unless one is specifically provided
+        self.scheduler = get_scheduler() if scheduler is None else scheduler
+
+        if self.is_master():
+            threading.current_thread().__clock__ = self
+            self.parent_offset = self._start_time_in_scheduler = self.scheduler.time()
+        else:
+            self.parent_offset = self.parent.beat()
+            self._start_time_in_scheduler = self.parent_offset + self.parent._start_time_in_scheduler
+
         self._children = []
         self.set_id()
 
@@ -25,25 +36,7 @@ class Clock:
             units="rate"
         )
 
-        # get a default (shared) scheduler unless one is specifically provided
-        self.scheduler = self.parent.scheduler if self.parent is not None else \
-            get_scheduler() if scheduler is None else scheduler
-
-        self._entering_wait_condition = threading.Condition()
         self._wait_event = threading.Event()
-
-        if self.is_master():
-            # the first thing we do is stop and put things in the scheduler's hands
-            # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
-            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait,
-                                           (0, ), f"Initial wake for {self}")
-            self._wait_event.wait()
-
-            threading.current_thread().__clock__ = self
-            self.parent_offset = self._start_time_in_scheduler = self.scheduler.time()
-        else:
-            self.parent_offset = self.parent.beat()
-            self._start_time_in_scheduler = self.parent_offset + self.parent._start_time_in_scheduler
 
     def set_id(self):
         self._child_counter = count()
@@ -102,7 +95,7 @@ class Clock:
         """
         How long has this clock been alive in the scheduler. Should return a result very close to `Clock.time`
         """
-        return self.scheduler.wall_time() - self._start_time_in_scheduler
+        return self.scheduler.wall_time()  - self._start_time_in_scheduler
 
     @property
     def beat_length(self) -> float:
@@ -149,61 +142,41 @@ class Clock:
     def tempo(self, t):
         self.tempo_history.tempo = t
 
-    def get_time_in_scheduler(self, beat_or_time, units="beat"):
+    def get_dt_in_scheduler(self, dt):
         """
-        Gets the time in the scheduler for a given beat or time in this clock, working recursively up the chain
-        of clocks.
+        Gets the amount of time that should pass in the scheduler for a given time (not beats) in this clock.
 
-        :param beat_or_time: the beat or time of interest in this clock
-        :param units: one of ("beats", "time"), determining the units for the first argument
+        :param dt: how much time passes in this clock (and therefore beats in parent clock, if it exists)
         :return: how much time should pass in the scheduler
         """
-        time_in_this_clock = beat_or_time if units == "time" else self.tempo_history.time_at_beat(beat_or_time)
         if self.parent is None:
-            return time_in_this_clock + self.parent_offset
+            return dt
         else:
-            return self.parent.get_time_in_scheduler(time_in_this_clock + self.parent_offset)
+            return self.parent.tempo_history.integrate_interval(
+                self.parent_offset + self.time(),
+                self.parent_offset + self.time() + dt
+            )
 
     def wait(self, dt, units="beats"):
-        if units == "beats":
-            wake_up_beat = self.beat() + dt
-            wake_up_time = self.tempo_history.time_at_beat(wake_up_beat)
-        elif units == "time":
-            wake_up_time = self.time() + dt
-            wake_up_beat = self.tempo_history.get_upper_integration_bound(self.beat(), dt, max_error=0.00000001)
-        else:
-            raise ValueError("Argument `units` must be one of (\"beats\", \"time\")")
-
-        wake_up_time_in_scheduler = self.get_time_in_scheduler(wake_up_time, units="time")
+        beat_dur = dt if units == "beats" else self.tempo_history.get_beat_wait_from_time_wait(dt)
+        time_dur = dt if units == "time" else self.tempo_history.get_wait_time(dt)
+        wake_up_time = self.time() + self.get_dt_in_scheduler(time_dur)
 
         # clear the _wait_event so that it will block
         self._wait_event.clear()
-
         # add the wake-up to the scheduler's queue
         self.scheduler.schedule_action(
-            wake_up_time_in_scheduler,
-            self._wake_and_advance_to_next_wait,
+            self._start_time_in_scheduler + wake_up_time,
+            self._wait_event.set,
             self.clock_id,
             f"{self} wakeup action"
         )
-
-        with self._entering_wait_condition:
-            # wait to be woken up by the scheduler
-            self._entering_wait_condition.notifyAll()
-
+        self.scheduler.release()
+        # wait to be woken up by the scheduler
         self._wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
-
+        self.scheduler.hold()
         # update tempo history
-        self.tempo_history.advance(wake_up_beat - self.beat())
-
-    def _wake_and_advance_to_next_wait(self):
-        """
-        This function is scheduled on the scheduler: it wakes up this clock, and then blocks until the clock
-        has hit another wait call and scheduled its next wakeup.
-        """
-        with self._entering_wait_condition:
-            self._wait_event.set()
-            self._entering_wait_condition.wait()
+        self.tempo_history.advance(beat_dur)
 
     def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
@@ -276,6 +249,7 @@ class Clock:
             #     child.parent_offset += start_delay
             #     child.wait(start_delay, units="time")
 
+            self.scheduler.hold()
             # Run the function
             process_function(*args, **kwds)
 
@@ -286,16 +260,12 @@ class Clock:
 
             if done_callback is not None:
                 done_callback()
+            self.scheduler.release()
 
         # self._run_in_pool(_process, args, kwargs)
-        def _start_new_clock():
-            with child._entering_wait_condition:
-                threading.Thread(target=_process, args=args, kwargs=kwargs, daemon=True).start()
-                child._entering_wait_condition.wait()
-
         self.scheduler.schedule_action(
             self.scheduler.time(),
-            _start_new_clock,
+            threading.Thread(target=_process, args=args, kwargs=kwargs, daemon=True).start,
             child.clock_id,
             f"Forking of {child}"
         )

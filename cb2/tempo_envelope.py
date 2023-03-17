@@ -829,6 +829,14 @@ class TempoHistory(TempoEnvelope):
         # if we get here, neither adjustment was possible, so we failed. Return false.
         return False
 
+    def time_at_beat(self, beat):
+        """
+        Project forward to determine the time at the given beat.
+
+        :param beat: The beat at which to calculate the time.
+        """
+        return self.time() + self.integrate_interval(self.beat(), beat)
+
     def adjust_time_at_beat(self, beat_to_adjust: float, desired_time: float) -> bool:
         """
         Adjusts the curvature of segments from now until beat so that we reach it at desired_time, if possible. If not
