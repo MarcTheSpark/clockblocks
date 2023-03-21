@@ -8,6 +8,7 @@ from typing import Callable, Sequence, Union
 from cb2.tempo_envelope import TempoHistory
 from cb2.scheduler import get_scheduler, Scheduler
 from cb2.metric_phase import MetricPhaseTarget
+from cb2.enums import DurationUnits
 
 
 class Clock:
@@ -36,7 +37,7 @@ class Clock:
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
             self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait,
-                                           (0, ), f"Initial wake for {self}")
+                                           (0, ), {"description": f"Initial wake for {self}", "acting_clock": self})
             self._wait_event.wait()
 
             threading.current_thread().__clock__ = self
@@ -149,6 +150,10 @@ class Clock:
     def tempo(self, t):
         self.tempo_history.tempo = t
 
+    ##################################################################################################################
+    #                                              Waiting and Forking
+    ##################################################################################################################
+
     def get_time_in_scheduler(self, beat_or_time, units="beat"):
         """
         Gets the time in the scheduler for a given beat or time in this clock, working recursively up the chain
@@ -165,15 +170,13 @@ class Clock:
             return self.parent.get_time_in_scheduler(time_in_this_clock + self.parent_offset)
 
     def wait(self, dt, units="beats"):
-        if units == "beats":
+        units = DurationUnits(units)
+        if units == DurationUnits.BEATS:
             wake_up_beat = self.beat() + dt
             wake_up_time = self.tempo_history.time_at_beat(wake_up_beat)
-        elif units == "time":
-            wake_up_time = self.time() + dt
-            wake_up_beat = self.tempo_history.get_upper_integration_bound(self.beat(), dt, max_error=0.00000001)
         else:
-            raise ValueError("Argument `units` must be one of (\"beats\", \"time\")")
-
+            wake_up_time = self.time() + dt
+            wake_up_beat = self.tempo_history.beat_at_time(wake_up_time)
         wake_up_time_in_scheduler = self.get_time_in_scheduler(wake_up_time, units="time")
 
         # clear the _wait_event so that it will block
@@ -184,7 +187,8 @@ class Clock:
             wake_up_time_in_scheduler,
             self._wake_and_advance_to_next_wait,
             self.clock_id,
-            f"{self} wakeup action"
+            {"description": f"{self} wakeup action",
+             "acting_clock": self}
         )
 
         with self._entering_wait_condition:
@@ -297,7 +301,8 @@ class Clock:
             self.scheduler.time(),
             _start_new_clock,
             child.clock_id,
-            f"Forking of {child}"
+            {"description": f"Forking of {child}",
+             "acting_clock": self}
         )
 
     def __repr__(self):

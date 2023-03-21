@@ -41,7 +41,7 @@ class QueueEvent:
 
 class Stage(Enum):
     INACTIVE = auto()
-    HOLDING= auto()
+    HOLDING = auto()
     WAITING = auto()
     PROCESSING = auto()
     ACTING = auto()
