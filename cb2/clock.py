@@ -244,24 +244,25 @@ class Clock:
         child = Clock(name, parent=self, initial_rate=initial_rate, initial_tempo=initial_tempo,
                       initial_beat_length=initial_beat_length)
         self._children.append(child)
-        # if schedule_at is None:
-        #     start_delay = 0
-        # elif isinstance(schedule_at, Real):
-        #     start_delay = schedule_at - self.beat()
-        #     if start_delay < 0:
-        #         logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
-        #         start_delay = 0
-        # else:  # it's a MetricPhaseTarget
-        #     if not isinstance(schedule_at, MetricPhaseTarget):
-        #         raise ValueError("`schedule_at` must be either a float or a MetricPhaseTarget")
-        #     # get_nearest_matching_beats returns the nearest match below and above, in order of nearness
-        #     # we want the match above, since it's in the future, so we use max
-        #     start_delay = max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
 
+        if schedule_at is None:
+            start_delay = 0
+        elif isinstance(schedule_at, Real):
+            start_delay = schedule_at - self.beat()
+            if start_delay < 0:
+                logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
+                start_delay = 0
+        else:  # it's a MetricPhaseTarget
+            if not isinstance(schedule_at, MetricPhaseTarget):
+                raise ValueError("`schedule_at` must be either a float or a MetricPhaseTarget")
+            # get_nearest_matching_beats returns the nearest match below and above, in order of nearness
+            # we want the match above, since it's in the future, so we use max
+            start_delay = max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
 
         def _process(*args, **kwds):
             # set the implicit variable __clock__ in this thread
             threading.current_thread().__clock__ = child
+            child.parent_offset += start_delay
 
             """
             The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
@@ -269,17 +270,6 @@ class Clock:
             raises a ClockKilledError, which exits us from the process. (It's also possible, but unlikely, that
             we will get a DeadClockError, if we were just in the process of calling wait.)
             """
-            # # Adjust for start delay
-            # if start_delay > 0:
-            #     # if there's a start delay, then we start the clock on a negative beat and time
-            #     # so that both arrive at zero when the forked process starts
-            #     child.tempo_history._t = -start_delay
-            #     # child.tempo_history.segments[0].start_level is the initial beat length, so this
-            #     # modifies the start beat proportionally to arrive at zero
-            #     child.tempo_history._beat = -start_delay / child.tempo_history.segments[0].start_level
-            #     child.parent_offset += start_delay
-            #     child.wait(start_delay, units="time")
-
             # Run the function
             process_function(*args, **kwds)
 
@@ -298,7 +288,7 @@ class Clock:
                 child._entering_wait_condition.wait()
 
         self.scheduler.schedule_action(
-            self.scheduler.time(),
+            self.get_time_in_scheduler(self.beat() + start_delay),
             _start_new_clock,
             child.clock_id,
             {"description": f"Forking of {child}",
