@@ -1391,9 +1391,23 @@ class Clock:
     #                                                 Fast-forwarding
     ##################################################################################################################
 
+    def fast_forward(self, on_or_off=True) -> None:
+        """
+        Set fast-forwarding of the clock; when fast-forwarding, all waiting is instantaneous.
+        (Only available on the master clock.)
+
+        :param on_or_off: if True, start fast-forwarding; if False, stop fast-forwarding.
+        """
+        if not self.is_master():
+            raise ValueError("Only the master clock can be fast-forwarded.")
+        if on_or_off:
+            self._fast_forward_goal = float("inf")
+        else:
+            self._fast_forward_goal = None
+
     def fast_forward_to_time(self, t: float) -> None:
         """
-        Fast forward clock, skipping instantaneously to the time of t seconds. (Only available on the master clock.)
+        Fast-forward clock, skipping instantaneously to the time of t seconds. (Only available on the master clock.)
 
         :param t: time to fast forward to
         """
@@ -1405,7 +1419,7 @@ class Clock:
 
     def fast_forward_in_time(self, t: float) -> None:
         """
-        Fast forward clock, skipping ahead instantaneously by t seconds. (Only available on the master clock.)
+        Fast-forward clock, skipping ahead instantaneously by t seconds. (Only available on the master clock.)
 
         :param t: number of seconds to fast forward by
         """
@@ -1413,7 +1427,7 @@ class Clock:
 
     def fast_forward_to_beat(self, b: float) -> None:
         """
-        Fast forward clock, skipping instantaneously to beat b. (Only available on the master clock.)
+        Fast-forward clock, skipping instantaneously to beat b. (Only available on the master clock.)
 
         :param b: beat to fast forward to
         """
@@ -1422,7 +1436,7 @@ class Clock:
 
     def fast_forward_in_beats(self, b: float) -> None:
         """
-        Fast forward clock, skipping ahead instantaneously by b beats. (Only available on the master clock.)
+        Fast-forward clock, skipping ahead instantaneously by b beats. (Only available on the master clock.)
 
         :param b: number of beats to fast forward by
         """
