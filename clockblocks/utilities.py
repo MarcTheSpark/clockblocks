@@ -19,10 +19,12 @@ on the current thread.
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
+from __future__ import annotations
 import threading
 import time
 from threading import Event
-from . import clock as clock_module
+from . import clock
+from . import tempo_envelope
 from typing import Sequence, Callable, Union
 
 
@@ -61,7 +63,7 @@ def sleep_precisely(secs: float, interruption_event: Event = None) -> None:
     sleep_precisely_until(time.time() + secs, interruption_event)
 
 
-def current_clock() -> Union['clock_module.Clock', None]:
+def current_clock() -> clock.Clock | None:
     """
     Get the :class:`~clockblocks.clock.Clock` active on the current thread (or None if none is active)
     """
@@ -114,7 +116,8 @@ def wait_for_children_to_finish() -> None:
 
 def fork(process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
          initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
-         schedule_at: Union[float, 'MetricPhaseTarget'] = None, done_callback: Callable = None) -> 'clock_module.Clock':
+         schedule_at: Union[float, tempo_envelope.MetricPhaseTarget] = None,
+         done_callback: Callable = None) -> clock.Clock:
 
     """
     Spawns a parallel process running on a child clock of the currently active clock.

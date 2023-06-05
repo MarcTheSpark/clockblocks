@@ -28,3 +28,7 @@ from .clock import Clock, TimeStamp, DeadClockError, ClockKilledError
 from .tempo_envelope import TempoEnvelope, TempoHistory, MetricPhaseTarget
 from .utilities import sleep_precisely, sleep_precisely_until, current_clock, wait, fork, fork_unsynchronized, \
     wait_forever, wait_for_children_to_finish
+import importlib.metadata
+
+__version__ = importlib.metadata.version('clockblocks')
+__author__ = importlib.metadata.metadata('clockblocks')['Author']

@@ -18,8 +18,9 @@ beat in every clock at a given moment.
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
-import itertools
 
+from __future__ import annotations
+import itertools
 from .tempo_envelope import MetricPhaseTarget, TempoEnvelope, TempoHistory
 from expenvelope._utilities import _get_extrema_and_inflection_points
 from collections import namedtuple
@@ -32,7 +33,7 @@ from .utilities import sleep_precisely_until, current_clock, _PrintColors
 from .debug import _print_and_clear_debug_calc_times
 from functools import total_ordering, wraps
 import textwrap
-from typing import Union, Sequence, Iterator, Tuple, Callable, TypeVar
+from typing import Sequence, Iterator, Callable, TypeVar
 import time
 import threading
 from .settings import catching_up_child_clocks_threshold_min, catching_up_child_clocks_threshold_max, \
@@ -134,9 +135,9 @@ class Clock:
     :ivar tempo_history: TempoHistory describing how this clock has changed or will change tempo
     """
 
-    def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
+    def __init__(self, name: str = None, parent: Clock = None, initial_rate: float = None,
                  initial_tempo: float = None, initial_beat_length: float = None,
-                 timing_policy: Union[str, float] = 0.98, synchronization_policy: str = None, pool_size: int = 200):
+                 timing_policy: str | float = 0.98, synchronization_policy: str = None, pool_size: int = 200):
 
         self.name = name
         self.parent = parent
@@ -217,7 +218,7 @@ class Clock:
     ##################################################################################################################
 
     @property
-    def master(self) -> 'Clock':
+    def master(self) -> Clock:
         """
         The master clock under which this clock operates (possibly itself)
         """
@@ -231,7 +232,7 @@ class Clock:
         """
         return self.parent is None
 
-    def children(self) -> Sequence['Clock']:
+    def children(self) -> Sequence[Clock]:
         """
         Get all direct child clocks forked by this clock.
 
@@ -239,7 +240,7 @@ class Clock:
         """
         return tuple(self._children)
 
-    def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
+    def iterate_inheritance(self, include_self: bool = True) -> Iterator[Clock]:
         """
         Iterate through parent, grandparent, etc. of this clock up until the master clock
 
@@ -254,7 +255,7 @@ class Clock:
             clock = clock.parent
             yield clock
 
-    def inheritance(self, include_self: bool = True) -> Sequence['Clock']:
+    def inheritance(self, include_self: bool = True) -> Sequence[Clock]:
         """
         Get all parent, grandparent, etc. of this clock up until the master clock
 
@@ -263,7 +264,7 @@ class Clock:
         """
         return tuple(self.iterate_inheritance(include_self))
 
-    def iterate_all_relatives(self, include_self: bool = False) -> Iterator['Clock']:
+    def iterate_all_relatives(self, include_self: bool = False) -> Iterator[Clock]:
         """
         Iterate through all related clocks to this clock.
 
@@ -275,7 +276,7 @@ class Clock:
         else:
             return (c for c in self.master.iterate_descendants(True) if c is not self)
 
-    def iterate_descendants(self, include_self: bool = False) -> Iterator['Clock']:
+    def iterate_descendants(self, include_self: bool = False) -> Iterator[Clock]:
         """
         Iterate through all children, grandchildren, etc. of this clock
 
@@ -289,7 +290,7 @@ class Clock:
             for descendant_of_child in child_clock.iterate_descendants():
                 yield descendant_of_child
 
-    def descendants(self) -> Sequence['Clock']:
+    def descendants(self) -> Sequence[Clock]:
         """
         Get all children, grandchildren, etc. of this clock
 
@@ -303,7 +304,7 @@ class Clock:
         """
         print(self.master._child_tree_string(self))
 
-    def _child_tree_string(self, highlight_clock: 'Clock' = None) -> str:
+    def _child_tree_string(self, highlight_clock: Clock = None) -> str:
         name_text = self.name if self.name is not None else "(UNNAMED)"
         if highlight_clock is self:
             name_text = _PrintColors.BOLD + name_text + _PrintColors.END
@@ -346,7 +347,7 @@ class Clock:
                 return clock.synchronization_policy
 
     @property
-    def timing_policy(self) -> Union[str, float]:
+    def timing_policy(self) -> str | float:
         """
         Determines how this clock should respond to getting behind.
         Allowable values are "absolute", "relative" or a float between 0 and 1 representing a balance between
@@ -485,7 +486,7 @@ class Clock:
 
     @tempo_modification
     def set_beat_length_target(self, beat_length_target: float, duration: float, curve_shape: float = 0,
-                               metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                               metric_phase_target: float | MetricPhaseTarget | tuple = None,
                                duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat length for this clock to reach in duration beats/seconds (with the unit defined by
@@ -507,7 +508,7 @@ class Clock:
 
     @tempo_modification
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
-                        metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                        metric_phase_target: float | MetricPhaseTarget | tuple = None,
                         duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target rate for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
@@ -528,7 +529,7 @@ class Clock:
 
     @tempo_modification
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
-                         metric_phase_target: Union[float, MetricPhaseTarget, Tuple] = None,
+                         metric_phase_target: float | MetricPhaseTarget | tuple = None,
                          duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target tempo for this clock to reach in duration beats/seconds (with the unit defined by duration_units)
@@ -550,7 +551,7 @@ class Clock:
     @tempo_modification
     def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
                                 curve_shapes: Sequence[float] = None,
-                                metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                                metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                                 duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
@@ -582,7 +583,7 @@ class Clock:
     @tempo_modification
     def set_rate_targets(self, rate_targets: Sequence[float], durations: Sequence[float],
                          curve_shapes: Sequence[float] = None,
-                         metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                         metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                          duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
@@ -606,7 +607,7 @@ class Clock:
     @tempo_modification
     def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
                           curve_shapes: Sequence[float] = None,
-                          metric_phase_targets: Sequence[Union[float, MetricPhaseTarget, Tuple]] = None,
+                          metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                           duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
         """
         Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
@@ -795,7 +796,7 @@ class Clock:
 
     def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
-             schedule_at: Union[float, MetricPhaseTarget] = None, done_callback: Callable = None) -> 'Clock':
+             schedule_at: float | MetricPhaseTarget = None, done_callback: Callable = None) -> Clock:
         """
         Spawns a parallel process running on a child clock.
 
@@ -1188,7 +1189,7 @@ class Clock:
         next_wake_up_call.clock._wait_event.set()
         self._wait_for_child_to_finish_processing(next_wake_up_call.clock)
 
-    def _wait_for_child_to_finish_processing(self, child_clock: 'Clock') -> None:
+    def _wait_for_child_to_finish_processing(self, child_clock: Clock) -> None:
         # wait for the child clock that we woke up either to finish completely or to finish processing
         while child_clock in self._children and not child_clock._dormant:
             # note that sleeping a tiny amount is better than a straight while loop,
@@ -1341,7 +1342,7 @@ class Clock:
             except DeadClockError:
                 break
 
-    def rouse_and_hold(self, holding_clock: 'Clock' = None) -> None:
+    def rouse_and_hold(self, holding_clock: Clock = None) -> None:
         """
         Rouse this clock if it is dormant, but keep it suspended until release_from_suspension is called.
         Generally this would not be called by the user, but it is useful for callback functions operating outside
@@ -1373,7 +1374,7 @@ class Clock:
         if not self.is_master() and self.parent._dormant:
             self.parent.rouse_and_hold(holding_clock)
 
-    def release_from_suspension(self, releasing_clock: 'Clock' = None) -> None:
+    def release_from_suspension(self, releasing_clock: Clock = None) -> None:
         """
         Called after "rouse_and_hold" to release the roused clock.
 

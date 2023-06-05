@@ -20,12 +20,13 @@ goal arrival point within the beat (or meter) cycle.
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
+from __future__ import annotations
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
 from .utilities import snap_float_to_nice_decimal, current_clock
 import logging
 import math
-from typing import Union, Sequence, Tuple
+from typing import Sequence
 
 
 class TempoEnvelope(Envelope):
@@ -44,7 +45,7 @@ class TempoEnvelope(Envelope):
     """
 
     def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
-                 curve_shapes: Sequence[Union[float, str]] = None,
+                 curve_shapes: Sequence[float | str] = None,
                  units: str = "tempo", duration_units: str = "beats"):
         units = units.lower().replace(" ", "")
         if units not in ("tempo", "rate", "beatlength"):
@@ -66,8 +67,8 @@ class TempoEnvelope(Envelope):
 
     @classmethod
     def from_levels_and_durations(cls, levels: Sequence = (0, 0), durations: Sequence[float] = (0,),
-                                  curve_shapes: Sequence[Union[float, str]] = None,
-                                  units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+                                  curve_shapes: Sequence[float | str] = None,
+                                  units: str = "tempo", duration_units: str = "beats") -> TempoEnvelope:
         """
         Constructs a TempoEnvelope from the given levels, durations and curve shapes, using the specified units.
 
@@ -82,7 +83,7 @@ class TempoEnvelope(Envelope):
 
     @classmethod
     def from_levels(cls, levels: Sequence[float], length: float = 1.0, units: str = "tempo",
-                    duration_units: str = "beats") -> 'TempoEnvelope':
+                    duration_units: str = "beats") -> TempoEnvelope:
         """
         Constructs a TempoEnvelope from the given levels and total length, using the specified units.
 
@@ -100,7 +101,7 @@ class TempoEnvelope(Envelope):
 
     @classmethod
     def from_list(cls, constructor_list: Sequence, units: str = "tempo",
-                  duration_units: str = "beats") -> 'TempoEnvelope':
+                  duration_units: str = "beats") -> TempoEnvelope:
         """
         Construct a TempoEnvelope from a list that can take a number of formats
 
@@ -131,7 +132,7 @@ class TempoEnvelope(Envelope):
             return cls.from_levels(constructor_list, units=units, duration_units=duration_units)
 
     @classmethod
-    def from_points(cls, *points, units: str = "tempo", duration_units: str = "beats") -> 'TempoEnvelope':
+    def from_points(cls, *points, units: str = "tempo", duration_units: str = "beats") -> TempoEnvelope:
         """
         Construct an envelope from a list of (beat/time, tempo/rate/beat length) pairs. Units are defined by the
         `units` and `duration_units` parameters.
@@ -150,7 +151,7 @@ class TempoEnvelope(Envelope):
     @classmethod
     def from_function(cls, function, domain_start=0, domain_end=1, units: str = "tempo", duration_units: str = "beats",
                       scanning_step_size: float = 0.05, key_point_resolution_multiple: int = 2, iterations: int = 6,
-                      min_key_point_distance: float = 1e-7) -> 'TempoEnvelope':
+                      min_key_point_distance: float = 1e-7) -> TempoEnvelope:
         """
         Constructs a TempoEnvelope that approximates an arbitrary function. The domain of the function is in units
         defined by the `duration_units` parameter, and the range is in units defined by the `units` parameter.
@@ -216,7 +217,7 @@ class TempoEnvelope(Envelope):
         """
         return self.rate_at(beat, from_left) * 60
 
-    def extend_to(self, beat: float) -> 'TempoEnvelope':
+    def extend_to(self, beat: float) -> TempoEnvelope:
         """
         Extends the end of this TempoEnvelope to the given beat (if needed) by adding a constant segment at the end.
         """
@@ -225,7 +226,7 @@ class TempoEnvelope(Envelope):
             self.append_segment(self.end_level(), beat - self.length())
         return self
 
-    def truncate_at(self, beat: float) -> 'TempoEnvelope':
+    def truncate_at(self, beat: float) -> TempoEnvelope:
         """
         Removes all segments after the given beat and adds a constant segment if necessary to bring us up to that beat.
 
@@ -247,8 +248,8 @@ class TempoEnvelope(Envelope):
     ##################################################################################################################
 
     @staticmethod
-    def convert_units(values: Union[float, Sequence[float]], input_units: str,
-                      output_units: str) -> Union[float, Sequence[float]]:
+    def convert_units(values: float | Sequence[float], input_units: str,
+                      output_units: str) -> float | Sequence[float]:
         """
         Utility method to convert values between unites of tempo, rate and beat length.
 
@@ -374,7 +375,7 @@ class TempoHistory(TempoEnvelope):
     """
 
     def __init__(self, levels: Sequence = (60,), durations: Sequence[float] = (),
-                 curve_shapes: Sequence[Union[float, str]] = None,
+                 curve_shapes: Sequence[float | str] = None,
                  units: str = "tempo", duration_units: str = "beats", beat: float = 0.0):
         super().__init__(levels, durations, curve_shapes, units, duration_units)
         self.go_to_beat(beat)
@@ -438,7 +439,7 @@ class TempoHistory(TempoEnvelope):
     ##################################################################################################################
 
     def set_beat_length_target(self, beat_length_target: float, duration: float, curve_shape: float = 0,
-                               metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                               metric_phase_target: float | MetricPhaseTarget | tuple = None,
                                duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat length for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
@@ -468,7 +469,7 @@ class TempoHistory(TempoEnvelope):
         self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target, duration_units)
 
     def _add_segment(self, beat_length_target: float, duration: float, curve_shape: float = 0,
-                     metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                     metric_phase_target: float | MetricPhaseTarget | tuple = None,
                      duration_units: str = "beats") -> None:
         """
         The guts of adding a new segment, minus argument checking and truncating/bringing up to date.
@@ -499,7 +500,7 @@ class TempoHistory(TempoEnvelope):
 
     def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
                                 curve_shapes: Sequence[float] = None,
-                                metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
+                                metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                                 duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
@@ -619,7 +620,7 @@ class TempoHistory(TempoEnvelope):
                         current_group_start_time = current_group_end_time
 
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
-                        metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                        metric_phase_target: float | MetricPhaseTarget | tuple = None,
                         duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat rate for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
@@ -640,7 +641,7 @@ class TempoHistory(TempoEnvelope):
 
     def set_rate_targets(self, rate_targets: Sequence[float], durations: Sequence[float],
                          curve_shapes: Sequence[float] = None,
-                         metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
+                         metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                          duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
@@ -658,7 +659,7 @@ class TempoHistory(TempoEnvelope):
                                      duration_units, truncate)
 
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
-                         metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                         metric_phase_target: float | MetricPhaseTarget | tuple = None,
                          duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target tempo for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
@@ -679,7 +680,7 @@ class TempoHistory(TempoEnvelope):
 
     def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
                           curve_shapes: Sequence[float] = None,
-                          metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
+                          metric_phase_targets: Sequence[float | MetricPhaseTarget | tuple] = None,
                           duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
@@ -731,7 +732,7 @@ class TempoHistory(TempoEnvelope):
     # These methods are used when we want to adjust the metric phase at the end of a group of segments.
 
     def adjust_metric_phase_at_beat(self, beat: float,
-                                    metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
+                                    metric_phase_target: float | MetricPhaseTarget | tuple) -> bool:
         """
         Sets the goal (time) metric phase at the given beat. So, for instance, if we called
         ``adjust_metric_phase_at_beat(5, 0.5)``, this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
@@ -842,7 +843,7 @@ class TempoHistory(TempoEnvelope):
         return True
 
     def adjust_metric_phase_at_time(self, target_time: float,
-                                    metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
+                                    metric_phase_target: float | MetricPhaseTarget | tuple) -> bool:
         """
         Sets the goal (beat) metric phase at the given time. So, for instance, if we called
         ``adjust_metric_phase_at_time(5, 0.5)``, this would mean that at time 5 we want to be at beat 1.5, 2.5, 3.5
@@ -934,7 +935,7 @@ class TempoHistory(TempoEnvelope):
         """
         return self.integrate_interval(self._beat, self._beat + beats)
 
-    def advance(self, beats: float) -> Tuple[float, float]:
+    def advance(self, beats: float) -> tuple[float, float]:
         """
         Advance the current beat/time in the envelope by the given number of beats.
 
@@ -968,7 +969,7 @@ class TempoHistory(TempoEnvelope):
         self.advance(beats)
         return beats, seconds
 
-    def go_to_beat(self, b: float) -> 'TempoEnvelope':
+    def go_to_beat(self, b: float) -> TempoEnvelope:
         """
         Jump straight to the given beat in this TempoEnvelope
 
@@ -983,7 +984,7 @@ class TempoHistory(TempoEnvelope):
     #                                                   Utilities
     ##################################################################################################################
 
-    def truncate(self) -> 'TempoEnvelope':
+    def truncate(self) -> TempoEnvelope:
         """
         Removes all segments after the current beat.
 
@@ -1022,7 +1023,7 @@ class MetricPhaseTarget:
         start of the clock.
     """
 
-    def __init__(self, phase_or_phases: Union[float, Sequence[float]], divisor: float = 1, relative: bool = False):
+    def __init__(self, phase_or_phases: float | Sequence[float], divisor: float = 1, relative: bool = False):
         self.phases = (phase_or_phases, ) if not hasattr(phase_or_phases, "__len__") else phase_or_phases
         if not all(0 <= x < divisor for x in self.phases):
             raise ValueError("One or more phases out of range for divisor.")
@@ -1030,7 +1031,7 @@ class MetricPhaseTarget:
         self.relative = relative
 
     @classmethod
-    def interpret(cls, value: Union[float, Sequence]) -> 'MetricPhaseTarget':
+    def interpret(cls, value: float | Sequence) -> MetricPhaseTarget:
         """
         Interpret a tuple or just a number as a MetricPhaseTarget. E.g. we want the user to be able to hand in a tuple
         like (0.5, 3) and have it get interpreted as a target of 0.5 with divisor 3.
@@ -1046,7 +1047,7 @@ class MetricPhaseTarget:
         else:
             return MetricPhaseTarget(value)
 
-    def _get_nearest_matches(self, t: float, offset: float = 0) -> Tuple[float, float]:
+    def _get_nearest_matches(self, t: float, offset: float = 0) -> tuple[float, float]:
         floored_value = math.floor(t / self.divisor) * self.divisor
         closest_below = None
         closest_above = None
@@ -1065,7 +1066,7 @@ class MetricPhaseTarget:
         # return the closest above and below in order of closeness
         return (closest_below, closest_above) if min_dist_below <= min_dist_above else (closest_above, closest_below)
 
-    def get_nearest_matching_beats(self, beat: float) -> Tuple[float, float]:
+    def get_nearest_matching_beats(self, beat: float) -> tuple[float, float]:
         """
         Get the nearest beats below and above the given beat with the correct metric phase
 
@@ -1077,7 +1078,7 @@ class MetricPhaseTarget:
         else:
             return self._get_nearest_matches(beat)
 
-    def get_nearest_matching_times(self, time: float) -> Tuple[float, float]:
+    def get_nearest_matching_times(self, time: float) -> tuple[float, float]:
         """
         Get the nearest times below and above the given time with the correct metric phase
 

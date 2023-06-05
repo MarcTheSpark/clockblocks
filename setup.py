@@ -14,25 +14,7 @@
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
-import setuptools
+from setuptools import setup
 
-with open("README.md", "r") as fh:
-    long_description = fh.read()
+setup()
 
-setuptools.setup(
-    name="clockblocks",
-    version="0.6.8",
-    author="Marc Evanstein",
-    author_email="marc@marcevanstein.com",
-    description="A python library for controlling the flow of musical time.",
-    long_description=long_description,
-    long_description_content_type="text/markdown",
-    url="https://git.sr.ht/~marcevanstein/clockblocks",
-    packages=setuptools.find_packages(),
-    install_requires=['expenvelope >= 0.7.0'],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-        "Operating System :: OS Independent",
-    ],
-)
