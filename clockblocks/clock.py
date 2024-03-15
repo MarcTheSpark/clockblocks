@@ -36,6 +36,8 @@ import textwrap
 from typing import Sequence, Iterator, Callable, TypeVar
 import time
 import threading
+import traceback
+import sys
 from .settings import catching_up_child_clocks_threshold_min, catching_up_child_clocks_threshold_max, \
     running_behind_warning_threshold_long, running_behind_warning_threshold_short
 from numbers import Real
@@ -90,7 +92,11 @@ def tempo_modification(fn):
 def _threadpool_error_callback(e):
     # callback function for all errors arising from the ThreadPool
     # without this, they get swallowed up!
-    raise e
+    exc_type = type(e).__name__
+    formatted_traceback = ''.join(traceback.format_tb(e.__traceback__))
+    print("\033[91m", end="", file=sys.stderr)  # Start red text
+    print(f"Error encountered on subclock. Traceback (most recent call last):\n{formatted_traceback}{exc_type}: {e}", file=sys.stderr)
+    print("\033[0m", end="", file=sys.stderr)  # End red text
 
 
 T = TypeVar('T', bound='Clock')
@@ -985,6 +991,8 @@ class Clock:
                                                                   time.time() - self._last_sleep_time))
 
         if self.is_master():
+            if dt == 0:
+                return
             # this is the master thread that actually sleeps
             # ...unless we're fast-forwarding. Better address that possibility.
             if self._fast_forward_goal is not None:
