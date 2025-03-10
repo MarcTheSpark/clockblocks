@@ -1,14 +1,14 @@
 import logging
 import threading
-import time
 from itertools import count
 from numbers import Real
-from typing import Callable, Sequence, Union
-
+from typing import Callable, Sequence, Union, Iterator
 from cb2.tempo_envelope import TempoHistory
 from cb2.scheduler import get_scheduler, Scheduler
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
+from cb2.utilities import _PrintColors
+import textwrap
 
 
 class Clock:
@@ -63,7 +63,7 @@ class Clock:
         return rate if rate is not None else 1 / beat_length if beat_length is not None else tempo / 60
 
     ##################################################################################################################
-    #                                                     Properties
+    #                                                 Family Matters
     ##################################################################################################################
 
     @property
@@ -80,6 +80,90 @@ class Clock:
         :return: True if this is the master clock, False otherwise
         """
         return self.parent is None
+
+    def children(self) -> Sequence['Clock']:
+        """
+        Get all direct child clocks forked by this clock.
+
+        :return: tuple of all child clocks of this clock
+        """
+        return tuple(self._children)
+
+    def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
+        """
+        Iterate through parent, grandparent, etc. of this clock up until the master clock
+
+        :param include_self: whether or not to include this clock in the iterator or start with the parent
+        :return: iterator going up the clock family tree up to the master clock
+        """
+
+        clock = self
+        if include_self:
+            yield clock
+        while clock.parent is not None:
+            clock = clock.parent
+            yield clock
+
+    def inheritance(self, include_self: bool = True) -> Sequence['Clock']:
+        """
+        Get all parent, grandparent, etc. of this clock up until the master clock
+
+        :param include_self: whether or not to include this clock in the iterator or start with the parent
+        :return: tuple containing the clock's inheritance
+        """
+        return tuple(self.iterate_inheritance(include_self))
+
+    def iterate_all_relatives(self, include_self: bool = False) -> Iterator['Clock']:
+        """
+        Iterate through all related clocks to this clock.
+
+        :param include_self: whether or not to include this clock in the iterator
+        :return: iterator going through all clocks in the family tree, starting with the master
+        """
+        if include_self:
+            return self.master.iterate_descendants(True)
+        else:
+            return (c for c in self.master.iterate_descendants(True) if c is not self)
+
+    def iterate_descendants(self, include_self: bool = False) -> Iterator['Clock']:
+        """
+        Iterate through all children, grandchildren, etc. of this clock
+
+        :param include_self: whether or not to include this clock in the iterator
+        :return: iterator going through all descendants
+        """
+        if include_self:
+            yield self
+        for child_clock in self._children:
+            yield child_clock
+            for descendant_of_child in child_clock.iterate_descendants():
+                yield descendant_of_child
+
+    def descendants(self) -> Sequence['Clock']:
+        """
+        Get all children, grandchildren, etc. of this clock
+
+        :return: tuple of all descendants
+        """
+        return tuple(self.iterate_descendants())
+
+    def print_family_tree(self) -> None:
+        """
+        Print a hierarchical representation of this clock's family tree.
+        """
+        print(self.master._child_tree_string(self))
+
+    def _child_tree_string(self, highlight_clock: 'Clock' = None) -> str:
+        name_text = self.name if self.name is not None else "(UNNAMED)"
+        if highlight_clock is self:
+            name_text = _PrintColors.BOLD + name_text + _PrintColors.END
+        children = self.children()
+        if len(children) == 0:
+            return name_text
+        return "{}:\n{}".format(
+            name_text,
+            textwrap.indent("\n".join(child._child_tree_string(highlight_clock) for child in self.children()), "  ")
+        )
 
     ##################################################################################################################
     #                                        Boilerplate TempoHistory Functionality
@@ -150,11 +234,7 @@ class Clock:
     def tempo(self, t):
         self.tempo_history.tempo = t
 
-    ##################################################################################################################
-    #                                              Waiting and Forking
-    ##################################################################################################################
-
-    def get_time_in_scheduler(self, beat_or_time, units="beat"):
+    def clock_to_scheduler_time(self, beat_or_time, units="beats"):
         """
         Gets the time in the scheduler for a given beat or time in this clock, working recursively up the chain
         of clocks.
@@ -163,11 +243,41 @@ class Clock:
         :param units: one of ("beats", "time"), determining the units for the first argument
         :return: how much time should pass in the scheduler
         """
-        time_in_this_clock = beat_or_time if units == "time" else self.tempo_history.time_at_beat(beat_or_time)
-        if self.parent is None:
-            return time_in_this_clock + self.parent_offset
+        units = DurationUnits(units)
+        t = (beat_or_time if units == "time" else self.tempo_history.time_at_beat(beat_or_time)) + self.parent_offset
+        for clock in self.inheritance(include_self=False):
+            t = clock.tempo_history.time_at_beat(t) + clock.parent_offset
+        return t
+
+    def scheduler_to_clock_time(self, scheduler_time, desired_units="beats"):
+        """
+        Gets beats or time in this clock for a given time in the scheduler.
+
+        :param scheduler_time: the time of interest in the scheduler
+        :param desired_units: one of ("beats", "time"), whether we're looking for beats or time in this clock
+        :return: how much time should pass in the scheduler
+        """
+        desired_units = DurationUnits(desired_units)
+        t = scheduler_time
+        for clock in reversed(self.inheritance(include_self=False)):
+
+            t = clock.tempo_history.beat_at_time(t - clock.parent_offset)
+        if desired_units == DurationUnits.TIME:
+            return t - self.parent_offset
         else:
-            return self.parent.get_time_in_scheduler(time_in_this_clock + self.parent_offset)
+            return self.tempo_history.beat_at_time(t - self.parent_offset)
+
+    def bring_up_to_date(self):
+        #TODO: tempo_history should implement an extend to that extends tempo functions/loops, and use that inside of time_at_beat/beat_at_time
+        # self.tempo_history.extend_to()
+        pass
+
+    ##################################################################################################################
+    #                                              Waiting and Forking
+    ##################################################################################################################
+
+    def current_time_in_scheduler(self):
+        return self.clock_to_scheduler_time(self.time(), units="time")
 
     def wait(self, dt, units="beats"):
         units = DurationUnits(units)
@@ -177,7 +287,7 @@ class Clock:
         else:
             wake_up_time = self.time() + dt
             wake_up_beat = self.tempo_history.beat_at_time(wake_up_time)
-        wake_up_time_in_scheduler = self.get_time_in_scheduler(wake_up_time, units="time")
+        wake_up_time_in_scheduler = self.clock_to_scheduler_time(wake_up_time, units="time")
 
         # clear the _wait_event so that it will block
         self._wait_event.clear()
@@ -288,7 +398,7 @@ class Clock:
                 child._entering_wait_condition.wait()
 
         self.scheduler.schedule_action(
-            self.get_time_in_scheduler(self.beat() + start_delay),
+            self.clock_to_scheduler_time(self.beat() + start_delay),
             _start_new_clock,
             child.clock_id,
             {"description": f"Forking of {child}",

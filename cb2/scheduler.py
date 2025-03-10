@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class QueueEvent:
     t: int
@@ -122,7 +123,7 @@ class Scheduler(threading.Thread):
 
             logger.info("New scheduler cycle")
             with self._updated_condition:
-                self._updated_condition.notifyAll()
+                self._updated_condition.notify_all()
             self.set_stage(Stage.HOLDING)
             logger.debug("Scheduler hold phase")
             self._hold_event.wait()
@@ -244,6 +245,7 @@ class Scheduler(threading.Thread):
         with self._processing_lock:
             self._queue.append(queue_event)
             self._queue.sort(key=lambda qe: (qe.t, qe.priority))
+            print(self._queue)
         if queue_event.t <= self.next_wakeup_time():
             # if we're scheduling a new action before the next wake-up, we should wake
             # the scheduler so that it can change its planned wakeup

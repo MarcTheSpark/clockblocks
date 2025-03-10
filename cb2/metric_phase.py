@@ -1,6 +1,5 @@
 import math
 from typing import Union, Sequence, Tuple
-
 from cb2.utilities import current_clock
 
 

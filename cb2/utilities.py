@@ -1,6 +1,8 @@
+from __future__ import annotations
 import threading
 import time
 from threading import Event
+import cb2
 
 
 def sleep_precisely_until(stop_time: float, interruption_event: Event = None) -> None:
@@ -38,22 +40,6 @@ def sleep_precisely(secs: float, interruption_event: Event = None) -> None:
     sleep_precisely_until(time.time() + secs, interruption_event)
 
 
-def current_clock():
-    # utility for getting the clock we are currently using (we attach it to the thread when it's started)
-    current_thread = threading.current_thread()
-    if not hasattr(current_thread, '__clock__'):
-        return None
-    return threading.current_thread().__clock__
-
-
-def wait(dt: float, units="beats") -> None:
-    c = current_clock()
-    if c is not None:
-        current_clock().wait(dt, units=units)
-    else:
-        time.sleep(dt)
-
-
 def snap_float_to_nice_decimal(x: float, order_of_magnitude_difference=7) -> float:
     """
     If x is near to a nice decimal, this rounds it. E.g., given a number like 8.01399999999999214, we want to round
@@ -69,3 +55,30 @@ def snap_float_to_nice_decimal(x: float, order_of_magnitude_difference=7) -> flo
         if round(x, first_place) == round(x, first_place + order_of_magnitude_difference):
             return round(x, first_place)
     return x
+
+
+class _PrintColors:
+    PURPLE = '\033[95m'
+    CYAN = '\033[96m'
+    DARKCYAN = '\033[36m'
+    BLUE = '\033[94m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
+
+def current_clock() -> cb2.clock.Clock | None:
+    # utility for getting the clock we are currently using (we attach it to the thread when it's started)
+    current_thread = threading.current_thread()
+    return threading.current_thread().__clock__ if hasattr(current_thread, '__clock__') else None
+
+
+def wait(dt: float, units="beats") -> None:
+    c = current_clock()
+    if c is not None:
+        current_clock().wait(dt, units=units)
+    else:
+        time.sleep(dt)

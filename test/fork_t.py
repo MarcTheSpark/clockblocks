@@ -10,21 +10,23 @@ import logging
 
 
 c = Clock("MASTER", initial_tempo=20)
+start = time.time()
+
 
 def subsubprocess():
     while True:
-        print(current_clock().name, current_clock().beat(), current_clock().time(), c.wall_time_in_scheduler())
-        wait(0.5)
+        print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
+        wait(0.25, units="time")
+
 
 def subprocess():
+    current_clock().fork(subsubprocess, initial_rate=2, schedule_at=2)
     while True:
-        if current_clock().beat() == 2:
-            current_clock().fork(subsubprocess, initial_rate=2)
-        print(current_clock().name, current_clock().beat(), current_clock().time(), c.wall_time_in_scheduler())
+        print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
         wait(1)
 
 
-c.fork(subprocess, initial_rate=2)
+c.fork(subprocess, initial_rate=2, schedule_at=1)
 while True:
-    print(current_clock().name, current_clock().beat(), current_clock().time(), c.wall_time_in_scheduler())
+    print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
     wait(1)
