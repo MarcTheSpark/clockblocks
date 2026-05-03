@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clockblocks"
+version = "0.6.10"
+description = "A python library for controlling the flow of musical time."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-only"
+
+authors = [
+    { name = "Marc Evanstein", email = "marc@marcevanstein.com" }
+]
+
+dependencies = [
+    "expenvelope>=0.7.2"
+]
+
+[project.urls]
+"Source Code" = "https://git.sr.ht/~marcevanstein/clockblocks"
+
+[tool.setuptools]
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
