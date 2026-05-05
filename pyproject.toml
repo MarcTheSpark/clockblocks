@@ -15,7 +15,7 @@ authors = [
 ]
 
 dependencies = [
-    "expenvelope>=0.7.2"
+    "expenvelope>=0.7.3"
 ]
 
 [project.urls]
