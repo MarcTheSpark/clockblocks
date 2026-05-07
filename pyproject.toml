@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.urls]
-"Source Code" = "https://git.sr.ht/~marcevanstein/clockblocks"
+"Source Code" = "https://github.com/MarcTheSpark/clockblocks"
 
 [tool.setuptools]
 zip-safe = false
