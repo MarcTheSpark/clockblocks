@@ -1,6 +1,7 @@
 import threading
 import time
 import heapq
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Any, Tuple
 import logging
@@ -75,6 +76,15 @@ class Scheduler(threading.Thread):
         self._hold_event.set()
         with self._new_event:
             self._new_event.notify_all()
+
+    @contextmanager
+    def held(self):
+        """Context-manager wrapper around hold()/release(). Guarantees release on exception."""
+        self.hold()
+        try:
+            yield self
+        finally:
+            self.release()
 
     def reschedule(self, matches: Callable[['QueueEvent'], bool],
                    recompute: Callable[['QueueEvent'], float]) -> None:

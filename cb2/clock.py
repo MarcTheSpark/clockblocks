@@ -21,13 +21,10 @@ def _reschedule_after_tempo_change(fn):
     """
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
-        self.scheduler.hold()
-        try:
+        with self.scheduler.held():
             self.bring_up_to_date()
             result = fn(self, *args, **kwargs)
             self._reschedule_self_and_descendants()
-        finally:
-            self.scheduler.release()
         return result
     return wrapper
 
