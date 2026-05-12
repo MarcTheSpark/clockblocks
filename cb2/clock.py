@@ -189,6 +189,21 @@ class Clock:
         """
         return self.scheduler.wall_time() - self._start_time_in_scheduler
 
+    def status(self, verbose: bool = False) -> str:
+        """
+        A snapshot of this clock's name, beat, time, and wall time in the scheduler.
+        """
+        name = self.name if self.name is not None else "UNNAMED"
+        if verbose:
+            return (f"Clock {name!r}\n"
+                    f"  beat: {self.beat():.9f}\n"
+                    f"  time: {self.time():.9f}\n"
+                    f"  wall: {self.wall_time_in_scheduler():.9f}")
+        return f"[{name} beat={self.beat():.3f} time={self.time():.3f} wall={self.wall_time_in_scheduler():.3f}]"
+
+    def print_status(self, verbose: bool = False) -> None:
+        print(self.status(verbose), flush=True)
+
     @property
     def beat_length(self) -> float:
         """
@@ -260,7 +275,6 @@ class Clock:
         desired_units = DurationUnits(desired_units)
         t = scheduler_time
         for clock in reversed(self.inheritance(include_self=False)):
-
             t = clock.tempo_history.beat_at_time(t - clock.parent_offset)
         if desired_units == DurationUnits.TIME:
             return t - self.parent_offset

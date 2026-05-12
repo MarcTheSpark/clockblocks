@@ -27,20 +27,20 @@ start = time.time()
 
 
 def subprocess():
-    print(current_clock().name, current_clock().beat(), current_clock().time(), time.time() - start)
-    # print(current_clock().name, current_clock().beat(), current_clock().time(), time.time() - start)
+    current_clock().print_status()
     wait(1)
 
     # c needs to catch up to the current beat first! Otherwise, this retroactively changes the tempo from the last
     # time it was awake
     c.tempo = 60
     while True:
-        print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
+        current_clock().print_status()
         wait(1)
 
-print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
+current_clock().print_status()
 wait(1)
 c.fork(subprocess, initial_rate=2)
 while True:
-    print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
+    current_clock().print_status()
     wait(1)
+
