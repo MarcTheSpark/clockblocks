@@ -1,3 +1,17 @@
+[project]
+name = "cb2"
+version = "0.1.0"
+description = "Reimplementation of clockblocks library"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GNU GPL Version 3" }
+authors = [{ name = "Marc Evanstein", email = "marc@marcevanstein.com" }]
+dependencies = ["expenvelope>=0.7.0"]
+
 [build-system]
-requires = ["setuptools", "wheel"]
-build-backend = 'setuptools.build_meta'
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cb2*"]
