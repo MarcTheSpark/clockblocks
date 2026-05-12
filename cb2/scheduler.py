@@ -76,6 +76,24 @@ class Scheduler(threading.Thread):
         with self._new_event:
             self._new_event.notify_all()
 
+    def reschedule(self, matches: Callable[['QueueEvent'], bool],
+                   recompute: Callable[['QueueEvent'], float]) -> None:
+        """
+        Walk the heap and recompute `t` for any event that satisfies `matches(event)`.
+        Used when a tempo change makes previously-scheduled wakeups stale.
+        """
+        with self._new_event:
+            changed = False
+            for i, event in enumerate(self._queue):
+                if matches(event):
+                    new_t = recompute(event)
+                    if new_t != event.t:
+                        self._queue[i] = QueueEvent(new_t, event.priority, event.action, event.metadata)
+                        changed = True
+            if changed:
+                heapq.heapify(self._queue)
+                self._new_event.notify_all()
+
     def schedule_action(self, t: float, action: Callable, priority: Tuple[int, ...] = (0,), metadata: Any = None) -> None:
         """
         Schedule the given action to be executed at time 't' (in seconds since scheduler start).

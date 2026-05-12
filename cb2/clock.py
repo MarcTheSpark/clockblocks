@@ -1,3 +1,4 @@
+import functools
 import logging
 import threading
 from itertools import count
@@ -9,6 +10,26 @@ from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
 from cb2.utilities import _PrintColors
 import textwrap
+
+
+def _reschedule_after_tempo_change(fn):
+    """
+    Decorator for Clock tempo/rate/beat_length setters. Holds the scheduler, brings the target clock's
+    tempo_history up to the current scheduler position (so the change applies forward, not retroactively
+    from the last committed beat), applies the mutation, then recomputes the scheduler-time of any queued
+    wakeups whose `acting_clock` is self or a descendant.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        self.scheduler.hold()
+        try:
+            self.bring_up_to_date()
+            result = fn(self, *args, **kwargs)
+            self._reschedule_self_and_descendants()
+        finally:
+            self.scheduler.release()
+        return result
+    return wrapper
 
 
 class Clock:
@@ -216,6 +237,7 @@ class Clock:
         return self.tempo_history.beat_length
 
     @beat_length.setter
+    @_reschedule_after_tempo_change
     def beat_length(self, b):
         self.tempo_history.beat_length = b
 
@@ -231,6 +253,7 @@ class Clock:
         return self.tempo_history.rate
 
     @rate.setter
+    @_reschedule_after_tempo_change
     def rate(self, r):
         self.tempo_history.rate = r
 
@@ -246,6 +269,7 @@ class Clock:
         return self.tempo_history.tempo
 
     @tempo.setter
+    @_reschedule_after_tempo_change
     def tempo(self, t):
         self.tempo_history.tempo = t
 
@@ -282,9 +306,39 @@ class Clock:
             return self.tempo_history.beat_at_time(t - self.parent_offset)
 
     def bring_up_to_date(self):
-        #TODO: tempo_history should implement an extend to that extends tempo functions/loops, and use that inside of time_at_beat/beat_at_time
-        # self.tempo_history.extend_to()
-        pass
+        """
+        Advance this clock's tempo_history to match where it currently is in scheduler time.
+
+        Called before mutating tempo from a foreign thread: if we don't, the tempo setter's `truncate()`
+        cuts at the last *committed* beat (whatever the clock last woke at), causing the new tempo to
+        retroactively reshape the segment the clock is currently napping through. From the owning thread
+        this is a no-op since committed == current.
+        """
+        target_beat = self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
+        delta = target_beat - self.tempo_history.beat()
+        if delta > 0:
+            self.tempo_history.advance(delta)
+
+    def _reschedule_self_and_descendants(self):
+        """
+        After a tempo change on self, any queued scheduler-event whose `acting_clock` is self or a
+        descendant of self has a stale `t` (computed against the old tempo curve). Recompute via
+        clock_to_scheduler_time(target_beat) for each match.
+        """
+        affected = {id(c) for c in self.iterate_descendants(include_self=True)}
+
+        def matches(event):
+            meta = event.metadata
+            if not isinstance(meta, dict):
+                return False
+            ac = meta.get("acting_clock")
+            return ac is not None and id(ac) in affected and "target_beat" in meta
+
+        def recompute(event):
+            meta = event.metadata
+            return meta["acting_clock"].clock_to_scheduler_time(meta["target_beat"])
+
+        self.scheduler.reschedule(matches, recompute)
 
     ##################################################################################################################
     #                                              Waiting and Forking
@@ -312,7 +366,8 @@ class Clock:
             self._wake_and_advance_to_next_wait,
             self.clock_id,
             {"description": f"{self} wakeup action",
-             "acting_clock": self}
+             "acting_clock": self,
+             "target_beat": wake_up_beat}
         )
 
         with self._entering_wait_condition:
@@ -416,7 +471,8 @@ class Clock:
             _start_new_clock,
             child.clock_id,
             {"description": f"Forking of {child}",
-             "acting_clock": self}
+             "acting_clock": self,
+             "target_beat": self.beat() + start_delay}
         )
 
     def __repr__(self):
