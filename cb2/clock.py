@@ -192,14 +192,17 @@ class Clock:
         How much time has passed since this clock was created.
         Either in seconds, if this is the master clock, or in beats in the parent clock, if this clock was the result
         of a call to fork.
+
+        Computed lazily from the current scheduler position, so it stays correct when called from any thread —
+        including while the owning thread is mid-wait. Does not mutate `tempo_history` (the committed pointer).
         """
-        return self.tempo_history.time()
+        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="time")
 
     def beat(self) -> float:
         """
-        How many beats have passed since this clock was created.
+        How many beats have passed since this clock was created. See `time()` for thread/laziness semantics.
         """
-        return self.tempo_history.beat()
+        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
 
     def wall_time_in_scheduler(self) -> float:
         """
@@ -311,8 +314,8 @@ class Clock:
         retroactively reshape the segment the clock is currently napping through. From the owning thread
         this is a no-op since committed == current.
         """
-        target_beat = self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
-        delta = target_beat - self.tempo_history.beat()
+        # delta = (live scheduler-derived beat) - (last committed beat in tempo_history)
+        delta = self.beat() - self.tempo_history.beat()
         if delta > 0:
             self.tempo_history.advance(delta)
 
@@ -340,9 +343,6 @@ class Clock:
     ##################################################################################################################
     #                                              Waiting and Forking
     ##################################################################################################################
-
-    def current_time_in_scheduler(self):
-        return self.clock_to_scheduler_time(self.time(), units="time")
 
     def wait(self, dt, units="beats"):
         units = DurationUnits(units)
@@ -373,8 +373,9 @@ class Clock:
 
         self._wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
 
-        # update tempo history
-        self.tempo_history.advance(wake_up_beat - self.beat())
+        # advance the committed pointer of tempo_history from where it was to where we just woke up.
+        # Use tempo_history.beat() directly (not self.beat(), which is the live scheduler-derived position).
+        self.tempo_history.advance(wake_up_beat - self.tempo_history.beat())
 
     def _wake_and_advance_to_next_wait(self):
         """

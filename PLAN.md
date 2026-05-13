@@ -42,21 +42,20 @@ This collapses:
 
 The architectural shape is right, but the unfinished pieces are the hard ones:
 
-- **`bring_up_to_date` is `# TODO: pass`.** Looping envelopes and function-defined tempos don't work because the scheduler pre-computes the wake time, but the tempo curve only extends lazily.
-- **No tempo-change-from-foreign-thread mechanism.** An already-scheduled wakeup is now wrong after a tempo change; it must be re-inserted in the heap. (Original handles this via `rouse_and_hold`.)
 - **No `kill` / `ClockKilledError` / `DeadClockError`.** `child._killed = True` is set in `fork` but never initialized or checked.
-- **No `current_clock()` integration** with a top-level `wait()` helper.
 - **No `TimeStamp`, no synchronization policy.** cb2's `beat()` from a sibling thread is stale — but the right fix is lazy beat-from-scheduler-time, not the original's eager catch-up.
-- **No `rouse_and_hold` analogue** for external-thread mutations.
 - **Scheduler serializes everything.** `_execute_event` blocks on `_entering_wait_condition` until the woken clock hits its next wait. Original has the same property (master sleeps, children serialize behind the parent), so semantics match — but it's worth confirming.
 - **No SCAMP-facing surface compatibility.** scamp imports `Clock`, `TempoEnvelope`, `TempoHistory`, `wait`, `fork`, `current_clock`, `TimeStamp`, `MetricPhaseTarget`, fast-forwarding, etc.
-- **`lru_cache` on tempo conversions** is incompatible with lazy extension — caches will return stale answers as soon as the curve is extended. Must come out.
 
 ## Implementation plan (in dependency order)
 
 ### Step 1 — Lazy tempo extension in `TempoHistory`
 
-Make `time_at_beat`, `beat_at_time`, and `advance` auto-extend looping envelopes / function-defined tempos on demand. Drop the `@lru_cache` decorator from cb2's `tempo_envelope.py` — caching and lazy extension can't coexist.
+**Status:** done. `extend_to` and `_extend_function_or_envelope_loop` are called from `time_at_beat` / `beat_at_time`; `bring_up_to_date` is implemented in `clock.py`.
+
+**On `lru_cache`:** kept. The original PLAN said to drop it, claiming caching was incompatible with lazy extension. That was wrong — lazy `extend_to(b)` only adds segments past beat `b`, so a cached `time_at_beat(b)` stays valid. The cache is correctly invalidated on mutation by the `@tempo_modification` decorator wrapping every curve-mutating method (and the standalone `cache_clear()` pair in the manual `_beat`/`_t` setter). Hits save real work — `time_at_beat` does interval integration and `beat_at_time` does iterative root-finding to `max_error=1e-12`. Whether the workload hits the 32-entry cache often is empirical; revisit during profiling once Step 2 (lazy `beat()`/`time()`) and Step 7 (`TimeStamp`) land, since both produce access patterns where many callers query the same `(clock, scheduler_time)` simultaneously.
+
+Make `time_at_beat`, `beat_at_time`, and `advance` auto-extend looping envelopes / function-defined tempos on demand.
 
 The `_envelope_loop_or_function` state currently lives on the original `Clock`; in cb2 it should move to `TempoHistory` so that any caller asking "what time is beat 5000?" on a looping clock gets the right answer without the clock having to be involved. `TempoHistory.extend_to(beat)` becomes the single extension primitive, called from inside the conversion methods. This is the keystone — Steps 2, 3, and 7 all assume it works.
 
@@ -64,20 +63,20 @@ Keep looping support for **both** `set_*_targets(loop=True)` (easy: append a cop
 
 ### Step 2 — Lazy `beat()` / `time()` from any thread
 
-Instead of the original's eager "catch up all relatives on every wake", make `clock.beat()` and `clock.time()` compute on demand:
+**Status:** done. `Clock.beat()` and `Clock.time()` go through `scheduler_to_clock_time(scheduler.time(), ...)` so any thread gets a live position. `TempoHistory.beat()` / `.time()` are kept as the "committed pointer" — the position the owning thread's `wait()` has actually advanced to. This is the chosen split (option (b) of the original two options): clock-level reads are live, tempo-history-level reads are committed.
 
-```
-clock.time()  = scheduler_to_clock_time(scheduler.time(), units="time")
-clock.beat()  = scheduler_to_clock_time(scheduler.time(), units="beats")
-```
+Why not Option (a) (drop committed pointer entirely): `wait()` and the tempo curve mutation logic in `tempo_history` (truncate / advance / append) all need a notion of "where in the curve are we right now from the perspective of this curve's append-only history". That's the committed pointer. Removing it would require restructuring `TempoHistory` to be stateless about position, which is a bigger surgery than is warranted.
 
-This already mostly works in cb2 — `scheduler_to_clock_time` is implemented. What's missing is that `tempo_history.beat()` / `tempo_history.time()` currently track only what the *owning thread* has called `advance()` for. Either:
-- (a) drop those entirely and always go through the scheduler, or
-- (b) keep them as the "committed" position (where the clock has actually run code up to), and add `beat_now()` / `time_now()` for the scheduler-derived live position.
+Implementation notes:
+- `wait()` now uses `self.tempo_history.beat()` (committed) on the post-wait advance line, since `self.beat()` is live and would make the delta zero.
+- `current_time_in_scheduler()` was removed. With lazy reads it became a round-trip back to `self.scheduler.time()`, and putting it on `Clock` misleadingly suggests different clocks could have different scheduler times. Use `clock.scheduler.time()` at callsites instead.
+- `bring_up_to_date()` already does the right thing: `delta = scheduler_to_clock_time(...) - tempo_history.beat()`.
 
-Option (a) is cleaner. Synchronization policy disappears entirely.
+Reads do not mutate `tempo_history` — that would be a write through a getter and would race between threads. The owning thread's `wait()` is the only path that advances the committed pointer.
 
 ### Step 3 — Reschedule-on-tempo-change
+
+**Status:** done. `Scheduler.reschedule(matches, recompute)` walks the heap and re-heapifies; `Clock._reschedule_self_and_descendants()` matches by `acting_clock` and recomputes via `clock_to_scheduler_time`; `@_reschedule_after_tempo_change` decorator (clock.py:15) wraps the tempo/rate/beat_length setters and brackets the mutation with `scheduler.held()`.
 
 When a tempo setter runs against a clock whose wakeup is already queued (because it's dormant, or because the change affects a descendant's queued wakeup), the heap entry is now wrong. The fix:
 
@@ -91,6 +90,8 @@ For tempo changes coming from a *sibling clock's* thread, same mechanism — the
 
 ### Step 4 — Kill / DeadClockError / ClockKilledError
 
+**Status:** not done. `child._killed = True` is set in `fork` but the flag isn't initialized in `__init__`, no `kill()` method, no `ClockKilledError` / `DeadClockError` classes (only mentioned in docstrings).
+
 - Initialize `self._killed = False` in `__init__`.
 - `kill()` sets `_killed`, removes any queued wakeups for self/descendants from the scheduler, sets `_wait_event` so the thread exits with `ClockKilledError`.
 - `wait()` and `fork()` raise `DeadClockError` if `_killed`.
@@ -98,6 +99,8 @@ For tempo changes coming from a *sibling clock's* thread, same mechanism — the
 - Cascade kill to children.
 
 ### Step 5 — `current_clock()`, top-level `wait()`/`fork()`, `run_as_server`, `wait_forever`
+
+**Status:** partially done. `current_clock()` and module-level `wait()` exist in `cb2/utilities.py`. Still TODO: top-level `fork()` / `fork_unsynchronized()`, `wait_forever`, `wait_for_children_to_finish`, `run_as_server`.
 
 Port from `clockblocks/utilities.py` and `clockblocks/clock.py`. cb2 already uses `threading.current_thread().__clock__ = child` in fork; just need the lookup helper and the module-level wrappers.
 
@@ -115,7 +118,9 @@ Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 
 
 ### Step 8 — External-thread mutation lock
 
-cb2's `Scheduler.hold()` / `release()` already exist. Wire them into the `@tempo_modification` decorator: if `current_clock() != self` and `self` not in `current_clock().iterate_inheritance()`, briefly `scheduler.hold()` around the mutation. Step 3's reschedule logic handles the actual heap update; `hold()` just prevents the scheduler from firing a now-stale event while the heap is being rewritten.
+**Status:** done as part of Step 3. `_reschedule_after_tempo_change` (clock.py:15) wraps every tempo setter in `with self.scheduler.held(): ...` unconditionally — simpler than gating on `current_clock()` and harmless when the call is from the owning thread (the scheduler is briefly paused, which is fine because the owning thread isn't waiting on it anyway). Revisit only if profiling shows the unconditional hold is a problem.
+
+cb2's `Scheduler.held()` context manager already exists (wrapping protected `_hold()` / `_release()`). Wire it into the `@tempo_modification` decorator: if `current_clock() != self` and `self` not in `current_clock().iterate_inheritance()`, do the mutation inside `with scheduler.held(): ...`. Step 3's reschedule logic handles the actual heap update; the hold just prevents the scheduler from firing a now-stale event while the heap is being rewritten.
 
 ### Step 9 — Thread-pool for forks
 
