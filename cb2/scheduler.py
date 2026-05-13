@@ -2,7 +2,7 @@ import threading
 import time
 import heapq
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Any, Tuple
 import logging
 
@@ -10,14 +10,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(order=True)
 class QueueEvent:
-    # Ordering is by t first, then by priority
+    # Ordering is by t first, then by priority. action/metadata are not orderable.
     t: float
     priority: Tuple[int, ...]
-    action: Callable[[], None]
-    metadata: Any = None
-
-class SchedulerKilledException(Exception):
-    pass
+    action: Callable[[], None] = field(compare=False)
+    metadata: Any = field(default=None, compare=False)
 
 class Scheduler(threading.Thread):
     def __init__(self, timing_policy: float = 0.98, daemon: bool = True):
@@ -62,15 +59,16 @@ class Scheduler(threading.Thread):
     def kill(self) -> None:
         """Stop the scheduler."""
         self._killed = True
+        self._hold_event.set()  # unblock _wait_if_held so the loop can exit
         with self._new_event:
             self._new_event.notify_all()
 
-    def hold(self) -> None:
+    def _hold(self) -> None:
         """Pause the execution of scheduled events until released."""
         logger.debug("Scheduler hold activated")
         self._hold_event.clear()
 
-    def release(self) -> None:
+    def _release(self) -> None:
         """Resume execution of scheduled events."""
         logger.debug("Scheduler hold released")
         self._hold_event.set()
@@ -79,12 +77,12 @@ class Scheduler(threading.Thread):
 
     @contextmanager
     def held(self):
-        """Context-manager wrapper around hold()/release(). Guarantees release on exception."""
-        self.hold()
+        """Context-manager wrapper around _hold()/_release(). Guarantees release on exception."""
+        self._hold()
         try:
             yield self
         finally:
-            self.release()
+            self._release()
 
     def reschedule(self, matches: Callable[['QueueEvent'], bool],
                    recompute: Callable[['QueueEvent'], float]) -> None:
@@ -120,25 +118,19 @@ class Scheduler(threading.Thread):
         self._last_wake_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
-            self._wait_if_held()
+            self._hold_event.wait()
+            if self._killed:
+                break
             next_event = self._get_next_event()
-            if next_event is None:
-                continue
+            if next_event is None:  # only happens on kill
+                break
 
-            dt = next_event.t - self._ideal_time
             now = time.time()
-            relative_target_time = self._last_wake_time + dt
-            absolute_target_time = self._start_time + next_event.t
-            target_time = relative_target_time * self.timing_policy + absolute_target_time * (1 - self.timing_policy)
-            wait_duration = target_time - now
+            relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
+            absolute_wait_dur = self._start_time + next_event.t - now
+            wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
 
-            # print(next_event)
-            # print(f"{self._ideal_time}")
-            # print(f"{dt=}")
-            # print(f"rel={relative_target_time - self._start_time}")
-            # print(f"abs={absolute_target_time - self._start_time}")
-            # print(f"tar={target_time - self._start_time}")
-            # print(f"{wait_duration=}")
+            self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
 
             if wait_duration > 0:
                 self._wait_for(wait_duration)
@@ -146,22 +138,24 @@ class Scheduler(threading.Thread):
             self._execute_event(next_event)
         logger.info("Scheduler terminated")
 
-    def _wait_if_held(self) -> None:
-        """Wait until the scheduler is released if currently held."""
-        while not self._hold_event.is_set() and not self._killed:
-            time.sleep(0.01)  # Avoid busy waiting.
+    def _log_event_timing(self, event: 'QueueEvent', rel_wait: float, abs_wait: float, actual_wait: float) -> None:
+        """Detailed timing trace for one scheduled event (only formatted if DEBUG is enabled)."""
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        logger.debug(
+            "event=%r ideal=%.6f rel_wait=%.6f abs_wait=%.6f blended_wait=%.6f",
+            event.metadata, self._ideal_time, rel_wait, abs_wait, actual_wait,
+        )
 
-    def _get_next_event(self) -> QueueEvent:
+    def _get_next_event(self) -> QueueEvent | None:
         """
         Return the next event in the queue without removing it.
-        If the queue is empty, wait until an event is scheduled.
+        If the queue is empty, wait until an event is scheduled (or the scheduler is killed).
         """
         with self._new_event:
             while not self._queue and not self._killed:
                 self._new_event.wait()
-            if self._killed:
-                return None
-            return self._queue[0]
+            return self._queue[0] if self._queue else None
 
     def _wait_for(self, duration: float) -> None:
         """
@@ -175,11 +169,19 @@ class Scheduler(threading.Thread):
         Remove the event from the queue and execute its action.
         Updates the scheduler's timing metrics accordingly.
         """
+        # Re-acquire the queue lock and confirm the head is still `event` before popping:
+        # between _get_next_event peeking and now, another thread may have pushed a smaller-t
+        # event or rescheduled one to the front. If so, bail and let run() recompute timing
+        # against the new head — otherwise we'd pop the wrong event and execute `event.action`
+        # with stale bookkeeping.
+        # Note that this is not using the condition-specific abilities of _new_event, it's just
+        # blocking actions (like schedule_action) that use those abilities
         with self._new_event:
             if self._queue and self._queue[0] == event:
                 heapq.heappop(self._queue)
             else:
-                return  # The queue changed; do nothing.
+                return
+
         self._ideal_time = event.t
         logger.debug(f"Executing event '{event.metadata}' scheduled at {event.t}")
         try:
@@ -189,28 +191,16 @@ class Scheduler(threading.Thread):
         self._last_wake_time = time.time()
 
 # Module-level scheduler instance.
-_scheduler: Scheduler = None
+_scheduler: Scheduler | None = None
 
 def get_scheduler() -> Scheduler:
     """
     Returns a module-level scheduler instance, creating and starting it if necessary.
     """
     global _scheduler
-    if _scheduler is None or not _scheduler.is_alive():
-        _scheduler = Scheduler(daemon=True)
-        _scheduler.start()
-    return _scheduler
-
-
-# Example usage:
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    sched = get_scheduler()
-
-    def my_action():
-        print("Action executed at ideal time:", sched.time(), "wall time:", sched.wall_time())
-
-    # Schedule an action 5 seconds after start.
-    sched.schedule_action(5, my_action, metadata="Test Action")
-    time.sleep(6)
-    sched.kill()
+    sched = _scheduler
+    if sched is None or not sched.is_alive():
+        sched = Scheduler(daemon=True)
+        sched.start()
+        _scheduler = sched
+    return sched
