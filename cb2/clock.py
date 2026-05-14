@@ -36,7 +36,10 @@ class Clock:
         self.name = name
         self.parent = parent
         self._children = []
-        self.set_id()
+        # Counter handed out to *this* clock's future children; their clock_id suffix
+        # comes from this counter so siblings get distinct, monotonically-increasing ids.
+        self._child_counter = count()
+        self.clock_id = (0,) if parent is None else parent.clock_id + (next(parent._child_counter),)
 
         # tempo envelope, in seconds since I was created
         self.tempo_history = TempoHistory(
@@ -63,13 +66,6 @@ class Clock:
         else:
             self.parent_offset = self.parent.beat()
             self._start_time_in_scheduler = self.parent_offset + self.parent._start_time_in_scheduler
-
-    def set_id(self):
-        self._child_counter = count()
-        if self.is_master():
-            self.clock_id = 0,
-        else:
-            self.clock_id = self.parent.clock_id + (next(self._child_counter), )
 
     @staticmethod
     def _rate_tempo_or_beat_length_to_rate(rate, tempo, beat_length) -> float:
