@@ -90,13 +90,18 @@ For tempo changes coming from a *sibling clock's* thread, same mechanism — the
 
 ### Step 4 — Kill / DeadClockError / ClockKilledError
 
-**Status:** not done. `child._killed = True` is set in `fork` but the flag isn't initialized in `__init__`, no `kill()` method, no `ClockKilledError` / `DeadClockError` classes (only mentioned in docstrings).
+**Status:** done. Three-state `ClockState` enum (PENDING/ALIVE/DEAD) replaces the original `_killed` flag plan. `ClockblocksError` base, `ClockKilledError`, `DeadClockError`, and `WrongThreadError` are defined; `kill()` cascades, removes pending wakeups *and* pending forks via new `Scheduler.remove_events`, wakes any parked wait, releases the scheduler, and eagerly detaches from the parent's `_children`. `wait()` rejects non-ALIVE clocks and cross-thread calls; `fork()` rejects non-ALIVE. `_process` catches both lifecycle errors. Tests: `tests/test_kill.py` (11) + `tests/test_fork.py` (4).
 
-- Initialize `self._killed = False` in `__init__`.
-- `kill()` sets `_killed`, removes any queued wakeups for self/descendants from the scheduler, sets `_wait_event` so the thread exits with `ClockKilledError`.
-- `wait()` and `fork()` raise `DeadClockError` if `_killed`.
-- Wrap the user function in `fork`'s `_process` with try/except for both errors (port from `clockblocks/clock.py:899-902`).
-- Cascade kill to children.
+### Step 4.5 — Legibility pass on wait() / fork() / kill()
+
+**Status:** not done. The 4-step breakdown in `wait()` made it much easier to read; consider whether the same shape helps `fork()` and `kill()`, and whether each `wait()` step is independent enough to factor into a helper. Candidates:
+
+- `fork()`: the `start_delay` calculation (numeric beat / `MetricPhaseTarget` / `None`) is a self-contained chunk that could become a helper (`_resolve_start_delay(schedule_at)`).
+- `fork()`: the inner `_process` closure is doing several distinct things (thread setup, run user fn, error catch, cleanup, notify, done_callback) — might benefit from a small step structure too.
+- `kill()`: already has explicit STEP comments but could be reviewed once more for shape consistency with `wait()`.
+- `wait()`: STEP 2 (compute wake-up time + schedule action) and STEP 4 (clean up) are the most self-contained — possibly extract.
+
+Don't over-factor. The goal is readability for future-Marc, not abstraction for its own sake.
 
 ### Step 5 — `current_clock()`, top-level `wait()`/`fork()`, `run_as_server`, `wait_forever`
 
@@ -121,33 +126,6 @@ Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 
 **Status:** done as part of Step 3. `_reschedule_after_tempo_change` (clock.py:15) wraps every tempo setter in `with self.scheduler.held(): ...` unconditionally — simpler than gating on `current_clock()` and harmless when the call is from the owning thread (the scheduler is briefly paused, which is fine because the owning thread isn't waiting on it anyway). Revisit only if profiling shows the unconditional hold is a problem.
 
 cb2's `Scheduler.held()` context manager already exists (wrapping protected `_hold()` / `_release()`). Wire it into the `@tempo_modification` decorator: if `current_clock() != self` and `self` not in `current_clock().iterate_inheritance()`, do the mutation inside `with scheduler.held(): ...`. Step 3's reschedule logic handles the actual heap update; the hold just prevents the scheduler from firing a now-stale event while the heap is being rewritten.
-
-### Step 8.5 — `ScheduledMoment` and `schedule_at` by time
-
-The `schedule_at` parameter on `fork()` currently accepts a beat number or a `MetricPhaseTarget`.
-Two extensions worth doing while we're redesigning:
-
-1. **Allow scheduling by time instead of beat.** Useful when forking on a child clock with
-   `tempo != 60`: "fire after N seconds in this clock" is a different point in time than
-   "fire at beat N." For the master clock the two are identical; for child clocks they diverge.
-   API options: a `units="time"|"beats"` kwarg alongside `schedule_at`, or a thin wrapper type.
-
-2. **Introduce a `ScheduledMoment` (working name) class** that unifies the various ways to
-   specify a future point in time:
-   - fixed beat
-   - fixed time
-   - `MetricPhaseTarget` (next occurrence of a phase within a cycle)
-   - possibly other future kinds (e.g. "at the next downbeat after beat X")
-
-   This is conceptually distinct from `TimeStamp` (Step 7): a `TimeStamp` is a *resolved* moment
-   that's already pinned to scheduler time and can be translated to any clock's frame.
-   A `ScheduledMoment` is a *proposal* — a recipe for computing when something should happen,
-   which may need re-evaluation if tempo changes between when it's specified and when it fires.
-
-   The fork-event metadata would store the `ScheduledMoment` rather than a raw `target_beat`,
-   and `_reschedule_self_and_descendants` would call `moment.resolve(parent_clock)` to recompute
-   scheduler time on tempo changes. Same hook would let us add new kinds of moments later without
-   touching the reschedule logic.
 
 ### Step 9 — Thread-pool for forks
 
@@ -174,10 +152,9 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 - Looping envelope wrap-around (Step 1)
 - Function-defined tempo extension across a wait boundary (Step 1)
 - Kill cascades (Step 4)
-- Tempo change reschedules a pending `schedule_at` fork (Step 3 / Step 8.5)
+- Tempo change reschedules a pending `schedule_at` fork (Step 3)
 - Fast-forward (Step 6)
 - TimeStamp consistency across clocks (Step 7)
-- `ScheduledMoment` resolution under tempo change and `MetricPhaseTarget` (Step 8.5)
 
 ## Known design questions to revisit during implementation
 
@@ -198,3 +175,51 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 2. `scamp/test/test_examples.py` passes with goldens regenerated and diffs reviewed.
 3. `cb2/` renamed to `clockblocks/` (after atomic swap with the existing dir, which moves to `clockblocks_legacy/` or a tag for one release).
 4. Old `_WaitKeeper`, `rouse_and_hold`, `_woken_early`, `_synchronization_policy`, and the three busy-wait spin loops are gone from the new codebase.
+
+## Possible 1.5 features
+
+Features that aren't required for 1.0 parity but feel natural to add given the redesign,
+and that the new architecture should make easier than the old one did.
+
+### `ScheduledMoment` and `schedule_at` by time
+
+The `schedule_at` parameter on `fork()` currently accepts a beat number or a `MetricPhaseTarget`.
+Two extensions worth doing:
+
+1. **Allow scheduling by time instead of beat.** Any clock with `tempo != 60` has diverging
+   beat and time axes; "fire at beat N" and "fire after N seconds" are different points.
+   Currently `schedule_at` only speaks beats. API options: a `units="time"|"beats"` kwarg
+   alongside `schedule_at`, or a thin wrapper type.
+
+2. **Introduce a `ScheduledMoment` (working name) class** that unifies the various ways to
+   specify a future point in time:
+   - fixed beat
+   - fixed time
+   - `MetricPhaseTarget` (next occurrence of a phase within a cycle)
+   - possibly other future kinds (e.g. "at the next downbeat after beat X")
+
+   This is conceptually distinct from `TimeStamp` (Step 7): a `TimeStamp` is a *resolved* moment
+   that's already pinned to scheduler time and can be translated to any clock's frame.
+   A `ScheduledMoment` is a *proposal* — a recipe for computing when something should happen,
+   which may need re-evaluation if tempo changes between when it's specified and when it fires.
+
+   The fork-event metadata would store the `ScheduledMoment` rather than a raw `target_beat`,
+   and `_reschedule_self_and_descendants` would call `moment.resolve(parent_clock)` to recompute
+   scheduler time on tempo changes. Same hook would let us add new kinds of moments later without
+   touching the reschedule logic.
+
+### Externally-driven scheduler clock
+
+Let the scheduler's notion of "now" be driven by an external thread rather than wall-clock sleep.
+Use case: drive the clock tree from Logic (or any DAW / external transport) so that scamp's
+playback follows the host instead of free-running.
+
+This should be a scheduler-side change only: replace (or augment) the `sleep_until(t)` step in
+`Scheduler.run` with "wait until the external source signals that scheduler-time has reached `t`."
+Concretely: an injectable time source (default = monotonic wall clock; alternative = a callable
+that blocks until the host has advanced to a given beat/time). Clock-side code is unaffected.
+
+Open questions: how does the external source map its own time to scheduler time on startup
+(offset + rate)? What happens on host tempo changes — does the scheduler see them as a continuous
+mapping, or are we treating the host as a discrete tick stream? Worth prototyping against MIDI
+clock / MTC before committing to a shape.
