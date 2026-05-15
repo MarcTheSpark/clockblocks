@@ -20,14 +20,14 @@ The original `clockblocks/` is correct but architecturally tangled. The core ins
 
 ## Architectural pivot (already in cb2)
 
-**One central `Scheduler` thread** running a heap of `(scheduler_time, action)` events. Each clock thread, on `wait()`, computes its absolute scheduler-time via `clock_to_scheduler_time` (walking up parents converting beats↔time↔parent_beat↔parent_time…), schedules a wakeup, and blocks. The scheduler pops the next event, sleeps until its time, fires `_wake_and_advance_to_next_wait`, then blocks on a condition until the woken clock has hit its next `wait` (preserving the original's single-clock-at-a-time property without nested wait loops).
+**One central `Scheduler` thread** running a heap of `(scheduler_time, action)` events. Each clock thread, on `wait()`, computes its absolute scheduler-time via `clock_to_scheduler_time` (walking up parents converting beats↔time↔parent_beat↔parent_time…), schedules a wakeup, and blocks. The scheduler pops the next event, sleeps until its time, fires `_wake_and_advance_to_next_wait_call`, then blocks on a condition until the woken clock has hit its next `wait` (preserving the original's single-clock-at-a-time property without nested wait loops).
 
 This collapses:
 - N nested wait loops → 1 scheduler loop
 - per-clock `_queue` + `_queue_lock` → 1 heap
 - `rouse_and_hold` ceremony → "modify the scheduled event in place" (or scheduler `hold`/`release`)
 - "catch up all relatives" → just compute `beat()` lazily from scheduler time when asked
-- ~8 pieces of per-clock state → ~2 (`_wait_event`, `_entering_wait_condition`)
+- ~8 pieces of per-clock state → ~2 (`_wait_event`, `_scheduler_park_condition`)
 
 ## What cb2 has today
 
@@ -44,7 +44,7 @@ The architectural shape is right, but the unfinished pieces are the hard ones:
 
 - **No `kill` / `ClockKilledError` / `DeadClockError`.** `child._killed = True` is set in `fork` but never initialized or checked.
 - **No `TimeStamp`, no synchronization policy.** cb2's `beat()` from a sibling thread is stale — but the right fix is lazy beat-from-scheduler-time, not the original's eager catch-up.
-- **Scheduler serializes everything.** `_execute_event` blocks on `_entering_wait_condition` until the woken clock hits its next wait. Original has the same property (master sleeps, children serialize behind the parent), so semantics match — but it's worth confirming.
+- **Scheduler serializes everything.** `_execute_event` blocks on `_scheduler_park_condition` until the woken clock hits its next wait. Original has the same property (master sleeps, children serialize behind the parent), so semantics match — but it's worth confirming.
 - **No SCAMP-facing surface compatibility.** scamp imports `Clock`, `TempoEnvelope`, `TempoHistory`, `wait`, `fork`, `current_clock`, `TimeStamp`, `MetricPhaseTarget`, fast-forwarding, etc.
 
 ## Implementation plan (in dependency order)
@@ -122,6 +122,33 @@ Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 
 
 cb2's `Scheduler.held()` context manager already exists (wrapping protected `_hold()` / `_release()`). Wire it into the `@tempo_modification` decorator: if `current_clock() != self` and `self` not in `current_clock().iterate_inheritance()`, do the mutation inside `with scheduler.held(): ...`. Step 3's reschedule logic handles the actual heap update; the hold just prevents the scheduler from firing a now-stale event while the heap is being rewritten.
 
+### Step 8.5 — `ScheduledMoment` and `schedule_at` by time
+
+The `schedule_at` parameter on `fork()` currently accepts a beat number or a `MetricPhaseTarget`.
+Two extensions worth doing while we're redesigning:
+
+1. **Allow scheduling by time instead of beat.** Useful when forking on a child clock with
+   `tempo != 60`: "fire after N seconds in this clock" is a different point in time than
+   "fire at beat N." For the master clock the two are identical; for child clocks they diverge.
+   API options: a `units="time"|"beats"` kwarg alongside `schedule_at`, or a thin wrapper type.
+
+2. **Introduce a `ScheduledMoment` (working name) class** that unifies the various ways to
+   specify a future point in time:
+   - fixed beat
+   - fixed time
+   - `MetricPhaseTarget` (next occurrence of a phase within a cycle)
+   - possibly other future kinds (e.g. "at the next downbeat after beat X")
+
+   This is conceptually distinct from `TimeStamp` (Step 7): a `TimeStamp` is a *resolved* moment
+   that's already pinned to scheduler time and can be translated to any clock's frame.
+   A `ScheduledMoment` is a *proposal* — a recipe for computing when something should happen,
+   which may need re-evaluation if tempo changes between when it's specified and when it fires.
+
+   The fork-event metadata would store the `ScheduledMoment` rather than a raw `target_beat`,
+   and `_reschedule_self_and_descendants` would call `moment.resolve(parent_clock)` to recompute
+   scheduler time on tempo changes. Same hook would let us add new kinds of moments later without
+   touching the reschedule logic.
+
 ### Step 9 — Thread-pool for forks
 
 Port `_run_in_pool` + `_pool_semaphore` from original (`clockblocks/clock.py:793-801`). Real perf win when many short forks happen (which scamp does constantly for note playback). Threads-per-fork (cb2's current approach) is fine for correctness but slow.
@@ -147,12 +174,14 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 - Looping envelope wrap-around (Step 1)
 - Function-defined tempo extension across a wait boundary (Step 1)
 - Kill cascades (Step 4)
+- Tempo change reschedules a pending `schedule_at` fork (Step 3 / Step 8.5)
 - Fast-forward (Step 6)
 - TimeStamp consistency across clocks (Step 7)
+- `ScheduledMoment` resolution under tempo change and `MetricPhaseTarget` (Step 8.5)
 
 ## Known design questions to revisit during implementation
 
-- **Scheduler-action serialization.** Original semantics serialize per master clock; cb2 inherits this property because `_wake_and_advance_to_next_wait` blocks on `_entering_wait_condition`. Confirm this is what we want (the alternative — letting the scheduler issue another wakeup while a clock is still in user code — would allow real parallelism between clocks but break determinism users rely on).
+- **Scheduler-action serialization.** Original semantics serialize per master clock; cb2 inherits this property because `_wake_and_advance_to_next_wait_call` blocks on `_scheduler_park_condition`. Confirm this is what we want (the alternative — letting the scheduler issue another wakeup while a clock is still in user code — would allow real parallelism between clocks but break determinism users rely on).
 - **`schedule_at` with `MetricPhaseTarget`** at fork time needs the parent's `beat()` to be accurate at the moment of the fork call. Step 2 (lazy beat) handles this for the foreign-thread case; for the owning-thread case it's already correct.
 - **Priority ordering.** Original uses `_priority_counter` to break ties between sibling clocks woken at the same beat (earlier-forked first). cb2's `priority: Tuple[int, ...]` in `QueueEvent` is in the right shape; need to make sure `clock_id` (which is constructed as the parent's clock_id plus a counter) gives the same ordering as original's priority.
 - **Multiple master clocks.** Original `get_scheduler()` returns a module-level singleton. Two `Clock()` calls with `parent=None` would share a scheduler. Is that desired? Probably yes (one timing source per process), but worth a sanity check.

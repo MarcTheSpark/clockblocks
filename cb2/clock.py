@@ -1,6 +1,7 @@
 import functools
 import logging
 import threading
+from enum import Enum
 from itertools import count
 from numbers import Real
 from typing import Callable, Sequence, Union, Iterator
@@ -8,8 +9,39 @@ from cb2.tempo_envelope import TempoHistory
 from cb2.scheduler import get_scheduler, Scheduler
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
-from cb2.utilities import _PrintColors
+from cb2.utilities import _PrintColors, current_clock
 import textwrap
+
+
+class ClockblocksError(Exception):
+    """Base class for clockblocks errors."""
+    pass
+
+
+class ClockKilledError(ClockblocksError):
+    """Raised inside a forked clock's own thread when its wait is woken by kill(),
+    so the fork wrapper can unwind the user function cleanly."""
+    pass
+
+
+class DeadClockError(ClockblocksError):
+    """Raised when something tries to wait or fork on a clock that's no longer ALIVE
+    (either killed already, or — for fork — still PENDING in its start_delay)."""
+    pass
+
+
+class WrongThreadError(ClockblocksError):
+    """Raised when wait() is called from a thread that doesn't own the clock.
+    Each clock has exactly one owning thread (the one running its forked process,
+    or the main thread for the master); calling wait() from any other thread would
+    block the wrong thread and corrupt the clock's bookkeeping."""
+    pass
+
+
+class ClockState(Enum):
+    PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
+    ALIVE = "alive"      # process_function is running (or about to run)
+    DEAD = "dead"        # killed, or process_function returned
 
 
 def _reschedule_after_tempo_change(fn):
@@ -51,19 +83,26 @@ class Clock:
         self.scheduler = self.parent.scheduler if self.parent is not None else \
             get_scheduler() if scheduler is None else scheduler
 
-        self._entering_wait_condition = threading.Condition()
+        self._scheduler_park_condition = threading.Condition()
         self._wait_event = threading.Event()
 
         if self.is_master():
+            # Master starts ALIVE (no fork / start_delay)
+            self._state = ClockState.ALIVE
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
-            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait,
+            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
                                            (0, ), {"description": f"Initial wake for {self}", "acting_clock": self})
             self._wait_event.wait()
 
             threading.current_thread().__clock__ = self
+            # the "parent" of the master clock, timing wise, is the scheduler. But master_clock.parent is None
+            # still because there is not parent clock.
             self.parent_offset = self._start_time_in_scheduler = self.scheduler.time()
         else:
+            # Forked children start PENDING and flip to ALIVE at the top of _process
+            # once their start_delay has elapsed.
+            self._state = ClockState.PENDING
             self.parent_offset = self.parent.beat()
             self._start_time_in_scheduler = self.parent_offset + self.parent._start_time_in_scheduler
 
@@ -341,6 +380,40 @@ class Clock:
     ##################################################################################################################
 
     def wait(self, dt, units="beats"):
+        """
+        Block this clock for `dt` beats (or seconds, if units="time"), yielding to the scheduler.
+
+        Implemented in four steps:
+            (1) reject the call if this clock isn't ALIVE, or if we're not on this clock's own thread;
+            (2) compute the wake-up time and queue a wake-up event on the scheduler;
+            (3) hand off to the scheduler and block;
+            (4) clean up on wake — raising ClockKilledError if we were killed mid-wait, otherwise advancing the
+                committed pointer in tempo_history to reflect the post-wait beat/time.
+
+        See in-line STEP comments for details and see the `kill()` docstring for the full picture
+        of how clocks terminate.
+        """
+
+        # --------------------- STEP 1: Validity checks (state and thread) ---------------------
+
+        if self._state is not ClockState.ALIVE:
+            # Mirrors fork()'s rule: wait/fork only allowed on ALIVE clocks. PENDING is rejected
+            # because the clock has no thread of its own yet — any wait() call would have to come
+            # from some other thread holding the reference, which doesn't make sense.
+            raise DeadClockError(
+                f"Cannot call wait on a clock that is {self._state.value} (not ALIVE)."
+            )
+
+        if current_clock() is not self:
+            # wait() blocks the calling thread, so it must be called from this clock's own thread.
+            # Otherwise we'd block the wrong thread, schedule a wakeup keyed to this clock's id,
+            # and... well it sounds chaotic, and I cannot imagine a legitimate use case.
+            raise WrongThreadError(
+                f"wait() on {self} must be called from its own thread (use current_clock().wait(...))."
+            )
+
+        # ------------------- STEP 2: Calculate and schedule wake up in scheduler --------------------
+
         units = DurationUnits(units)
         if units == DurationUnits.BEATS:
             wake_up_beat = self.beat() + dt
@@ -350,37 +423,54 @@ class Clock:
             wake_up_beat = self.tempo_history.beat_at_time(wake_up_time)
         wake_up_time_in_scheduler = self.clock_to_scheduler_time(wake_up_time, units="time")
 
-        # clear the _wait_event so that it will block
-        self._wait_event.clear()
-
-        # add the wake-up to the scheduler's queue
+        # queue the wake-up event with the scheduler
         self.scheduler.schedule_action(
             wake_up_time_in_scheduler,
-            self._wake_and_advance_to_next_wait,
+            self._wake_and_advance_to_next_wait_call,
             self.clock_id,
             {"description": f"{self} wakeup action",
              "acting_clock": self,
              "target_beat": wake_up_beat}
         )
 
-        with self._entering_wait_condition:
-            # wait to be woken up by the scheduler
-            self._entering_wait_condition.notifyAll()
+        # ---------------------------- STEP 3: Hand off to the scheduler -----------------------------
 
-        self._wait_event.wait()  # THIS IS WHERE OTHER THREADS TAKE OVER
+        # Clear _wait_event, then release the scheduler. Order matters: once we notify,
+        # the scheduler is free to fire our wake-up (which sets _wait_event), and a clear
+        # after that would wipe the signal.
+        self._wait_event.clear()
+        with self._scheduler_park_condition:
+            self._scheduler_park_condition.notify_all()
 
+        # THIS IS WHERE OTHER THREADS TAKE OVER
+        # when it's time to wake up, the scheduler runs the scheduled _wake_and_advance_to_next_wait_call
+        # which releases us from this wait, and then enters its own wait condition, waiting for the next
+        # wait call on this clock to notify (right above this). (On the master's very first wait, the
+        # scheduler is parked on this same condition by the initial _wake_and_advance scheduled from
+        # __init__; on a sub-clock's first wait, by _start_new_clock after launching the clock's thread.)
+        self._wait_event.wait()
+
+        # ----------------------------------- STEP 4: Clean Up --------------------------------------
+
+        # ~~~~~ Step 4a: Handle clock woken by kill() ~~~~~
+        # Reaching this branch means kill() set _wait_event to wake us; kill() also released the
+        # scheduler from _scheduler_park_condition in the same pass, so we don't need to do that here.
+        if self._state is ClockState.DEAD:
+            raise ClockKilledError()
+
+        # ~~~~~ Step 4b: Update self.tempo_history to reflect new time post-wait ~~~~~
         # advance the committed pointer of tempo_history from where it was to where we just woke up.
         # Use tempo_history.beat() directly (not self.beat(), which is the live scheduler-derived position).
         self.tempo_history.advance(wake_up_beat - self.tempo_history.beat())
 
-    def _wake_and_advance_to_next_wait(self):
+    def _wake_and_advance_to_next_wait_call(self):
         """
-        This function is scheduled on the scheduler: it wakes up this clock, and then blocks until the clock
+        This function is run on the scheduler thread: it wakes up this clock, and then blocks until the clock
         has hit another wait call and scheduled its next wakeup.
         """
-        with self._entering_wait_condition:
+        with self._scheduler_park_condition:
             self._wait_event.set()
-            self._entering_wait_condition.wait()
+            self._scheduler_park_condition.wait()
 
     def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
@@ -411,6 +501,16 @@ class Clock:
         :param done_callback: a callback function to be invoked when the clock has terminated
         :return: the clock of the spawned child process
         """
+        if self._state is not ClockState.ALIVE:
+            raise DeadClockError(
+                f"Cannot call fork from a clock that is {self._state.value} (not ALIVE)."
+            )
+
+        # Unlike wait(), fork() is intentionally callable from any thread: it doesn't block,
+        # it just queues a scheduler event and returns. The forked _process runs on its own
+        # new thread and sets that thread's __clock__ to the new child, so current_clock()
+        # works correctly inside it regardless of who called fork().
+
         name = (process_function.__name__ if hasattr(process_function, '__name__') else "UNNAMED") \
             if name is None else name
 
@@ -436,29 +536,50 @@ class Clock:
             # set the implicit variable __clock__ in this thread
             threading.current_thread().__clock__ = child
             child.parent_offset += start_delay
+            # start_delay has elapsed; we're now actually running
+            child._state = ClockState.ALIVE
 
-            """
-            The whole function we are forking is wrapped in a try/except clause, because we want to be able to kill
-            it at will. When and if "kill" is called on the clock, its wait_event is set free and it immediately
-            raises a ClockKilledError, which exits us from the process. (It's also possible, but unlikely, that
-            we will get a DeadClockError, if we were just in the process of calling wait.)
-            """
-            # Run the function
-            process_function(*args, **kwds)
+            # ClockKilledError fires from inside wait() when kill() wakes us mid-wait.
+            # DeadClockError is also possible if a thread from outside the clock system kills the clock while
+            # it's awake and in the middle of running user code. In this case, when the user code completes
+            # what it was doing and reaches its next wait call, it's calling wait on a dead clock, which
+            # raises DeadClockError.
+            try:
+                process_function(*args, **kwds)
+            except ClockKilledError:
+                pass
+            except DeadClockError:
+                pass
 
             # Remove this sub-clock from the children list of the forking parent (self is the parent)
-            self._children.remove(child)
+            # (the if/in check covers the case where the clock was already removed via kill())
+            if child in self._children:
+                self._children.remove(child)
 
-            child._killed = True
+            child._state = ClockState.DEAD
+
+            # After the user function returns, the scheduler is parked on _scheduler_park_condition
+            # (either from the most recent _wake_and_advance_to_next_wait_call, or — if the user function
+            # never called wait — from _start_new_clock). Notify it so it can proceed to the next event.
+            with child._scheduler_park_condition:
+                child._scheduler_park_condition.notify_all()
 
             if done_callback is not None:
                 done_callback()
 
-        # self._run_in_pool(_process, args, kwargs)
         def _start_new_clock():
-            with child._entering_wait_condition:
+            # This is run from the scheduler (scheduled below). It launches the forked function and then
+            # parks on the new clock's _scheduler_park_condition, waiting to be freed by the first
+            # wait call in the new clock (or the clean up process in the wrapper for the forked function,
+            # if that function never calls wait).
+
+            if child._state is ClockState.DEAD:
+                # If kill() was called during the start_delay window, just skip starting the thread.
+                # kill() will have removed this event in most cases, but guard against the race.
+                return
+            with child._scheduler_park_condition:
                 threading.Thread(target=_process, args=args, kwargs=kwargs, daemon=True).start()
-                child._entering_wait_condition.wait()
+                child._scheduler_park_condition.wait()
 
         self.scheduler.schedule_action(
             self.clock_to_scheduler_time(self.beat() + start_delay),
@@ -466,8 +587,107 @@ class Clock:
             child.clock_id,
             {"description": f"Forking of {child}",
              "acting_clock": self,
+             "forked_child": child,
              "target_beat": self.beat() + start_delay}
         )
+        return child
+
+    @property
+    def alive(self) -> bool:
+        """True if this clock is currently running (PENDING and DEAD both return False)."""
+        return self._state is ClockState.ALIVE
+
+    def kill(self) -> None:
+        """
+        End the process running on this clock and cascade to all descendants.
+
+        Removes any queued scheduler events for self/descendants (pending wakeups, pending forks),
+        flips state to DEAD, and wakes any parked wait so it raises ClockKilledError. The scheduler
+        is briefly held while we mutate the heap to avoid racing a wakeup that's about to fire.
+
+        This is as good a place as any to clarify the possible code paths for terminating clocks:
+
+            SUB-CLOCK, natural end:
+                User function returns inside _process. The except blocks aren't entered.
+                _process removes child from parent._children, sets state=DEAD, then notifies
+                _scheduler_park_condition (the scheduler is parked there awaiting our next
+                wait that will never come). Thread exits.
+
+            SUB-CLOCK, killed:
+                kill() (possibly cascaded from an ancestor) sets state=DEAD on us, removes
+                our queued wake-up (and any other event related to this clock) from the heap,
+                sets _wait_event, notifies _scheduler_park_condition, and detaches us from our
+                parent's _children list. If we were parked inside wait() at STEP 3, we wake at
+                STEP 4a, see DEAD, and raise ClockKilledError. If we weren't in wait, the next
+                wait() raises DeadClockError at the entry check (STEP 1). Either error propagates
+                into _process, which catches it and falls through to the same cleanup as the
+                natural-end path (the cleanup's detach and notify are both idempotent).
+
+            MASTER, natural end:
+                Main thread finishes its top-level code. There is no _process wrapper, so no
+                automatic notify. The scheduler would be left parked on _scheduler_park_condition,
+                but since it's a daemon thread and the process is exiting, this doesn't matter.
+                (Will matter once run_as_server lands and the master runs in a background
+                thread — Step 5 will need its own cleanup wrapper.)
+
+            MASTER, killed:
+                kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
+                _scheduler_park_condition (releasing the scheduler — critical for the master since
+                there's no _process wrapper to do it later). If the main thread is parked inside
+                wait() at STEP 3, it wakes, sees DEAD at STEP 4a, and raises ClockKilledError.
+                Uncaught, the main thread dies and the daemon scheduler dies with the process —
+                but for run_as_server-style scenarios where the scheduler singleton must remain
+                usable for a subsequent master, the kill() notify is what makes that possible.
+        """
+        if self._state is ClockState.DEAD:
+            return
+
+        # ---------------------- STEP 1: Collect victims (this and descendants) --------------------
+
+        # Collect everyone we're killing up front so the predicate sees a consistent set.
+        # lol that Claude called these victims.
+        victims = list(self.iterate_descendants(include_self=True))
+        victim_ids = {id(c) for c in victims}
+
+        # ----- STEP 2: Flag victims as killed and remove all victim events from the scheduler -----
+
+        def matches(event):
+            # Predicate function for picking out the events on the scheduler that should no longer happen.
+            # Note that the "forked_child" check covers cases where a victim has called fork with schedule_at
+            # sometimes in the future. That clock doesn't exist yet, and this prevents the event that creates it
+            meta = event.metadata
+            if not isinstance(meta, dict):
+                return False
+            ac = meta.get("acting_clock")
+            fc = meta.get("forked_child")
+            return (ac is not None and id(ac) in victim_ids) or \
+                   (fc is not None and id(fc) in victim_ids)
+
+        with self.scheduler.held():
+            for c in victims:
+                c._state = ClockState.DEAD
+            self.scheduler.remove_events(matches)
+
+        # ---- STEP 3: For each victim, wake it (or release scheduler), and detach it from its parent ----
+
+        for c in victims:
+            # if the victim is parked mid-wait, wake it: it will observe DEAD, raise ClockKilledError
+            c._wait_event.set()
+            # If a victim is mid-processing (running user code between waits), the scheduler
+            # is parked on its _scheduler_park_condition right now. Free it immediately.
+            # For a sub clock it would eventually be released by _process cleanup, but that will
+            # only happen when the user code hits the next wait and throws a DeadClockError
+            # (which could be arbitrarily long & hold up scheduled events). For the master clock
+            # this is critical, because it's not wrapped in _process and would never otherwise release
+            # the scheduler.
+            with c._scheduler_park_condition:
+                c._scheduler_park_condition.notify_all()
+            # Detach from parent so the parent's _children list is accurate from the moment kill()
+            # returns. _process would normally do this on cleanup, but that can be delayed (user code
+            # between waits has to reach its next wait first) or skipped entirely (a PENDING victim
+            # killed during start_delay never has _process run at all).
+            if c.parent is not None and c in c.parent._children:
+                c.parent._children.remove(c)
 
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)

@@ -84,6 +84,20 @@ class Scheduler(threading.Thread):
         finally:
             self._release()
 
+    def remove_events(self, matches: Callable[['QueueEvent'], bool]) -> int:
+        """
+        Remove all queued events that satisfy `matches(event)`. Returns the number removed.
+        Used when a clock is killed and its pending wakeups (and pending forks) need to be cancelled.
+        """
+        with self._new_event:
+            kept = [e for e in self._queue if not matches(e)]
+            removed = len(self._queue) - len(kept)
+            if removed:
+                self._queue = kept
+                heapq.heapify(self._queue)
+                self._new_event.notify_all()
+        return removed
+
     def reschedule(self, matches: Callable[['QueueEvent'], bool],
                    recompute: Callable[['QueueEvent'], float]) -> None:
         """
