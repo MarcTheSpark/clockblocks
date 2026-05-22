@@ -25,11 +25,10 @@ class TestScheduler(unittest.TestCase):
 
         self.sched = Scheduler(timing_policy=0.5)
         self.sched.start()
-        self.sched.hold()
-        self.sched.schedule_action(0.2, action, metadata="hold_release")
-        time.sleep(0.3)
-        self.assertEqual(results, [])
-        self.sched.release()
+        with self.sched.held():
+            self.sched.schedule_action(0.2, action, metadata="hold_release")
+            time.sleep(0.3)
+            self.assertEqual(results, [])
         event_executed.wait(timeout=1)
         self.assertEqual(results, ["executed"])
 
