@@ -13,20 +13,20 @@ c = Clock("MASTER", initial_tempo=20)
 start = time.time()
 
 
-def subsubprocess():
+def grandchild():
     while True:
         print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
         wait(0.25, units="time")
 
 
-def subprocess():
-    current_clock().fork(subsubprocess, initial_rate=2, schedule_at=2)
+def child():
+    current_clock().fork(grandchild, initial_rate=2, schedule_at=2)
     while True:
         print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
         wait(1)
 
 
-c.fork(subprocess, initial_rate=2, schedule_at=1)
+c.fork(child, initial_rate=2, schedule_at=1)
 while True:
     print(current_clock().name, current_clock().beat(), current_clock().time(), time.time()-start)
     wait(1)

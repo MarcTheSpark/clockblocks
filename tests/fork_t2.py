@@ -26,7 +26,7 @@ c = Clock("MASTER", initial_tempo=30)
 start = time.time()
 
 
-def subprocess():
+def child():
     current_clock().print_status()
     wait(1)
 
@@ -39,7 +39,7 @@ def subprocess():
 
 current_clock().print_status()
 wait(1)
-c.fork(subprocess, initial_rate=2)
+c.fork(child, initial_rate=2)
 while True:
     current_clock().print_status()
     wait(1)

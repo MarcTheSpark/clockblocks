@@ -94,14 +94,14 @@ For tempo changes coming from a *sibling clock's* thread, same mechanism — the
 
 ### Step 4.5 — Legibility pass on wait() / fork() / kill()
 
-**Status:** not done. The 4-step breakdown in `wait()` made it much easier to read; consider whether the same shape helps `fork()` and `kill()`, and whether each `wait()` step is independent enough to factor into a helper. Candidates:
+**Status:** done. Applied the `wait()` STEP shape to `fork()` and extracted one helper; deliberately left `wait()` and `kill()` as-is.
 
-- `fork()`: the `start_delay` calculation (numeric beat / `MetricPhaseTarget` / `None`) is a self-contained chunk that could become a helper (`_resolve_start_delay(schedule_at)`).
-- `fork()`: the inner `_process` closure is doing several distinct things (thread setup, run user fn, error catch, cleanup, notify, done_callback) — might benefit from a small step structure too.
-- `kill()`: already has explicit STEP comments but could be reviewed once more for shape consistency with `wait()`.
-- `wait()`: STEP 2 (compute wake-up time + schedule action) and STEP 4 (clean up) are the most self-contained — possibly extract.
+- `fork()`: extracted `_resolve_start_delay(schedule_at)` (clock.py) — the numeric-beat / `MetricPhaseTarget` / `None` branching is now a self-contained method, so fork()'s body reads as create-child → resolve-delay → define-lifecycle → schedule.
+- `fork()`: gave the body STEP 1–4 comments and the inner `_process` closure Step 3a–3e sub-comments (setup / run user fn / cleanup / release scheduler / done_callback). Also collapsed the two identical `except ClockKilledError / except DeadClockError` blocks into one `except (ClockKilledError, DeadClockError)`.
+- `wait()`: left unchanged. It's already the model the others are measured against; extracting STEP 2/4 would mean threading `wake_up_beat` through a helper return value for marginal gain.
+- `kill()`: left unchanged. Its STEP 1–3 comments already match the `wait()`/`fork()` shape.
 
-Don't over-factor. The goal is readability for future-Marc, not abstraction for its own sake.
+Decision: stopped here rather than factor further — the closures capture too much (`child`, `self`, `process_function`, `args`, `done_callback`, `start_delay`) to extract cleanly into methods, and STEP comments deliver the readability without the parameter-passing ceremony.
 
 ### Step 5 — `current_clock()`, top-level `wait()`/`fork()`, `run_as_server`, `wait_forever`
 

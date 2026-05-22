@@ -32,7 +32,7 @@ class DeadClockError(ClockblocksError):
 
 class WrongThreadError(ClockblocksError):
     """Raised when wait() is called from a thread that doesn't own the clock.
-    Each clock has exactly one owning thread (the one running its forked process,
+    Each clock has exactly one owning thread (the one running its forked function,
     or the main thread for the master); calling wait() from any other thread would
     block the wrong thread and corrupt the clock's bookkeeping."""
     pass
@@ -40,8 +40,8 @@ class WrongThreadError(ClockblocksError):
 
 class ClockState(Enum):
     PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
-    ALIVE = "alive"      # process_function is running (or about to run)
-    DEAD = "dead"        # killed, or process_function returned
+    ALIVE = "alive"      # forked_function is running (or about to run)
+    DEAD = "dead"        # killed, or forked_function returned
 
 
 def _reschedule_after_tempo_change(fn):
@@ -100,7 +100,7 @@ class Clock:
             # still because there is not parent clock.
             self.parent_offset = self._start_time_in_scheduler = self.scheduler.time()
         else:
-            # Forked children start PENDING and flip to ALIVE at the top of _process
+            # Forked children start PENDING and flip to ALIVE at the top of _fork_wrapper
             # once their start_delay has elapsed.
             self._state = ClockState.PENDING
             self.parent_offset = self.parent.beat()
@@ -472,113 +472,139 @@ class Clock:
             self._wait_event.set()
             self._scheduler_park_condition.wait()
 
-    def fork(self, process_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
+    def _resolve_start_delay(self, schedule_at: Union[float, MetricPhaseTarget, None]) -> float:
+        """
+        Translate fork()'s `schedule_at` into a delay, in this (the parent) clock's beats, from now.
+
+            None              -> 0 (start immediately)
+            a beat number     -> that beat minus the current beat (clamped to 0 if it's in the past)
+            MetricPhaseTarget -> the delay to the next beat matching the requested phase
+        """
+        if schedule_at is None:
+            return 0
+        if isinstance(schedule_at, Real):
+            start_delay = schedule_at - self.beat()
+            if start_delay < 0:
+                logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
+                return 0
+            return start_delay
+        if isinstance(schedule_at, MetricPhaseTarget):
+            # get_nearest_matching_beats returns the nearest match below and above, in order of nearness;
+            # we want the match above, since it's in the future, so we use max
+            return max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
+        raise ValueError("`schedule_at` must be either a float, a MetricPhaseTarget, or None")
+
+    def fork(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
              schedule_at: Union[float, MetricPhaseTarget] = None, done_callback: Callable[[], None] = None):
         """
-        Spawns a parallel process running on a child clock.
+        Spawns a child clock running `forked_function` as a coordinated parallel timeline.
 
-        :param process_function: function defining the process to be spawned
-        :param args: arguments to be passed to the process function. One subtlety to note here: if the number of
-            arguments passed is one fewer than the number taken by the function, the clock on which the process is
+        The child runs on its own thread but stays synchronized under this clock's master scheduler —
+        "parallel" here means parallel musical time (like a separate voice or layer), not simultaneous
+        CPU execution; the scheduler runs one clock's code at a time.
+
+        :param forked_function: the function to be run on the new child clock
+        :param args: arguments to be passed to the forked function. One subtlety to note here: if the number of
+            arguments passed is one fewer than the number taken by the function, the clock on which the function is
             forked will be passed as the first argument, followed by the arguments given. For instance, if we define
             "forked_function(clock, a, b)", and then call "parent.fork(forked_function, (13, 6))", 13 will be passed
             to "a" and 6 to "b", while the clock on which forked_function is running will be passed to "clock". On the
             other hand, if the signature of the function were "forked_function(a, b)", 13 would be simply be passed to
             "a" and 6 to "b".
-        :param kwargs: keyword arguments to be passed to the process function
-        :param name: name to be given to the clock of the spawned child process
+        :param kwargs: keyword arguments to be passed to the forked function
+        :param name: name to be given to the spawned child clock
         :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
         :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
         :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
         :param schedule_at: either a beat or a :class:`~clockblocks.tempo_envelope.MetricPhaseTarget` specifying when we
-            want this forked process to begin. The default value of None indicates that it is to begin immediately. A
-            float indicates the beat in this clock at which the process is to start (should be in the future).
-            Alternatively, a MetricPhaseTarget can be used to specify where in a regular cycle the process should begin.
-            For instance, if we want to sync every fork to 3/4 time, MetricPhaseTarget(0, 3) would start a process on
+            want the forked function to begin. The default value of None indicates that it is to begin immediately. A
+            float indicates the beat in this clock at which the forked function is to start (should be in the future).
+            Alternatively, a MetricPhaseTarget can be used to specify where in a regular cycle it should begin.
+            For instance, if we want to sync every fork to 3/4 time, MetricPhaseTarget(0, 3) would start it on
             the downbeat, MetricPhaseTarget(1, 3) would start it on beat 2, and MetricPhaseTarget(2.5, 3) would start it
             halfway through beat 3.
         :param done_callback: a callback function to be invoked when the clock has terminated
-        :return: the clock of the spawned child process
+        :return: the spawned child clock
         """
+        # --------------------- STEP 1: Validity check (state only) ---------------------
+
+        # Unlike wait(), fork() is *not* thread-restricted: it doesn't block, it just queues a
+        # scheduler event to start the new child clock, and then returns. The forked _fork_wrapper
+        # runs on its own new thread and sets that thread's __clock__ to the new child, so
+        # current_clock() works correctly inside it regardless of who called fork().
         if self._state is not ClockState.ALIVE:
             raise DeadClockError(
                 f"Cannot call fork from a clock that is {self._state.value} (not ALIVE)."
             )
 
-        # Unlike wait(), fork() is intentionally callable from any thread: it doesn't block,
-        # it just queues a scheduler event and returns. The forked _process runs on its own
-        # new thread and sets that thread's __clock__ to the new child, so current_clock()
-        # works correctly inside it regardless of who called fork().
+        # ------------- STEP 2: Create the child clock and resolve when it should start -------------
 
-        name = (process_function.__name__ if hasattr(process_function, '__name__') else "UNNAMED") \
+        name = (forked_function.__name__ if hasattr(forked_function, '__name__') else "UNNAMED") \
             if name is None else name
 
         child = Clock(name, parent=self, initial_rate=initial_rate, initial_tempo=initial_tempo,
                       initial_beat_length=initial_beat_length)
         self._children.append(child)
 
-        if schedule_at is None:
-            start_delay = 0
-        elif isinstance(schedule_at, Real):
-            start_delay = schedule_at - self.beat()
-            if start_delay < 0:
-                logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
-                start_delay = 0
-        else:  # it's a MetricPhaseTarget
-            if not isinstance(schedule_at, MetricPhaseTarget):
-                raise ValueError("`schedule_at` must be either a float or a MetricPhaseTarget")
-            # get_nearest_matching_beats returns the nearest match below and above, in order of nearness
-            # we want the match above, since it's in the future, so we use max
-            start_delay = max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
+        start_delay = self._resolve_start_delay(schedule_at)
 
-        def _process(*args, **kwds):
-            # set the implicit variable __clock__ in this thread
+        # ------------------- STEP 3: Define the child's lifecycle wrapper (_fork_wrapper) -------------------
+
+        def _fork_wrapper(*args, **kwds):
+            # ~~~~~ Wrapper step 1: Thread/clock setup ~~~~~
+            # Bind __clock__ so current_clock() resolves to the child inside the user function,
+            # finalize parent_offset now that start_delay has elapsed, and flip ALIVE.
             threading.current_thread().__clock__ = child
             child.parent_offset += start_delay
-            # start_delay has elapsed; we're now actually running
             child._state = ClockState.ALIVE
 
+            # ~~~~~ Wrapper step 2: Run the user function ~~~~~
             # ClockKilledError fires from inside wait() when kill() wakes us mid-wait.
             # DeadClockError is also possible if a thread from outside the clock system kills the clock while
-            # it's awake and in the middle of running user code. In this case, when the user code completes
-            # what it was doing and reaches its next wait call, it's calling wait on a dead clock, which
-            # raises DeadClockError.
+            # it's awake and in the middle of running user code: when the user code finishes what it was doing
+            # and reaches its next wait call, it's calling wait on a dead clock, which raises DeadClockError.
             try:
-                process_function(*args, **kwds)
-            except ClockKilledError:
-                pass
-            except DeadClockError:
+                forked_function(*args, **kwds)
+            except (ClockKilledError, DeadClockError):
                 pass
 
-            # Remove this sub-clock from the children list of the forking parent (self is the parent)
-            # (the if/in check covers the case where the clock was already removed via kill())
+            # ~~~~~ Wrapper step 3: Cleanup ~~~~~
+            # Detach from the forking parent (self) and mark DEAD. This code is for natural clock exits
+            # and is redundant for killed clocks. (The if/in check exists for the killed case, since
+            # kill already removed the child and trying to remove again would cause a ValueError)
             if child in self._children:
                 self._children.remove(child)
-
             child._state = ClockState.DEAD
 
+            # ~~~~~ Wrapper step 4: Release the scheduler ~~~~~
             # After the user function returns, the scheduler is parked on _scheduler_park_condition
             # (either from the most recent _wake_and_advance_to_next_wait_call, or — if the user function
             # never called wait — from _start_new_clock). Notify it so it can proceed to the next event.
+            # Again, this is redundant for killed clocks, as the _scheduler_park_condition will already
+            # have been notified from within kill()
             with child._scheduler_park_condition:
                 child._scheduler_park_condition.notify_all()
 
+            # ~~~~~ Wrapper Step 5: done_callback if requested by user ~~~~~
             if done_callback is not None:
                 done_callback()
 
+        # ---------- STEP 4: Define the launcher, schedule it, and return the child ----------
+
         def _start_new_clock():
-            # This is run from the scheduler (scheduled below). It launches the forked function and then
-            # parks on the new clock's _scheduler_park_condition, waiting to be freed by the first
-            # wait call in the new clock (or the clean up process in the wrapper for the forked function,
-            # if that function never calls wait).
+            # NB: This is run from the scheduler (scheduled below), so the code should be understood from that
+            # perspective. It is the *scheduler* (and not the parent clock's thread!) that launches the forked
+            # function at the scheduled time, and it's the *scheduler* that is parking on the new clock's
+            # _scheduler_park_condition, waiting to be freed by the first wait call in the new clock
+            # (or the cleanup in _fork_wrapper, if that function never calls wait).
 
             if child._state is ClockState.DEAD:
                 # If kill() was called during the start_delay window, just skip starting the thread.
                 # kill() will have removed this event in most cases, but guard against the race.
                 return
             with child._scheduler_park_condition:
-                threading.Thread(target=_process, args=args, kwargs=kwargs, daemon=True).start()
+                threading.Thread(target=_fork_wrapper, args=args, kwargs=kwargs, daemon=True).start()
                 child._scheduler_park_condition.wait()
 
         self.scheduler.schedule_action(
@@ -599,7 +625,7 @@ class Clock:
 
     def kill(self) -> None:
         """
-        End the process running on this clock and cascade to all descendants.
+        End the function running on this clock and cascade to all descendants.
 
         Removes any queued scheduler events for self/descendants (pending wakeups, pending forks),
         flips state to DEAD, and wakes any parked wait so it raises ClockKilledError. The scheduler
@@ -608,8 +634,8 @@ class Clock:
         This is as good a place as any to clarify the possible code paths for terminating clocks:
 
             SUB-CLOCK, natural end:
-                User function returns inside _process. The except blocks aren't entered.
-                _process removes child from parent._children, sets state=DEAD, then notifies
+                User function returns inside _fork_wrapper. The except blocks aren't entered.
+                _fork_wrapper removes child from parent._children, sets state=DEAD, then notifies
                 _scheduler_park_condition (the scheduler is parked there awaiting our next
                 wait that will never come). Thread exits.
 
@@ -620,11 +646,11 @@ class Clock:
                 parent's _children list. If we were parked inside wait() at STEP 3, we wake at
                 STEP 4a, see DEAD, and raise ClockKilledError. If we weren't in wait, the next
                 wait() raises DeadClockError at the entry check (STEP 1). Either error propagates
-                into _process, which catches it and falls through to the same cleanup as the
+                into _fork_wrapper, which catches it and falls through to the same cleanup as the
                 natural-end path (the cleanup's detach and notify are both idempotent).
 
             MASTER, natural end:
-                Main thread finishes its top-level code. There is no _process wrapper, so no
+                Main thread finishes its top-level code. There is no _fork_wrapper wrapper, so no
                 automatic notify. The scheduler would be left parked on _scheduler_park_condition,
                 but since it's a daemon thread and the process is exiting, this doesn't matter.
                 (Will matter once run_as_server lands and the master runs in a background
@@ -633,7 +659,7 @@ class Clock:
             MASTER, killed:
                 kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
                 _scheduler_park_condition (releasing the scheduler — critical for the master since
-                there's no _process wrapper to do it later). If the main thread is parked inside
+                there's no _fork_wrapper wrapper to do it later). If the main thread is parked inside
                 wait() at STEP 3, it wakes, sees DEAD at STEP 4a, and raises ClockKilledError.
                 Uncaught, the main thread dies and the daemon scheduler dies with the process —
                 but for run_as_server-style scenarios where the scheduler singleton must remain
@@ -673,19 +699,19 @@ class Clock:
         for c in victims:
             # if the victim is parked mid-wait, wake it: it will observe DEAD, raise ClockKilledError
             c._wait_event.set()
-            # If a victim is mid-processing (running user code between waits), the scheduler
+            # If a victim is mid-execution (running user code between waits), the scheduler
             # is parked on its _scheduler_park_condition right now. Free it immediately.
-            # For a sub clock it would eventually be released by _process cleanup, but that will
+            # For a sub clock it would eventually be released by _fork_wrapper cleanup, but that will
             # only happen when the user code hits the next wait and throws a DeadClockError
             # (which could be arbitrarily long & hold up scheduled events). For the master clock
-            # this is critical, because it's not wrapped in _process and would never otherwise release
+            # this is critical, because it's not wrapped in _fork_wrapper and would never otherwise release
             # the scheduler.
             with c._scheduler_park_condition:
                 c._scheduler_park_condition.notify_all()
             # Detach from parent so the parent's _children list is accurate from the moment kill()
-            # returns. _process would normally do this on cleanup, but that can be delayed (user code
+            # returns. _fork_wrapper would normally do this on cleanup, but that can be delayed (user code
             # between waits has to reach its next wait first) or skipped entirely (a PENDING victim
-            # killed during start_delay never has _process run at all).
+            # killed during start_delay never has _fork_wrapper run at all).
             if c.parent is not None and c in c.parent._children:
                 c.parent._children.remove(c)
 

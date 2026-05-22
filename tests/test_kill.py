@@ -156,7 +156,7 @@ class KillTestCase(unittest.TestCase):
     # ---- normal exit cleanup ----
 
     def test_normal_fork_exit_does_not_hang_subsequent_wait(self):
-        """Regression: when a forked _process exits normally, the scheduler's park on
+        """Regression: when a forked _fork_wrapper exits normally, the scheduler's park on
         _scheduler_park_condition must be released so the master can keep going."""
         log = []
 
