@@ -76,7 +76,7 @@ Reads do not mutate `tempo_history` — that would be a write through a getter a
 
 ### Step 3 — Reschedule-on-tempo-change
 
-**Status:** done. `Scheduler.reschedule(matches, recompute)` walks the heap and re-heapifies; `Clock._reschedule_self_and_descendants()` matches by `acting_clock` and recomputes via `clock_to_scheduler_time`; `@_reschedule_after_tempo_change` decorator (clock.py:15) wraps the tempo/rate/beat_length setters and brackets the mutation with `scheduler.held()`.
+**Status:** done. `Scheduler.reschedule(matches, recompute)` walks the heap and re-heapifies; `Clock._reschedule_self_and_descendants()` matches by `acting_clock` and recomputes via `clock_to_scheduler_time`; `@_reschedule_after_tempo_change` decorator wraps the tempo/rate/beat_length setters and brackets the mutation with the locks described in Step 8 (originally `scheduler.held()`, now `while_quiescent()` / `_tree_lock`).
 
 When a tempo setter runs against a clock whose wakeup is already queued (because it's dormant, or because the change affects a descendant's queued wakeup), the heap entry is now wrong. The fix:
 
@@ -123,9 +123,17 @@ Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 
 
 ### Step 8 — External-thread mutation lock
 
-**Status:** done as part of Step 3. `_reschedule_after_tempo_change` (clock.py:15) wraps every tempo setter in `with self.scheduler.held(): ...` unconditionally — simpler than gating on `current_clock()` and harmless when the call is from the owning thread (the scheduler is briefly paused, which is fine because the owning thread isn't waiting on it anyway). Revisit only if profiling shows the unconditional hold is a problem.
+**Status:** done. The original `Scheduler.held()` approach (an unconditional coarse pause via a `threading.Event` gate) is **gone** — it was non-reentrant and stompable (two holders, e.g. a tempo change racing a kill, clobbered each other), and being level-checked at the top of the run loop it couldn't even preempt an action already in flight, so it didn't actually stop the scheduler from waking a clock and racing its `tempo_history` mid-rewrite.
 
-cb2's `Scheduler.held()` context manager already exists (wrapping protected `_hold()` / `_release()`). Wire it into the `@tempo_modification` decorator: if `current_clock() != self` and `self` not in `current_clock().iterate_inheritance()`, do the mutation inside `with scheduler.held(): ...`. Step 3's reschedule logic handles the actual heap update; the hold just prevents the scheduler from firing a now-stale event while the heap is being rewritten.
+Replaced by a three-primitive model (see the block comment at the top of `Scheduler.__init__`, and the `_tree_lock` property in `clock.py`):
+
+- **`_queue_change_condition`** (scheduler) — guards the heap and signals changes to it. The run loop now holds it across peek+compute+wait as a single critical section, fixing a **lost-wakeup**: previously `_get_next_event` and `_wait_for` were two separate acquisitions, so a `reschedule` landing in the gap notified into the void and the loop slept the stale (longer) duration, firing the event late.
+- **`_execution_lock`** (scheduler) — held by the run loop for the full duration of each action's execution, so "held" == "an action is running". Exposed via the `while_quiescent()` context manager: an external thread takes it to mutate action-related state only when no action is in flight. (It can be held across `_execute_event` — unlike the queue lock — precisely because a running clock never needs it, only external mutators do.)
+- **`_clock_tree_lock`** (per family, on the master; via `Clock._tree_lock`) — serializes structural ops on the clock tree. `fork()` (create+append+schedule) and `kill()` (collect+flag+remove) are now atomic against each other, so a fork can't be orphaned by a concurrent kill; `_fork_wrapper` cleanup detaches under it too.
+
+`_reschedule_after_tempo_change` branches on `current_clock()`: an **external** thread (`current_clock() is None`) takes `while_quiescent()` then `_tree_lock`; a call **on a clock's own thread** takes only `_tree_lock`, since the scheduler is already frozen on that clock (a clock-thread call to `while_quiescent()` would self-deadlock). Lock order is `_execution_lock` → `_tree_lock` → `_queue_change_condition`, and the order matters — see the decorator docstring for the deadlock it avoids.
+
+This also hardened Step 3 (the reschedule now runs under `_tree_lock`, so descendant enumeration can't race a concurrent fork/kill) and Step 4 (`kill()` no longer uses the scheduler hold; it relies on `_tree_lock` plus the invariant that every victim observes `DEAD`).
 
 ### Step 9 — Thread-pool for forks
 
