@@ -29,12 +29,23 @@ class Scheduler(threading.Thread):
 
         # Heap-based queue for scheduled events.
         self._queue = []
-        self._queue_lock = threading.Lock()
-        # Condition variable to notify when new events are scheduled.
-        self._new_event = threading.Condition(self._queue_lock)
-        # Hold/release mechanism. When cleared, event processing is paused.
-        self._hold_event = threading.Event()
-        self._hold_event.set()  # Not held by default.
+
+        # Two synchronization primitives, kept deliberately separate. How each is used (and why) lives
+        # where it matters — see run() for _queue_change_condition and while_quiescent() for _execution_lock.
+        #   _queue_change_condition — guards the heap and signals changes to it: anything that reads or
+        #       writes _queue holds it, and notify_all() wakes the run loop to re-evaluate the head.
+        #   _execution_lock — held by the run loop for the full duration of each action's execution, so
+        #       "held" == "mid-action". while_quiescent() takes it to mutate action-related state safely.
+        # Lock order: the run loop never holds _queue_change_condition while taking _execution_lock — if
+        # it did, a running action couldn't modify the queue. For the clock system that's essential:
+        # actions routinely schedule wake-ups, fork, and reschedule after tempo changes.
+        #
+        # The condition uses a plain (non-reentrant) Lock on purpose: every critical section here is flat,
+        # so accidental reentrancy would signal a bug and should deadlock loudly rather than be hidden by
+        # Condition's default RLock. We don't need to keep a reference to the lock object, since
+        # `with self._queue_change_condition:` acquires it directly.
+        self._queue_change_condition = threading.Condition(threading.Lock())
+        self._execution_lock = threading.Lock()
         self._killed = False
 
         # Timing variables.
@@ -48,8 +59,8 @@ class Scheduler(threading.Thread):
         If wake is True, the scheduler is notified to update its state.
         """
         if wake:
-            with self._new_event:
-                self._new_event.notify_all()
+            with self._queue_change_condition:
+                self._queue_change_condition.notify_all()
         return self._ideal_time
 
     def wall_time(self) -> float:
@@ -59,43 +70,40 @@ class Scheduler(threading.Thread):
     def kill(self) -> None:
         """Stop the scheduler."""
         self._killed = True
-        self._hold_event.set()  # unblock _wait_if_held so the loop can exit
-        with self._new_event:
-            self._new_event.notify_all()
-
-    def _hold(self) -> None:
-        """Pause the execution of scheduled events until released."""
-        logger.debug("Scheduler hold activated")
-        self._hold_event.clear()
-
-    def _release(self) -> None:
-        """Resume execution of scheduled events."""
-        logger.debug("Scheduler hold released")
-        self._hold_event.set()
-        with self._new_event:
-            self._new_event.notify_all()
+        # Wake the run loop wherever it's parked on the condition (empty-queue wait or timed wait)
+        # so it observes _killed and exits.
+        with self._queue_change_condition:
+            self._queue_change_condition.notify_all()
 
     @contextmanager
-    def held(self):
-        """Context-manager wrapper around _hold()/_release(). Guarantees release on exception."""
-        self._hold()
-        try:
+    def while_quiescent(self):
+        """
+        Context manager that blocks until the scheduler is *between* actions, and keeps it that way for
+        the body of the `with`. Use it to mutate state that a scheduled action reads or writes without
+        racing that action: while held, no action is executing and the run loop can't start one.
+
+        Implemented by taking `_execution_lock`, which the run loop holds for the full duration of each
+        action. So don't call this from within a scheduled action: you'd block waiting for that action
+        to finish, but it can't finish while it's stuck waiting here.
+
+        (The clock system uses this so a tempo change made from a non-clock thread doesn't rewrite a
+        clock's tempo while a scheduled action is in flight relying on it.)
+        """
+        with self._execution_lock:
             yield self
-        finally:
-            self._release()
 
     def remove_events(self, matches: Callable[['QueueEvent'], bool]) -> int:
         """
         Remove all queued events that satisfy `matches(event)`. Returns the number removed.
         Used when a clock is killed and its pending wakeups (and pending forks) need to be cancelled.
         """
-        with self._new_event:
+        with self._queue_change_condition:
             kept = [e for e in self._queue if not matches(e)]
             removed = len(self._queue) - len(kept)
             if removed:
                 self._queue = kept
                 heapq.heapify(self._queue)
-                self._new_event.notify_all()
+                self._queue_change_condition.notify_all()
         return removed
 
     def reschedule(self, matches: Callable[['QueueEvent'], bool],
@@ -104,7 +112,7 @@ class Scheduler(threading.Thread):
         Walk the heap and recompute `t` for any event that satisfies `matches(event)`.
         Used when a tempo change makes previously-scheduled wakeups stale.
         """
-        with self._new_event:
+        with self._queue_change_condition:
             changed = False
             for i, event in enumerate(self._queue):
                 if matches(event):
@@ -114,42 +122,80 @@ class Scheduler(threading.Thread):
                         changed = True
             if changed:
                 heapq.heapify(self._queue)
-                self._new_event.notify_all()
+                self._queue_change_condition.notify_all()
 
     def schedule_action(self, t: float, action: Callable, priority: Tuple[int, ...] = (0,), metadata: Any = None) -> None:
         """
         Schedule the given action to be executed at time 't' (in seconds since scheduler start).
         """
         event = QueueEvent(t, priority, action, metadata)
-        with self._new_event:
+        with self._queue_change_condition:
             heapq.heappush(self._queue, event)
-            self._new_event.notify_all()
+            self._queue_change_condition.notify_all()
         logger.debug(f"Scheduled event '{metadata}' for time {t}")
 
     def run(self) -> None:
-        """Main scheduler loop, broken into helper methods for clarity."""
+        """
+        Main scheduler loop: wait until the next queued action is due, then execute it, forever.
+
+        The two subtle parts — how the wait is structured around `_queue_change_condition` so a queue
+        change can't be lost, and why execution is wrapped in `_execution_lock` — are explained inline
+        at STEP 1 and STEP 2 below.
+        """
         self._start_time = time.time()
         self._last_wake_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
-            self._hold_event.wait()
-            if self._killed:
-                break
-            next_event = self._get_next_event()
-            if next_event is None:  # only happens on kill
-                break
+            # -------------------------   STEP 1: Wait for the next event -------------------------------
+            # We hold the _queue_change_condition throughout so that nothing modifies the queue while we are
+            # reading from it and calculating the wait time. Note that, since this is a Condition,
+            # the underlying lock is released during self._queue_change_condition.wait(), allowing methods like
+            # schedule_action, reschedule, and remove_events to modify the queue while we are waiting in between
+            # events. Those methods then notify_all() on the condition, which wakes us from wait() to re-check
+            # the now-updated queue.
 
-            now = time.time()
-            relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
-            absolute_wait_dur = self._start_time + next_event.t - now
-            wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
+            with self._queue_change_condition:
+                # ~~~~~~ STEP 1a: If the queue is empty, wait for an event to be scheduled ~~~~~~
+                # This wait is for when the scheduler is alive and nothing is scheduled. So we wait to be notified
+                # that there has been some change to the _queue. Note that kill() also notifies _queue_change_condition,
+                # which wakes us from this wait() and then breaks us out of the run loop after seeing self._killed=True
+                while not self._queue and not self._killed:
+                    self._queue_change_condition.wait()
 
-            self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
+                if self._killed:
+                    break
 
-            if wait_duration > 0:
-                self._wait_for(wait_duration)
-                continue  # Re-check the queue after waiting.
-            self._execute_event(next_event)
+                # ~~~~~~ STEP 1b: Peek at the queue, and calculate wait duration to next scheduled event ~~~~~~
+                next_event = self._queue[0]
+                now = time.time()
+                relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
+                absolute_wait_dur = self._start_time + next_event.t - now
+                wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
+                self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
+
+                # ~~~~~~ STEP 1c: Wait for the next scheduled event (if in the future) ~~~~~~
+                if wait_duration > 0:
+                    # Note that since we've been holding _queue_change_condition, nothing can have changed about the
+                    # queue since we calculated the wait duration. Calling wait releases the underlying lock so that
+                    # functions can now modify the queue. If they do so before the wait_duration has played out,
+                    # they notify _queue_change_condition, wake us up early, and we re-enter the loop so that we
+                    # can recalculate based on the updated queue.
+                    self._queue_change_condition.wait(timeout=wait_duration)
+                    continue
+
+            # NOTE: there is a gap here between waiting for the event time and performing the action, where we are
+            # no longer holding _queue_change_condition. This leaves a window for an external thread to mutate the
+            # queue, which is why we recheck validity at the start of _execute_event and bail if things changed.
+
+            # --------------------------- STEP 2: Perform the scheduled action -------------------------------
+            # Executed events happen under the _execution_lock. If an external thread wants to make sure that
+            # we are not mid-action, it can use the context manager while_quiescent().
+            #
+            # In the context of the Clock system, the scheduled action parks the scheduler and allows the clock
+            # to perform user code until the next wait. clock._reschedule_after_tempo_change uses while_quiescent()
+            # to ensure that we only modify tempo/reschedule events once every clock is dormant again.
+            with self._execution_lock:
+                self._execute_event(next_event)
         logger.info("Scheduler terminated")
 
     def _log_event_timing(self, event: 'QueueEvent', rel_wait: float, abs_wait: float, actual_wait: float) -> None:
@@ -161,36 +207,19 @@ class Scheduler(threading.Thread):
             event.metadata, self._ideal_time, rel_wait, abs_wait, actual_wait,
         )
 
-    def _get_next_event(self) -> QueueEvent | None:
-        """
-        Return the next event in the queue without removing it.
-        If the queue is empty, wait until an event is scheduled (or the scheduler is killed).
-        """
-        with self._new_event:
-            while not self._queue and not self._killed:
-                self._new_event.wait()
-            return self._queue[0] if self._queue else None
-
-    def _wait_for(self, duration: float) -> None:
-        """
-        Wait for the specified duration or until a new event is scheduled.
-        """
-        with self._new_event:
-            self._new_event.wait(timeout=duration)
-
     def _execute_event(self, event: QueueEvent) -> None:
         """
         Remove the event from the queue and execute its action.
         Updates the scheduler's timing metrics accordingly.
         """
-        # Re-acquire the queue lock and confirm the head is still `event` before popping:
-        # between _get_next_event peeking and now, another thread may have pushed a smaller-t
-        # event or rescheduled one to the front. If so, bail and let run() recompute timing
-        # against the new head — otherwise we'd pop the wrong event and execute `event.action`
-        # with stale bookkeeping.
-        # Note that this is not using the condition-specific abilities of _new_event, it's just
-        # blocking actions (like schedule_action) that use those abilities
-        with self._new_event:
+        # Confirm the head is still `event` before popping: between run()'s peek at the queue (Step 1b) and now,
+        # the lock was released, so another thread may have pushed a smaller-t event or rescheduled one to the
+        # front. If so, bail and let run() recompute timing against the new head — otherwise we'd pop the wrong
+        # event and execute `event.action` with stale bookkeeping. We use the condition here purely as the queue
+        # lock (no wait/notify), held only to pop.
+        # The scheduled action then runs unguarded by _queue_change_condition; the mechanism for avoiding racing with
+        # the action is to use scheduler.while_quiescent(), since _execution_lock is held around this whole call.
+        with self._queue_change_condition:
             if self._queue and self._queue[0] == event:
                 heapq.heappop(self._queue)
             else:

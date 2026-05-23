@@ -15,22 +15,49 @@ class TestScheduler(unittest.TestCase):
             self.sched.kill()
             self.sched.join(timeout=1)
 
-    def test_hold_and_release(self):
-        results = []
-        event_executed = threading.Event()
+    def test_while_quiescent_blocks_during_execution(self):
+        # while_quiescent() must not return until no event is executing: _execution_lock is held by
+        # the run loop for the whole duration of an action, so an external caller blocks until it ends.
+        started = threading.Event()
+        finished = threading.Event()
 
         def action():
-            results.append("executed")
-            event_executed.set()
+            started.set()
+            time.sleep(0.3)
+            finished.set()
 
         self.sched = Scheduler(timing_policy=0.5)
         self.sched.start()
-        with self.sched.held():
-            self.sched.schedule_action(0.2, action, metadata="hold_release")
-            time.sleep(0.3)
-            self.assertEqual(results, [])
-        event_executed.wait(timeout=1)
-        self.assertEqual(results, ["executed"])
+        self.sched.schedule_action(0.05, action, metadata="long")
+
+        self.assertTrue(started.wait(timeout=1))
+        self.assertFalse(finished.is_set())  # action is mid-flight
+        with self.sched.while_quiescent():
+            # We only get here once the executing action has finished.
+            self.assertTrue(finished.is_set())
+
+    def test_reschedule_shortens_wait(self):
+        # An event scheduled far out, then rescheduled sooner, must fire at the new (sooner) time.
+        # Exercises the run loop re-peeking the head after a reschedule notify rather than sleeping
+        # the stale, longer duration. (The lost-wakeup window itself is timing-dependent; this is an
+        # end-to-end sanity check that reschedule-then-fire works promptly.)
+        fired_at = {}
+        fired = threading.Event()
+
+        self.sched = Scheduler(timing_policy=1.0)
+        self.sched.start()
+        start = time.time()
+
+        def action():
+            fired_at["t"] = time.time() - start
+            fired.set()
+
+        self.sched.schedule_action(5.0, action, metadata="far")
+        time.sleep(0.2)  # let the scheduler peek the far event and enter its timed wait
+        self.sched.reschedule(lambda e: e.metadata == "far", lambda e: 0.3)
+
+        self.assertTrue(fired.wait(timeout=2), "event did not fire promptly after reschedule")
+        self.assertLess(fired_at["t"], 1.0, f"fired at {fired_at['t']:.3f}s, expected ~0.3s")
 
     def test_priority_order(self):
         results = []
