@@ -105,11 +105,27 @@ Decision: stopped here rather than factor further — the closures capture too m
 
 ### Step 5 — `current_clock()`, top-level `wait()`/`fork()`, `run_as_server`, `wait_forever`
 
-**Status:** partially done. `current_clock()` and module-level `wait()` exist in `cb2/utilities.py`. Still TODO: top-level `fork()` / `fork_unsynchronized()`, `wait_forever`, `wait_for_children_to_finish`, `run_as_server`.
+**Status:** done. `Clock.fork_unsynchronized` / `wait_forever` / `wait_for_children_to_finish` /
+`run_as_server` (clock.py), plus module-level `fork` / `fork_unsynchronized` / `wait_forever` /
+`wait_for_children_to_finish` wrappers in `cb2/utilities.py` delegating to `current_clock()`
+(`current_clock()` and module `wait()` already existed). Tests: `tests/test_module_api.py` (8).
 
-Port from `clockblocks/utilities.py` and `clockblocks/clock.py`. cb2 already uses `threading.current_thread().__clock__ = child` in fork; just need the lookup helper and the module-level wrappers.
+Not a verbatim port — the originals leaned on the abandoned per-parent-queue / `rouse_and_hold` /
+`_wait_keeper` machinery. Adapted to the scheduler model:
+- `wait_forever` loops `self.wait(1.0)`, breaking on `ClockKilledError` / `DeadClockError`.
+- `wait_for_children_to_finish` loops `self.wait(1.0)` until `self._children` is empty. The caller
+  must keep yielding to the scheduler (via `wait`) so the children can actually run, so this polls
+  at 1-beat granularity rather than waking exactly when the last child ends. Good enough for a
+  caller that has nothing left to do; a precise "wake me when children finish" signal (the old
+  rouse mechanism) is deferred.
+- `fork_unsynchronized` spawns a plain daemon `Thread` (no clock bound to it). Step 9's thread pool
+  will replace the raw `Thread` with `_run_in_pool`.
+- `run_as_server` backgrounds the master on a daemon thread that takes ownership
+  (`__clock__ = self`) and calls `wait_forever`; the calling thread relinquishes ownership
+  (`__clock__ = None`) and returns. Adapted (not verbatim) to cb2's `current_clock()`/`wait()`.
 
-`run_as_server` is needed for interactive REPL usage (it backgrounds the master clock thread so the main thread stays interactive). Port verbatim.
+Still TODO from the original surface: `fork()`'s "pass the clock as first arg" convenience and
+`fork_unsynchronized` pool routing (Step 9).
 
 ### Step 6 — Fast-forward
 
@@ -118,6 +134,8 @@ Scheduler-side toggle. In `Scheduler.run`, when fast-forward is active, skip the
 API on `Clock` mirrors original: `fast_forward()`, `fast_forward_to_time`, `fast_forward_in_time`, `fast_forward_to_beat`, `fast_forward_in_beats`, `is_fast_forwarding`.
 
 ### Step 7 — `TimeStamp`
+
+**Revisit scope first:** absolute `Moment`s (`cb2/moment.py`) now cover much of what `TimeStamp` was for — see "TimeStamp vs absolute Moment" under *Possible 1.5 features* before building this.
 
 Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 2 (`scheduler_to_clock_time` against each clock's tempo history). The master `time_stamp_data` dict goes away entirely — caching is unnecessary if resolution is cheap, and resolution is cheap because tempo histories are append-only past the committed point.
 
@@ -138,6 +156,8 @@ This also hardened Step 3 (the reschedule now runs under `_tree_lock`, so descen
 ### Step 9 — Thread-pool for forks
 
 Port `_run_in_pool` + `_pool_semaphore` from original (`clockblocks/clock.py:793-801`). Real perf win when many short forks happen (which scamp does constantly for note playback). Threads-per-fork (cb2's current approach) is fine for correctness but slow.
+
+**Longer-term, eliminate `fork_unsynchronized` for the common case.** Its main use in scamp is high-frequency, low-overhead bursts — glissandi and continuous expression/volume curves — i.e. many MIDI messages with tiny waits between them. The new `Clock.schedule_action()` (leaf callbacks fired directly on the scheduler — no child clock, no per-step scheduler/clock context-switch handoff) is the intended replacement for that pattern: sample the envelope and schedule N sends as leaf events instead of forking a thread that micro-waits. The thread pool here is a stopgap for genuinely thread-y work; the gliss/expression path should move to `schedule_action`. Benchmark first — the single-sleeper scheduler may already remove most of the old per-clock busy-wait lag that motivated `fork_unsynchronized` in the first place.
 
 ### Step 10 — SCAMP integration surface
 
@@ -189,32 +209,28 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 Features that aren't required for 1.0 parity but feel natural to add given the redesign,
 and that the new architecture should make easier than the old one did.
 
-### `ScheduledMoment` and `schedule_at` by time
+### `ScheduledMoment` and `schedule_at` by time — **landed early as `Moment`**
 
-The `schedule_at` parameter on `fork()` currently accepts a beat number or a `MetricPhaseTarget`.
-Two extensions worth doing:
+This was originally a 1.5 idea but ended up implemented as part of the wait/fork-`when` work, not
+deferred. Both extensions are done (`cb2/moment.py`):
 
-1. **Allow scheduling by time instead of beat.** Any clock with `tempo != 60` has diverging
-   beat and time axes; "fire at beat N" and "fire after N seconds" are different points.
-   Currently `schedule_at` only speaks beats. API options: a `units="time"|"beats"` kwarg
-   alongside `schedule_at`, or a thin wrapper type.
+- The "when" vocabulary is a **`ResolvableMoment`**: `Moment.at_beat` / `at_time` / `after_beats` /
+  `after_time`, or a `MetricPhaseTarget` (which now also `resolve()`s, in beats or time). Scheduling by
+  time vs beat is just a `Moment`'s `units`. A bare number is accepted only where the method name fixes
+  its meaning: `wait(duration)` (relative) and `wait_until(when)` (absolute). `fork(when=…)` and
+  `schedule_action(when=…)` *require* an explicit Moment — a bare number there is rejected with a
+  `TypeError`, since "when" alone wouldn't say whether it's relative or absolute.
+- Event metadata stores the absolute `target_moment`, and `_reschedule_self_and_descendants` calls
+  `moment.scheduler_time(acting_clock)` on tempo changes — preserving beat *or* time as the moment
+  dictates. New kinds of moment can be added without touching the reschedule logic.
 
-2. **Introduce a `ScheduledMoment` (working name) class** that unifies the various ways to
-   specify a future point in time:
-   - fixed beat
-   - fixed time
-   - `MetricPhaseTarget` (next occurrence of a phase within a cycle)
-   - possibly other future kinds (e.g. "at the next downbeat after beat X")
-
-   This is conceptually distinct from `TimeStamp` (Step 7): a `TimeStamp` is a *resolved* moment
-   that's already pinned to scheduler time and can be translated to any clock's frame.
-   A `ScheduledMoment` is a *proposal* — a recipe for computing when something should happen,
-   which may need re-evaluation if tempo changes between when it's specified and when it fires.
-
-   The fork-event metadata would store the `ScheduledMoment` rather than a raw `target_beat`,
-   and `_reschedule_self_and_descendants` would call `moment.resolve(parent_clock)` to recompute
-   scheduler time on tempo changes. Same hook would let us add new kinds of moments later without
-   touching the reschedule logic.
+**Open question — `TimeStamp` (Step 7) vs absolute `Moment` (revisit during SCAMP integration).**
+An absolute `Moment` is a *resolved* point pinned to a clock's beat or time, which is close to what
+`TimeStamp` was meant to be. They may not be identical — a `TimeStamp` is clock-agnostic (a
+scheduler-time translatable to *any* clock's frame), whereas an absolute `Moment` is tied to one
+clock's beat/time axis — but once SCAMP adopts the new clockblocks, reconsider whether `TimeStamp` is
+still needed or is subsumed by `Moment` (e.g. a `Moment` that resolves against the scheduler, or a
+thin adapter). Don't build `TimeStamp` until this is settled.
 
 ### Externally-driven scheduler clock
 

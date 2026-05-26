@@ -36,6 +36,20 @@ class WrongThreadError(ClockblocksError):
     pass
 
 
+class NoActiveClockError(ClockblocksError):
+    """Raised when a clock operation (the module-level wait/fork/etc.) is attempted from a thread
+    that has no clock active on it. Establish one with fork() / run_as_server(), or call the method
+    on a Clock object directly. (Threads spawned by fork_unsynchronized are exempt for the
+    sleep-based waits — see fork_unsynchronized.)"""
+    pass
+
+
+class NotMasterClockError(ClockblocksError):
+    """Raised by operations that are only valid on the master (top-level) clock — e.g.
+    run_as_server() — when called on a child clock."""
+    pass
+
+
 class ClockState(Enum):
     PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
     ALIVE = "alive"      # forked_function is running (or about to run)
@@ -107,6 +121,10 @@ class Clock:
 
         self._scheduler_park_condition = threading.Condition()
         self._wait_event = threading.Event()
+        # Set while this clock is parked in wait_for_children_to_finish(). It scheduled no wakeup of its
+        # own (an indefinite _wait(None)), so _detach_child watches this flag and, when the last child
+        # detaches, schedules the wakeup that releases it. See _detach_child / wait_for_children_to_finish.
+        self._waiting_for_children = False
 
         if self.is_master():
             # The whole family shares one structural lock, owned by the master. fork / kill / external
@@ -178,6 +196,30 @@ class Clock:
         :return: tuple of all child clocks of this clock
         """
         return tuple(self._children)
+
+    def _detach_child(self, child: 'Clock') -> None:
+        """
+        Remove `child` from this clock's child list. The caller must hold `_tree_lock` (both call sites —
+        _fork_wrapper's natural-exit cleanup and kill()'s teardown — already do).
+
+        If this clock is alive and parked in wait_for_children_to_finish(), and `child` was the last one,
+        release it by scheduling an immediate _wake_and_advance_to_next_wait_call on the scheduler. This
+        is the same wake mechanism as a normally scheduled wake up; it's just that in this case it is triggered
+        by observing all children have finished and scheduled immediately.
+        
+        We go through the scheduler (rather than just setting _wait_event) so the parent resumes in the normal
+        post-wait state — woken with the scheduler re-parked on its own _scheduler_park_condition — and is
+        free to wait() again. The detaching child is mid-cleanup with the scheduler parked on *its*
+        condition; once it releases the scheduler, that immediate event is the next thing to run.
+        """
+        if child in self._children:
+            self._children.remove(child)
+        if self._waiting_for_children and not self._children and self._state is ClockState.ALIVE:
+            self._waiting_for_children = False
+            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
+                                           self.clock_id,
+                                           {"description": f"{self} wake (children finished)",
+                                            "acting_clock": self})
 
     def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
         """
@@ -625,11 +667,11 @@ class Clock:
                 # ~~~~~ Wrapper step 3: Cleanup ~~~~~
                 # Detach from the forking parent (self) and mark DEAD, under _tree_lock so it's
                 # consistent with kill()'s detach and with any concurrent fork/kill. This is for natural
-                # exits and is redundant for killed clocks (the `in` check guards the killed case, where
-                # kill already removed the child — a second remove would raise ValueError).
+                # exits and is redundant for killed clocks.
                 with self._tree_lock:
-                    if child in self._children:
-                        self._children.remove(child)
+                    # _detach_child does the list removal and, if this was the last child of a parent
+                    # blocked in wait_for_children_to_finish(), releases it.
+                    self._detach_child(child)
                     child._state = ClockState.DEAD
 
                 # ~~~~~ Wrapper step 4: Release the scheduler ~~~~~
@@ -699,6 +741,76 @@ class Clock:
             moment = to_absolute_moment(when, self, allow_number=False)
             self._schedule_at(moment, lambda: action(*args, **kwargs), self.clock_id,
                               description=f"Scheduled action on {self}")
+
+    def fork_unsynchronized(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
+        """
+        Run `forked_function` on a plain background thread — *not* a child clock, and not synchronized
+        to musical time. Use this for side work (I/O, GUI callbacks, etc.) that shouldn't participate
+        in the scheduler. `current_clock()` is None inside it and it cannot fork child clocks, but its
+        thread is tagged "unsynchronized" so it *may* still call the sleep-based wait()/wait_forever()
+        — those become plain real-time sleeps (no tempo, so `units` is ignored).
+
+        (Step 9 will route this through a reusable thread pool; for now it spawns a daemon Thread.)
+        """
+        _spawn_unsynchronized(forked_function, args, kwargs)
+
+    def wait_forever(self) -> None:
+        """
+        Block this clock's own thread indefinitely, yielding to the scheduler so child clocks keep
+        running. Typically called once a clock has forked its work and has nothing left to do itself
+        (e.g. the master clock keeping the main thread alive). Returns when the clock is killed.
+
+        Implemented as a single _wait(None): no wakeup is scheduled, so the clock simply parks until
+        kill() wakes it.
+        """
+        try:
+            self._wait(None)
+        except (ClockKilledError, DeadClockError):
+            pass
+
+    def wait_for_children_to_finish(self) -> None:
+        """
+        Block this clock's own thread until all of its child clocks have finished, yielding to the
+        scheduler so they can run, then return as soon as the last child ends.
+        """
+        # Park on an indefinite _wait(None) (no scheduled wake-up); _detach_child watches
+        # _waiting_for_children and schedules the wakeup that releases us when the last child detaches.
+        with self._tree_lock:
+            # _tree_lock guards against a non-clock thread killing the last child in between checking for
+            # children and setting self._waiting_for_children = True. If this happened, the _detach_child
+            # call from kill() would see _waiting_for_children still False and so schedule no releasing
+            # wakeup; we'd then set the flag True and park on _wait(None) with no child left to release us
+            if not self._children:
+                return
+            self._waiting_for_children = True
+        try:
+            self._wait(None)
+        except (ClockKilledError, DeadClockError):
+            pass
+        finally:
+            self._waiting_for_children = False
+
+    def run_as_server(self) -> 'Clock':
+        """
+        Run this (master) clock on a background daemon thread so the calling thread stays free — the
+        approach for driving clockblocks from an interactive REPL: ``c = Clock().run_as_server()``.
+        The background thread becomes the clock's owning thread and waits forever; the calling thread
+        relinquishes ownership (its `current_clock()` becomes None), so further work must be forked on
+        the returned clock object directly (``c.fork(...)``), not via the module-level helpers. Returns
+        self. Only valid on the master clock — raises NotMasterClockError on a child.
+        """
+        if not self.is_master():
+            raise NotMasterClockError(
+                f"run_as_server() is only valid on the master clock, not {self}.")
+
+        def run_server():
+            threading.current_thread().__clock__ = self
+            self.wait_forever()
+
+        threading.Thread(target=run_server, daemon=True).start()
+        # The calling thread no longer owns this clock.
+        threading.current_thread().__clock__ = None
+        return self
 
     @property
     def alive(self) -> bool:
@@ -802,9 +914,11 @@ class Clock:
                 # Detach from parent so the parent's _children list is accurate from the moment kill()
                 # returns. _fork_wrapper would normally do this on cleanup, but that can be delayed (user code
                 # between waits has to reach its next wait first) or skipped entirely (a PENDING victim
-                # killed during start_delay never has _fork_wrapper run at all).
-                if c.parent is not None and c in c.parent._children:
-                    c.parent._children.remove(c)
+                # killed during start_delay never has _fork_wrapper run at all). If the parent isn't itself
+                # a victim and was blocked in wait_for_children_to_finish(), _detach_child releases it
+                # (a parent that *is* a victim is already DEAD here, so it gets no spurious wake).
+                if c.parent is not None:
+                    c.parent._detach_child(c)
 
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)
