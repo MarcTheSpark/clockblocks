@@ -1,12 +1,12 @@
-from enum import Enum
+from enum import StrEnum
 
 
-class DurationUnits(str, Enum):
+class DurationUnits(StrEnum):
     BEATS = "beats"
     TIME = "time"
 
 
-class TempoUnits(str, Enum):
+class TempoUnits(StrEnum):
     TEMPO = "tempo"
     RATE = "rate"
     BEATLENGTH = "beatlength"

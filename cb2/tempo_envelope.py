@@ -553,7 +553,8 @@ class TempoHistory(TempoEnvelope):
         :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
             part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
             the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
+            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
         """
@@ -613,7 +614,8 @@ class TempoHistory(TempoEnvelope):
         :param beat_length_targets: list of the target beat_lengths
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
         :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
+            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
@@ -746,7 +748,9 @@ class TempoHistory(TempoEnvelope):
         :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
             part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
             the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
+            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase
+            constrains is fixed here by ``duration_units``, as described above.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
         """
@@ -765,7 +769,9 @@ class TempoHistory(TempoEnvelope):
         :param rate_targets: list of the target beat rates
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
         :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
+            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase constrains is
+            fixed here by ``duration_units``.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
@@ -788,7 +794,9 @@ class TempoHistory(TempoEnvelope):
         :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
             part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
             the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor
+            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
+            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase
+            constrains is fixed here by ``duration_units``, as described above.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
         """
@@ -807,7 +815,9 @@ class TempoHistory(TempoEnvelope):
         :param tempo_targets: list of the target tempos
         :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
         :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase)
+        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
+            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase constrains is
+            fixed here by ``duration_units``.)
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
             seconds/parent beats.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
@@ -860,7 +870,8 @@ class TempoHistory(TempoEnvelope):
         want to be at time 1.25, 4.25, 7.25, etc.
 
         :param beat: The beat at which to have the given phase in time
-        :param metric_phase_target: either a :class:`MetricPhaseTarget`, or the argument to construct one
+        :param metric_phase_target: either a :class:`MetricPhaseTarget`, or the argument to construct one. (If a
+            MetricPhaseTarget object is passed, its own ``units`` is ignored: here the phase is always in time.)
         :return: True, if the adjustment is possible, False if not
         """
         if beat > self.length() or beat <= self.beat():
@@ -973,7 +984,8 @@ class TempoHistory(TempoEnvelope):
         to be at beat 1.25, 4.25, 7.25, etc.
 
         :param target_time: The time at which to have the given phase in beat
-        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one
+        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one. (If a
+            MetricPhaseTarget object is passed, its own ``units`` is ignored: here the phase is always in beats.)
         :return: True, if the adjustment is possible, False if not
         """
 

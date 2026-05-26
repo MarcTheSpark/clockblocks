@@ -1,28 +1,39 @@
 import math
-from typing import Union, Sequence, Tuple
+from typing import Union, Sequence, Tuple, TYPE_CHECKING
 from cb2.utilities import current_clock
+from cb2.moment import Moment
+from cb2.enums import DurationUnits
+if TYPE_CHECKING:
+    from cb2.clock import Clock
 
 
 class MetricPhaseTarget:
 
     """
-    Class representing a particular point in a (beat or measure) cycle.
+    Class representing a particular point in a (beat or measure) cycle. Implements the ResolvableMoment
+    protocol, so a MetricPhaseTarget can be passed anywhere a Moment can: wait / wait_until /
+    fork / schedule_action.
 
     :param phase_or_phases: Where we are in the cycle.
     :param divisor: Length of the cycle (defaults to one beat, meaning that this specifies where we are in the beat)
     :param relative: Whether or not the start of the cycle is measured relative to the current beat/time or to the
         start of the clock.
+    :param units: "beats" (default) or "time" — whether the phase and divisor are measured in the clock's beats or
+        in its time. (Note: `units` governs resolve() only. Consumers that already choose an axis from their own
+        context (e.g. certain methods of TempoEnvelope) ignore this attribute.
     """
 
-    def __init__(self, phase_or_phases: Union[float, Sequence[float]], divisor: float = 1, relative: bool = False):
+    def __init__(self, phase_or_phases: Union[float, Sequence[float]], divisor: float = 1, relative: bool = False,
+                 units: str | DurationUnits = "beats"):
         self.phases = (phase_or_phases, ) if not hasattr(phase_or_phases, "__len__") else phase_or_phases
         if not all(0 <= x < divisor for x in self.phases):
             raise ValueError("One or more phases out of range for divisor.")
         self.divisor = divisor
         self.relative = relative
+        self.units = DurationUnits(units)
 
     @classmethod
-    def interpret(cls, value: Union[float, Sequence]) -> 'MetricPhaseTarget':
+    def interpret(cls, value: float| Sequence) -> 'MetricPhaseTarget':
         """
         Interpret a tuple or just a number as a MetricPhaseTarget. E.g. we want the user to be able to hand in a tuple
         like (0.5, 3) and have it get interpreted as a target of 0.5 with divisor 3.
@@ -81,9 +92,22 @@ class MetricPhaseTarget:
         else:
             return self._get_nearest_matches(time)
 
+    def resolve(self, clock: 'Clock') -> Moment:
+        """
+        Resolve this phase target to an absolute Moment on `clock`: the nearest *future* moment in the clock
+        (either a beat or time, depending on self.units) whose metric phase matches. Satisfies the ResolvableMoment
+        protocol.
+        """
+        # get_nearest_matching_* returns the nearest match below and above, in order of nearness;
+        # we want the match above, since it's in the future, so we use max.
+        if self.units == DurationUnits.BEATS:
+            return Moment.at_beat(max(*self.get_nearest_matching_beats(clock.beat())))
+        return Moment.at_time(max(*self.get_nearest_matching_times(clock.time())))
+
     def __repr__(self):
-        return "MetricPhaseTarget({}{}{})".format(
+        return "MetricPhaseTarget({}{}{}{})".format(
             str(self.phases[0]) if hasattr(self.phases, "__len__") else self.phases,
             (", " + str(self.divisor)) if self.divisor != 1 else "",
             ", True" if self.relative else "",
+            f", units='{self.units.value}'" if self.units != DurationUnits.BEATS else "",
         )
