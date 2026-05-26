@@ -82,14 +82,25 @@ class Moment:
 
 def to_absolute_moment(when: float | ResolvableMoment | None, clock: Clock, *,
                        units_if_number: str | DurationUnits = DurationUnits.BEATS,
-                       relative_if_number: bool = True) -> Moment:
+                       relative_if_number: bool = True,
+                       allow_number: bool = True) -> Moment:
     """
-    Coerce a `when` argument into an absolute Moment on `clock`. A bare number is wrapped per the
-    caller's convention (`units_if_number` / `relative_if_number`); None is treated as "now" (relative 0);
-    anything else is assumed to be a ResolvableMoment and resolved.
+    Coerce a `when` argument into an absolute Moment on `clock`. None is treated as "now" (relative 0);
+    anything that isn't None or a number is assumed to be a ResolvableMoment and resolved.
+
+    A bare number is handled per `allow_number`: when True (wait()/wait_until(), whose names fix the
+    meaning) it is wrapped using the caller's convention (`units_if_number` / `relative_if_number`); when
+    False (fork()/schedule_action(), where "when" alone wouldn't say whether a number is relative or
+    absolute) a number raises TypeError, steering the caller to an explicit Moment.
     """
     if when is None:
-        when = 0
+        return Moment(0, DurationUnits.BEATS, relative=True).resolve(clock)
     if isinstance(when, (int, float)):
+        if not allow_number:
+            raise TypeError(
+                "`when` must be a Moment or MetricPhaseTarget here, not a bare number — its meaning would "
+                "be ambiguous. Use Moment.at_beat(n) / Moment.at_time(s) for an absolute point, or "
+                "Moment.after_beats(n) / Moment.after_time(s) for an offset from now."
+            )
         return Moment(when, units_if_number, relative=relative_if_number).resolve(clock)
     return when.resolve(clock)

@@ -1,15 +1,13 @@
 import functools
-import logging
 import threading
 from enum import Enum
 from itertools import count
-from numbers import Real
-from typing import Callable, Sequence, Union, Iterator
+from typing import Callable, Sequence, Iterator
 from cb2.tempo_envelope import TempoHistory
 from cb2.scheduler import get_scheduler, Scheduler
-from cb2.metric_phase import MetricPhaseTarget
+from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.enums import DurationUnits
-from cb2.utilities import _PrintColors, current_clock
+from cb2.utilities import _PrintColors, current_clock, _spawn_unsynchronized
 import textwrap
 
 
@@ -396,8 +394,9 @@ class Clock:
     def _reschedule_self_and_descendants(self):
         """
         After a tempo change on self, any queued scheduler-event whose `acting_clock` is self or a
-        descendant of self has a stale `t` (computed against the old tempo curve). Recompute via
-        clock_to_scheduler_time(target_beat) for each match.
+        descendant of self has a stale `t` (computed against the old tempo curve). Recompute the
+        scheduler-time of each match from its target Moment, which re-derives it under the new tempo
+        while preserving whichever of beat/time the Moment expresses.
         """
         affected = {id(c) for c in self.iterate_descendants(include_self=True)}
 
@@ -406,11 +405,11 @@ class Clock:
             if not isinstance(meta, dict):
                 return False
             ac = meta.get("acting_clock")
-            return ac is not None and id(ac) in affected and "target_beat" in meta
+            return ac is not None and id(ac) in affected and "target_moment" in meta
 
         def recompute(event):
             meta = event.metadata
-            return meta["acting_clock"].clock_to_scheduler_time(meta["target_beat"])
+            return meta["target_moment"].scheduler_time(meta["acting_clock"])
 
         self.scheduler.reschedule(matches, recompute)
 
@@ -418,21 +417,57 @@ class Clock:
     #                                              Waiting and Forking
     ##################################################################################################################
 
-    def wait(self, dt, units="beats"):
+    def _schedule_at(self, moment: Moment, action: Callable, priority: tuple,
+                     description: str = None, extra_metadata: dict = None) -> None:
         """
-        Block this clock for `dt` beats (or seconds, if units="time"), yielding to the scheduler.
+        Enqueue `action` on the scheduler at the (absolute) `moment` on this clock, tagged so the
+        shared machinery handles it: `acting_clock` + `target_moment` let a tempo change reschedule it
+        (preserving whichever of beat/time the moment expresses) and let kill() cancel it. This is the
+        single scheduling path behind wait(), schedule_action(), and fork().
+        """
+        meta = {"description": description or f"Action on {self}",
+                "acting_clock": self,
+                "target_moment": moment}
+        if extra_metadata:
+            meta.update(extra_metadata)
+        self.scheduler.schedule_action(moment.scheduler_time(self), action, priority, meta)
 
-        Implemented in four steps:
-            (1) reject the call if this clock isn't ALIVE, or if we're not on this clock's own thread;
-            (2) compute the wake-up time and queue a wake-up event on the scheduler;
+    def wait(self, duration: float | ResolvableMoment, units: str = "beats") -> None:
+        """
+        Block this clock for `duration` beats (or seconds, if units="time") from now, yielding to the
+        scheduler. `duration` may also be any ResolvableMoment (a Moment or MetricPhaseTarget), in
+        which case it is resolved directly and `units` is ignored — e.g. wait(Moment.at_beat(8)) or
+        wait(MetricPhaseTarget(0, 4)). wait_until() is just a convenience for absolute targets given as
+        a bare number; passing an absolute Moment to wait() does the same thing.
+        """
+        self._wait(to_absolute_moment(duration, self, units_if_number=units, relative_if_number=True))
+
+    def wait_until(self, when: float | ResolvableMoment, units: str = "beats") -> None:
+        """
+        Block this clock until the beat (or time, if units="time") indicated by `when` — a convenience
+        for absolute targets given as a bare number (equivalent to wait(Moment.at_beat(when)), or
+        Moment.at_time for units="time"). `when` may also be any ResolvableMoment, resolved directly
+        (units ignored). If `when` is in the past, returns essentially immediately.
+        """
+        self._wait(to_absolute_moment(when, self, units_if_number=units, relative_if_number=False))
+
+    def _wait(self, moment: Moment | None) -> None:
+        """
+        Underlying implementation for user-facing wait methods: blocks until the (absolute) `moment` on
+        this clock. wait() and wait_until() are thin front-ends that resolve their arguments to a Moment
+        and call this. `moment=None` means "wait forever" — schedule no wakeup at all and park until the
+        clock is killed (used by wait_forever()).
+
+        Four steps:
+            (1) reject if this clock isn't ALIVE, or we're not on its own thread;
+            (2) unless moment is None, queue the wake-up event (via _schedule_at) for `moment`;
             (3) hand off to the scheduler and block;
-            (4) clean up on wake — raising ClockKilledError if we were killed mid-wait, otherwise advancing the
+            (4) on wake, raise ClockKilledError if killed mid-wait, otherwise advance the
                 committed pointer in tempo_history to reflect the post-wait beat/time.
 
-        See in-line STEP comments for details and see the `kill()` docstring for the full picture
+        See in-line comments for details on each step and see the `kill()` docstring for the full picture
         of how clocks terminate.
         """
-
         # --------------------- STEP 1: Validity checks (state and thread) ---------------------
 
         if self._state is not ClockState.ALIVE:
@@ -451,26 +486,13 @@ class Clock:
                 f"wait() on {self} must be called from its own thread (use current_clock().wait(...))."
             )
 
-        # ------------------- STEP 2: Calculate and schedule wake up in scheduler --------------------
+        # ------------------- STEP 2: Schedule the wake-up for `moment` --------------------
 
-        units = DurationUnits(units)
-        if units == DurationUnits.BEATS:
-            wake_up_beat = self.beat() + dt
-            wake_up_time = self.tempo_history.time_at_beat(wake_up_beat)
-        else:
-            wake_up_time = self.time() + dt
-            wake_up_beat = self.tempo_history.beat_at_time(wake_up_time)
-        wake_up_time_in_scheduler = self.clock_to_scheduler_time(wake_up_time, units="time")
-
-        # queue the wake-up event with the scheduler
-        self.scheduler.schedule_action(
-            wake_up_time_in_scheduler,
-            self._wake_and_advance_to_next_wait_call,
-            self.clock_id,
-            {"description": f"{self} wakeup action",
-             "acting_clock": self,
-             "target_beat": wake_up_beat}
-        )
+        # moment is None signifies an indefinite wait where the only thing that can wake us (below)
+        # is kill() setting our _wait_event. Otherwise queue the wake-up that fires when we reach `moment`.
+        if moment is not None:
+            self._schedule_at(moment, self._wake_and_advance_to_next_wait_call, self.clock_id,
+                              description=f"{self} wakeup action")
 
         # ---------------------------- STEP 3: Hand off to the scheduler -----------------------------
 
@@ -497,10 +519,12 @@ class Clock:
         if self._state is ClockState.DEAD:
             raise ClockKilledError()
 
-        # ~~~~~ Step 4b: Update self.tempo_history to reflect new time post-wait ~~~~~
-        # advance the committed pointer of tempo_history from where it was to where we just woke up.
-        # Use tempo_history.beat() directly (not self.beat(), which is the live scheduler-derived position).
-        self.tempo_history.advance(wake_up_beat - self.tempo_history.beat())
+        # ~~~~~ Step 4b: Advance tempo_history's committed pointer to the beat we woke at ~~~~~
+        # bring_up_to_date() advances self.tempo_history's committed pointer to self.beat(), the live
+        # scheduler-derived position. Note that since were polling self.beat() now, this is robust even
+        # in the case of a time-based wakeup where the tempo has changed since it was scheduled.
+        # The internal >0 guard also keeps a past/now target from rewinding.
+        self.bring_up_to_date()
 
     def _wake_and_advance_to_next_wait_call(self):
         """
@@ -511,31 +535,9 @@ class Clock:
             self._wait_event.set()
             self._scheduler_park_condition.wait()
 
-    def _resolve_start_delay(self, schedule_at: Union[float, MetricPhaseTarget, None]) -> float:
-        """
-        Translate fork()'s `schedule_at` into a delay, in this (the parent) clock's beats, from now.
-
-            None              -> 0 (start immediately)
-            a beat number     -> that beat minus the current beat (clamped to 0 if it's in the past)
-            MetricPhaseTarget -> the delay to the next beat matching the requested phase
-        """
-        if schedule_at is None:
-            return 0
-        if isinstance(schedule_at, Real):
-            start_delay = schedule_at - self.beat()
-            if start_delay < 0:
-                logging.warning("`schedule_at` argument specified a beat in the past; forking immediately.")
-                return 0
-            return start_delay
-        if isinstance(schedule_at, MetricPhaseTarget):
-            # get_nearest_matching_beats returns the nearest match below and above, in order of nearness;
-            # we want the match above, since it's in the future, so we use max
-            return max(*schedule_at.get_nearest_matching_beats(self.beat())) - self.beat()
-        raise ValueError("`schedule_at` must be either a float, a MetricPhaseTarget, or None")
-
     def fork(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
-             schedule_at: Union[float, MetricPhaseTarget] = None, done_callback: Callable[[], None] = None):
+             when: ResolvableMoment | None = None, done_callback: Callable[[], None] = None):
         """
         Spawns a child clock running `forked_function` as a coordinated parallel timeline.
 
@@ -556,13 +558,12 @@ class Clock:
         :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
         :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
         :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
-        :param schedule_at: either a beat or a :class:`~clockblocks.tempo_envelope.MetricPhaseTarget` specifying when we
-            want the forked function to begin. The default value of None indicates that it is to begin immediately. A
-            float indicates the beat in this clock at which the forked function is to start (should be in the future).
-            Alternatively, a MetricPhaseTarget can be used to specify where in a regular cycle it should begin.
-            For instance, if we want to sync every fork to 3/4 time, MetricPhaseTarget(0, 3) would start it on
-            the downbeat, MetricPhaseTarget(1, 3) would start it on beat 2, and MetricPhaseTarget(2.5, 3) would start it
-            halfway through beat 3.
+        :param when: when the forked function should begin, as a :class:`~cb2.moment.ResolvableMoment`.
+            None (default) starts it immediately. Otherwise pass an explicit Moment — :meth:`Moment.at_beat`
+            (or :meth:`Moment.at_time`) for an absolute point, or :meth:`Moment.after_beats`
+            (or :meth:`Moment.after_time`) for an offset from now. Unlike wait and wait_until, a bare
+            number is rejected here, since it's not clear whether it would be relative or absolute. Also possible
+            is a :class:`~cb2.metric_phase.MetricPhaseTarget` which starts it at the next matching point in a cycle.
         :param done_callback: a callback function to be invoked when the clock has terminated
         :return: the spawned child clock
         """
@@ -592,16 +593,23 @@ class Clock:
                           initial_beat_length=initial_beat_length)
             self._children.append(child)
 
-            start_delay = self._resolve_start_delay(schedule_at)
+            # Resolve `when` to an absolute moment on this (the parent) clock; the scheduled fork event
+            # fires at that moment (and gets rescheduled with it if the tempo changes — see _schedule_at).
+            # allow_number=False: a bare number's relative/absolute meaning is ambiguous here, so require
+            # an explicit Moment (None still means "now").
+            start_moment = to_absolute_moment(when, self, allow_number=False)
 
             # ------------------- STEP 3: Define the child's lifecycle wrapper (_fork_wrapper) -------------------
 
             def _fork_wrapper(*args, **kwds):
                 # ~~~~~ Wrapper step 1: Thread/clock setup ~~~~~
                 # Bind __clock__ so current_clock() resolves to the child inside the user function,
-                # finalize parent_offset now that start_delay has elapsed, and flip ALIVE.
+                # finalize parent_offset / _start_time_in_scheduler, and flip ALIVE. Both are read now,
+                # at the actual fire instant, so they reflect where the child truly starts — correct no
+                # matter how the fork event was rescheduled in the interim (e.g. by a tempo change).
                 threading.current_thread().__clock__ = child
-                child.parent_offset += start_delay
+                child.parent_offset = self.beat()
+                child._start_time_in_scheduler = self.scheduler.time()
                 child._state = ClockState.ALIVE
 
                 # ~~~~~ Wrapper step 2: Run the user function ~~~~~
@@ -654,16 +662,43 @@ class Clock:
                     threading.Thread(target=_fork_wrapper, args=args, kwargs=kwargs, daemon=True).start()
                     child._scheduler_park_condition.wait()
 
-            self.scheduler.schedule_action(
-                self.clock_to_scheduler_time(self.beat() + start_delay),
-                _start_new_clock,
-                child.clock_id,
-                {"description": f"Forking of {child}",
-                 "acting_clock": self,
-                 "forked_child": child,
-                 "target_beat": self.beat() + start_delay}
-            )
+            self._schedule_at(start_moment, _start_new_clock, child.clock_id,
+                              description=f"Forking of {child}",
+                              extra_metadata={"forked_child": child})
             return child
+
+    def schedule_action(self, action: Callable, when: ResolvableMoment,
+                        args: Sequence = (), kwargs: dict = None) -> None:
+        """
+        The lightweight alternative to fork() for immediately returning functions. Schedules `action` to
+        run once at `when`, as a leaf event on the scheduler thread — without spawning a child clock.
+        For functions that don't wait, this is much more performant: there is no thread creation, no
+        scheduler/clock handoff; just a callable fired at the right musical time.
+
+        For work that needs to wait, fork() a child clock instead. The function scheduled here will not
+        have an active clock to wait on, and will hold up the entire scheduler if it sleeps.
+
+        :param action: the callable to run (exceptions are caught and logged by the scheduler)
+        :param when: when to run it, as a :class:`~cb2.moment.ResolvableMoment` — same convention as
+            fork(): an explicit Moment (Moment.at_beat/at_time for an absolute point, Moment.after_beats/
+            after_time for an offset from now) or a MetricPhaseTarget. Unlike wait and wait_until, a bare
+            number is rejected here, since it's not clear whether it would be relative or absolute.
+        :param args: positional arguments to pass to action
+        :param kwargs: keyword arguments to pass to action
+        """
+        kwargs = {} if kwargs is None else kwargs
+
+        # Atomic against kill(), exactly like fork(): under _tree_lock, either we observe DEAD and
+        # refuse, or we push the event and a concurrent kill() then finds and cancels it (kill()'s
+        # matcher keys on acting_clock, which is self).
+        with self._tree_lock:
+            if self._state is not ClockState.ALIVE:
+                raise DeadClockError(
+                    f"Cannot schedule_action on a clock that is {self._state.value} (not ALIVE)."
+                )
+            moment = to_absolute_moment(when, self, allow_number=False)
+            self._schedule_at(moment, lambda: action(*args, **kwargs), self.clock_id,
+                              description=f"Scheduled action on {self}")
 
     @property
     def alive(self) -> bool:

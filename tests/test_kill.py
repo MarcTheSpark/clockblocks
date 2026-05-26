@@ -2,6 +2,7 @@ import threading
 import unittest
 
 from cb2.clock import Clock, ClockKilledError, DeadClockError, ClockState, WrongThreadError
+from cb2.moment import Moment
 from cb2.utilities import current_clock
 from cb2 import scheduler as scheduler_mod
 
@@ -75,7 +76,7 @@ class KillTestCase(unittest.TestCase):
 
     def test_fork_on_pending_clock_raises_dead_clock_error(self):
         """A PENDING clock can't be forked from — it's neither dead nor alive yet."""
-        child = self.master.fork(lambda: None, schedule_at=1.0)
+        child = self.master.fork(lambda: None, when=Moment.after_beats(1.0))
         self.assertIs(child._state, ClockState.PENDING)
         with self.assertRaises(DeadClockError):
             child.fork(lambda: None)
@@ -107,7 +108,7 @@ class KillTestCase(unittest.TestCase):
         def proc():
             ran.append("x")
 
-        child = self.master.fork(proc, schedule_at=1.0)
+        child = self.master.fork(proc, when=Moment.after_beats(1.0))
         self.assertIs(child._state, ClockState.PENDING)
         child.kill()
         self.assertIs(child._state, ClockState.DEAD)

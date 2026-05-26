@@ -225,7 +225,11 @@ class Scheduler(threading.Thread):
             else:
                 return
 
-        self._ideal_time = event.t
+        # Ideal time never runs backward. Events are popped in t-order, so normally event.t >= _ideal_time
+        # and this is just `= event.t`; the max() guards the degenerate case of an event scheduled in the
+        # past (a t that has already elapsed), which fires immediately but must not drag the scheduler's
+        # clock backward — that would throw off the timing of everything reading _ideal_time.
+        self._ideal_time = max(self._ideal_time, event.t)
         logger.debug(f"Executing event '{event.metadata}' scheduled at {event.t}")
         try:
             event.action()
