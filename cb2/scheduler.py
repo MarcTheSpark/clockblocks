@@ -53,6 +53,28 @@ class Scheduler(threading.Thread):
         self._last_wake_time = None
         self._ideal_time = 0.0  # Ideal scheduler time (seconds since start)
 
+        # _fast_forward_goal should be one of the following:
+        #  1) None, meaning that we are not fast-forwarding; the normal state of the scheduler
+        #  2) A scheduler time up until which we process events as fast as possible without sleeping, advancing
+        #   _ideal_time as we go.
+        #  3) float('inf), indicating that events will be processed as fast as possible until the fast forwarding
+        #   state is turned off
+        self._fast_forward_goal = None
+
+        # When fast-forward ends we need to re-anchor the timing reference points (see _reanchor_timing), since
+        # otherwise we would appear to be far ahead of schedule. There are two ways that fast-forward can end:
+        #   (1) We reach a finite _fast_forward_goal. This is detected within _end_fast_forward_if_active when the
+        #       next event lands at/beyond the goal, and _reanchor_timing is called directly. In this case the 
+        #       _was_fast_forwarding flag below isn't used for detection, but it still must be cleared, because
+        #       otherwise the next normal wait would think we had just been fast-forwarding and reanchor spuriously.
+        #   (2) Fast forward was actively turned off (i.e. _fast_forward_goal was set back to None before it was
+        #       reached). In this case, we need to know on the next run loop that we *were* fast_forwarding so
+        #       that we can call _reanchor_timing. This is accomplished through the _was_fast_forwarding flag.
+        #       Without this flag we would have no way of distinguishing between fast-forwarding having always
+        #       been off, and fast-forwarding having just been turned off.
+        # See _fast_forwarding_through (which sets the flag) and _end_fast_forward_if_active (which consumes it).
+        self._was_fast_forwarding = False
+
     def time(self, wake: bool = False) -> float:
         """Return the scheduler's ideal time (time that should have passed by schedule).
 
@@ -66,6 +88,20 @@ class Scheduler(threading.Thread):
     def wall_time(self) -> float:
         """Return the actual wall-clock time elapsed since the scheduler started."""
         return time.time() - self._start_time if self._start_time else 0.0
+
+    def set_fast_forward_goal(self, goal: float | None) -> None:
+        """
+        Set the fast-forward goal (a scheduler-time, float('inf') for indefinite, or None to stop) and
+        wake the run loop so it acts on the change immediately rather than after its current timed wait.
+        """
+        # Mutated under _queue_change_condition to avoid interleaving with the run loop.
+        with self._queue_change_condition:
+            self._fast_forward_goal = goal
+            self._queue_change_condition.notify_all()
+
+    def is_fast_forwarding(self) -> bool:
+        """Whether a fast-forward goal is currently set."""
+        return self._fast_forward_goal is not None
 
     def kill(self) -> None:
         """Stop the scheduler."""
@@ -168,10 +204,17 @@ class Scheduler(threading.Thread):
                 # ~~~~~~ STEP 1b: Peek at the queue, and calculate wait duration to next scheduled event ~~~~~~
                 next_event = self._queue[0]
                 now = time.time()
-                relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
-                absolute_wait_dur = self._start_time + next_event.t - now
-                wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
-                self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
+
+                # Fast-forward short-circuits the wait. If we're fast-forwarding *through* this event (it
+                # lies before the goal), fire it with no wall-clock delay. Otherwise we're about to wait in
+                # real time, so first settle any fast-forward that was in progress — re-anchoring the timing
+                # reference points — and then time the wait normally.
+                if self._fast_forwarding_through(next_event):
+                    self._was_fast_forwarding = True
+                    wait_duration = 0.0
+                else:
+                    self._end_fast_forward_if_active(now)
+                    wait_duration = self._compute_wait_duration(next_event, now)
 
                 # ~~~~~~ STEP 1c: Wait for the next scheduled event (if in the future) ~~~~~~
                 if wait_duration > 0:
@@ -197,6 +240,71 @@ class Scheduler(threading.Thread):
             with self._execution_lock:
                 self._execute_event(next_event)
         logger.info("Scheduler terminated")
+
+    def _fast_forwarding_through(self, next_event: 'QueueEvent') -> bool:
+        """
+        Is a fast-forward in effect and does this event fall before the goal, so it should
+        fire with no wall-clock wait?
+
+        A None goal will always return False; we're not fast-forwarding. A float('inf') goal will always
+        return True. Any other finite goal will return True if the next event is before the _fast_forward_goal.
+        """
+        return self._fast_forward_goal is not None and next_event.t < self._fast_forward_goal
+
+    def _end_fast_forward_if_active(self, now: float) -> None:
+        """
+        Checks for and handles the transition from fast-forwarding to non-fast-forwarding state.
+        Called from the run loop (while holding _queue_change_condition) whenever we are not fast_forwarding
+        through the next event. Generally a no-op if we are not and have not been fast forwarding. The two
+        cases where this function acts are:
+
+          (1) When we have reached a finite _fast_forward_goal; in this case is_fast_forwarding() is still true,
+            so we pin _ideal_time to the goal, turn off fast-forwarding (by setting _fast_forward_goal = None),
+            clear _was_fast_forwarding (so that the next wait doesn't think we need to re-anchor), and
+            _reanchor_timing to the current time.
+
+          (2) When fast forwarding has been turned off externally. In this case, there's no _fast_forward_goal
+            to read from or flip, so we're relying on _was_fast_forwarding. Flip that to false and _reanchor_timing.
+        """
+        if self.is_fast_forwarding():
+            # we are fast-forwarding, but since this function was called, it means that we're about to stop
+            # since the next event is set for *after* the _fast_forward_goal. Jump the _ideal_time straight
+            # to the fast forward goal (making sure it's not backwards), clear the _fast_forward_goal,
+            # and then reanchor timing
+            self._ideal_time = max(self._ideal_time, self._fast_forward_goal)
+            self._fast_forward_goal = None
+            self._reanchor_timing(now)
+            self._was_fast_forwarding = False
+            return
+        elif self._was_fast_forwarding:
+            # We're not fast forwarding anymore, but last run iteration we were. This branch is only reached
+            # when fast forwarding was canceled manually (by clearing self._fast_forward_goal); otherwise
+            # we would have exited fast-forward via the block above.
+            # in this case, all we need to do is reanchor the timing
+            self._reanchor_timing(now)
+            self._was_fast_forwarding = False
+            return
+        # if we neither are fast-forwarding nor were fast-forwarding, this is a normal non-fast-forwarding wait
+        # return naturally as a no op
+
+    def _reanchor_timing(self, now: float) -> None:
+        """
+        Reanchor the timing reference points after fast-forwarding:
+            - _last_wake_time becomes now, so the next wait measures relative timing from when we stopped
+                fast-forwarding.
+            - self._start_time is set to self._ideal_time seconds in the past so that we are reanchored
+                to be exactly on time as far as absolute timing is concerned.
+        """
+        self._last_wake_time = now
+        self._start_time = now - self._ideal_time
+
+    def _compute_wait_duration(self, next_event: 'QueueEvent', now: float) -> float:
+        """Blend the relative- and absolute-timing wait durations per the timing policy (see __init__)."""
+        relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
+        absolute_wait_dur = self._start_time + next_event.t - now
+        wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
+        self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
+        return wait_duration
 
     def _log_event_timing(self, event: 'QueueEvent', rel_wait: float, abs_wait: float, actual_wait: float) -> None:
         """Detailed timing trace for one scheduled event (only formatted if DEBUG is enabled)."""
