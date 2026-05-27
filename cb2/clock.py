@@ -817,6 +817,74 @@ class Clock:
         """True if this clock is currently running (PENDING and DEAD both return False)."""
         return self._state is ClockState.ALIVE
 
+    ##################################################################################################################
+    #                                                 Fast-forwarding
+    ##################################################################################################################
+
+    # Fast-forwarding is a scheduler-wide operation: the shared scheduler fires queued events with no
+    # wall-clock waiting, so every wait() in the family returns instantaneously and musical time races
+    # ahead. The goal is stored on the scheduler as a *scheduler-time*; the methods below convert this
+    # clock's requested time/beat into scheduler-time via clock_to_scheduler_time.
+
+    def fast_forward(self, on_or_off: bool = True) -> None:
+        """
+        Turn indefinite fast-forwarding on or off. While on, all waiting is instantaneous.
+        (Only valid on the master clock.)
+
+        :param on_or_off: True to start fast-forwarding, False to stop.
+        """
+        if not self.is_master():
+            raise NotMasterClockError("Only the master clock can be fast-forwarded.")
+        self.scheduler.set_fast_forward_goal(float("inf") if on_or_off else None)
+
+    def fast_forward_to_time(self, t: float) -> None:
+        """
+        Fast-forward, skipping instantaneously up to time `t` (in seconds) on this clock, then resume
+        real-time playback. (Only valid on the master clock.)
+
+        :param t: time to fast-forward to
+        """
+        if not self.is_master():
+            raise NotMasterClockError("Only the master clock can be fast-forwarded.")
+        if t < self.time():
+            raise ValueError("Cannot fast-forward to a time in the past.")
+        self.scheduler.set_fast_forward_goal(self.clock_to_scheduler_time(t, units="time"))
+
+    def fast_forward_in_time(self, t: float) -> None:
+        """
+        Fast-forward, skipping ahead instantaneously by `t` seconds. (Only valid on the master clock.)
+
+        :param t: number of seconds to fast-forward by
+        """
+        self.fast_forward_to_time(self.time() + t)
+
+    def fast_forward_to_beat(self, b: float) -> None:
+        """
+        Fast-forward, skipping instantaneously up to beat `b` on this clock. (Only valid on the master clock.)
+
+        :param b: beat to fast-forward to
+        """
+        if not self.is_master():
+            raise NotMasterClockError("Only the master clock can be fast-forwarded.")
+        if b < self.beat():
+            raise ValueError("Cannot fast-forward to a beat in the past.")
+        self.scheduler.set_fast_forward_goal(self.clock_to_scheduler_time(b, units="beats"))
+
+    def fast_forward_in_beats(self, b: float) -> None:
+        """
+        Fast-forward, skipping ahead instantaneously by `b` beats. (Only valid on the master clock.)
+
+        :param b: number of beats to fast-forward by
+        """
+        self.fast_forward_to_beat(self.beat() + b)
+
+    def is_fast_forwarding(self) -> bool:
+        """
+        Whether the clock is currently fast-forwarding. Since fast-forwarding is a scheduler-wide state,
+        this is true for every clock in the family whenever it's true for any of them.
+        """
+        return self.scheduler.is_fast_forwarding()
+
     def kill(self) -> None:
         """
         End the function running on this clock and cascade to all descendants.

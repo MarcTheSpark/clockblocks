@@ -129,9 +129,34 @@ Still TODO from the original surface: `fork()`'s "pass the clock as first arg" c
 
 ### Step 6 — Fast-forward
 
-Scheduler-side toggle. In `Scheduler.run`, when fast-forward is active, skip the wall-clock `sleep` and instead advance `_ideal_time` straight to the next event's `t`. Goal time can be set to `float('inf')` (full fast-forward) or to a specific scheduler-time. No more cheating with `_start_time`.
+**Status:** done. Scheduler-side toggle, with all the Clock API mirroring the original. Tests:
+`tests/test_fast_forward.py` (13).
 
-API on `Clock` mirrors original: `fast_forward()`, `fast_forward_to_time`, `fast_forward_in_time`, `fast_forward_to_beat`, `fast_forward_in_beats`, `is_fast_forwarding`.
+Scheduler side (`scheduler.py`): a `_fast_forward_goal` (a *scheduler-time*, `float('inf')` for
+indefinite, or `None`) set via `set_fast_forward_goal()` (which notifies the run loop so a goal change
+takes effect immediately rather than after the current timed wait). In the run loop, STEP 1b decides each
+event with two helpers:
+- `_fast_forwarding_through(next_event)` — pure predicate: is a goal set and `next_event.t < goal`? If so
+  the wait is skipped (`_ideal_time` leaps to the event when it fires) and `_was_fast_forwarding` is set.
+- otherwise `_end_fast_forward_if_active(now)` settles any fast-forward that was in progress before the
+  wait is timed normally. It's a no-op unless FF is ending one of two ways: (1) a finite goal reached
+  (`next_event.t >= goal`) → advance `_ideal_time` to the goal, clear it, re-anchor, then time the
+  remaining `goal -> event` span normally (zero at the boundary, so an event landing exactly on the goal
+  still fires instantly — matching the original, where *reaching* the goal ends FF); or (2) FF switched
+  off externally (goal cleared mid-flight), detected via `_was_fast_forwarding` → re-anchor. Both endings
+  clear `_was_fast_forwarding`, so an early wakeup during the post-goal real-time tail can't re-anchor a
+  second time and drop the already-elapsed wait.
+
+`_reanchor_timing(now)` re-pegs `_last_wake_time = now` and `_start_time = now - _ideal_time` so both the
+relative and absolute timing policies resume cleanly. This replaces the original's `_start_time`-rewinding
+cheat: cb2's `time()`/`beat()` derive from `_ideal_time` (not wall clock), so nothing needs faking to keep
+the clock position correct — re-anchoring only restores the *timing-policy* reference points.
+
+API on `Clock` (master-only, raising `NotMasterClockError` off-master) mirrors original: `fast_forward()`,
+`fast_forward_to_time`, `fast_forward_in_time`, `fast_forward_to_beat`, `fast_forward_in_beats`,
+`is_fast_forwarding`. The `*_to_*` methods convert the requested clock time/beat to scheduler-time via
+`clock_to_scheduler_time` and reject targets in the past; `is_fast_forwarding` reflects the shared
+scheduler state, so it's true for the whole family at once.
 
 ### Step 7 — `TimeStamp`
 
