@@ -113,6 +113,19 @@ def wait_for_children_to_finish() -> None:
     c.wait_for_children_to_finish()
 
 
+def fork_unsynchronized(forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
+    """
+    Spawn `forked_function` as an asynchronous thread, not on a child clock (see
+    :meth:`Clock.fork_unsynchronized`). If there is no active clock on this thread, falls back to a
+    plain ``threading.Thread``.
+    """
+    c = current_clock()
+    if c is None:
+        _spawn_unsynchronized(forked_function, args, kwargs or {})
+    else:
+        c.fork_unsynchronized(forked_function, args=args, kwargs=kwargs)
+
+
 def fork(forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
          initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
          when: Union[float, 'moment.ResolvableMoment'] = None,

@@ -100,7 +100,11 @@ def _reschedule_after_tempo_change(fn):
 class Clock:
 
     def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
-                 initial_tempo: float = None, initial_beat_length: float = None, scheduler: Scheduler = None):
+                 initial_tempo: float = None, initial_beat_length: float = None, scheduler: Scheduler = None,
+                 pool_size: int = 200):
+        # `pool_size` is accepted for back-compat with the original clockblocks API; the cb2 thread pool
+        # (Step 9 of PLAN.md) isn't wired up yet, so the value is currently ignored.
+        del pool_size
         self.name = name
         self.parent = parent
         self._children = []
@@ -136,7 +140,8 @@ class Clock:
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
             self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
-                                           (0, ), {"description": f"Initial wake for {self}", "acting_clock": self})
+                                           (0, ), {"description": f"Initial wake for Clock(name={self.name!r})",
+                                                   "acting_clock": self})
             self._wait_event.wait()
 
             threading.current_thread().__clock__ = self
@@ -188,6 +193,24 @@ class Clock:
         :return: True if this is the master clock, False otherwise
         """
         return self.parent is None
+
+    # ------------------------------------------------------------------
+    # Back-compat shims for the original clockblocks' rouse_and_hold /
+    # release_from_suspension. In cb2 they're no longer needed: beat()/time()
+    # are live (Step 2 — derived from scheduler time on demand) so there's
+    # nothing to "rouse" to make a read current, and external-thread mutations
+    # are serialized by _tree_lock / scheduler.while_quiescent() instead of a
+    # coarse hold. Kept as no-ops so existing scamp call sites keep working;
+    # remove once scamp's call sites are scrubbed.
+    # ------------------------------------------------------------------
+
+    def rouse_and_hold(self) -> None:
+        """No-op back-compat shim. See class docstring of clockblocks 1.0."""
+        pass
+
+    def release_from_suspension(self) -> None:
+        """No-op back-compat shim. See class docstring of clockblocks 1.0."""
+        pass
 
     def children(self) -> Sequence['Clock']:
         """

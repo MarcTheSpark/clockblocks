@@ -168,7 +168,7 @@ class Scheduler(threading.Thread):
         with self._queue_change_condition:
             heapq.heappush(self._queue, event)
             self._queue_change_condition.notify_all()
-        logger.debug(f"Scheduled event '{metadata}' for time {t}")
+        logger.debug("Scheduled event %r for time %s", metadata, t)
 
     def run(self) -> None:
         """
@@ -338,7 +338,7 @@ class Scheduler(threading.Thread):
         # past (a t that has already elapsed), which fires immediately but must not drag the scheduler's
         # clock backward — that would throw off the timing of everything reading _ideal_time.
         self._ideal_time = max(self._ideal_time, event.t)
-        logger.debug(f"Executing event '{event.metadata}' scheduled at {event.t}")
+        logger.debug("Executing event %r scheduled at %s", event.metadata, event.t)
         try:
             event.action()
         except Exception as e:
