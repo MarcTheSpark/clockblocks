@@ -160,9 +160,20 @@ scheduler state, so it's true for the whole family at once.
 
 ### Step 7 — `TimeStamp`
 
-**Revisit scope first:** absolute `Moment`s (`cb2/moment.py`) now cover much of what `TimeStamp` was for — see "TimeStamp vs absolute Moment" under *Possible 1.5 features* before building this.
+**Status:** done. `cb2/time_stamp.py` defines `TimeStamp` as a thin wrapper around a captured
+`scheduler_time` plus the family's master. `beat_in_clock(c)` / `time_in_clock(c)` go through
+`c.scheduler_to_clock_time(self.scheduler_time, desired_units=...)`; `time_in_master` is a
+convenience for `time_in_clock(master)` (it is **not** equal to `scheduler_time` — the master
+has a `parent_offset == scheduler.time()` at its construction). Foreign-family clocks are
+rejected. Equality / ordering compare on `scheduler_time` alone — `wall_time` was dropped
+(scamp never read it; under fast-forward it was a non-deterministic tiebreaker anyway). The
+old master-side `time_stamp_data` dedup cache is gone — resolution is cheap. Tests:
+`tests/test_time_stamp.py` (6).
 
-Store `scheduler_time` at construction. Resolve per-clock beats lazily via Step 2 (`scheduler_to_clock_time` against each clock's tempo history). The master `time_stamp_data` dict goes away entirely — caching is unnecessary if resolution is cheap, and resolution is cheap because tempo histories are append-only past the committed point.
+**Kept distinct from `Moment`** (vs. subsuming it into an absolute Moment): different intent
+(captured-past vs declared-future), different shape (clock-agnostic vs anchored to one
+clock's beat/time axis), and scamp's transcriber use-case wants exactly the clock-agnostic
+shape — store one scheduler-time, project into many clocks later.
 
 ### Step 8 — External-thread mutation lock
 
@@ -249,13 +260,11 @@ deferred. Both extensions are done (`cb2/moment.py`):
   `moment.scheduler_time(acting_clock)` on tempo changes — preserving beat *or* time as the moment
   dictates. New kinds of moment can be added without touching the reschedule logic.
 
-**Open question — `TimeStamp` (Step 7) vs absolute `Moment` (revisit during SCAMP integration).**
-An absolute `Moment` is a *resolved* point pinned to a clock's beat or time, which is close to what
-`TimeStamp` was meant to be. They may not be identical — a `TimeStamp` is clock-agnostic (a
-scheduler-time translatable to *any* clock's frame), whereas an absolute `Moment` is tied to one
-clock's beat/time axis — but once SCAMP adopts the new clockblocks, reconsider whether `TimeStamp` is
-still needed or is subsumed by `Moment` (e.g. a `Moment` that resolves against the scheduler, or a
-thin adapter). Don't build `TimeStamp` until this is settled.
+**Resolved (Step 7).** `TimeStamp` is kept as a distinct primitive. An absolute `Moment` is
+anchored to one clock's beat/time axis (forward-facing — "schedule at this point on this
+clock"); a `TimeStamp` stores only a scheduler-time and projects into any clock in the family
+(backward-facing — "this happened, what beat/time was it on each clock?"). Scamp's
+transcriber wants the latter shape.
 
 ### Externally-driven scheduler clock
 
