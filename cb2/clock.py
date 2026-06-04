@@ -1,4 +1,5 @@
 import functools
+import math
 import threading
 import warnings
 from enum import Enum
@@ -1136,6 +1137,9 @@ class Clock:
             raise NotMasterClockError("Only the master clock can be fast-forwarded.")
         if t < self.time():
             raise ValueError("Cannot fast-forward to a time in the past.")
+        if math.isinf(t):
+            self.scheduler.set_fast_forward_goal(float("inf"))
+            return
         self.scheduler.set_fast_forward_goal(self.clock_to_scheduler_time(t, units="time"))
 
     def fast_forward_in_time(self, t: float) -> None:
@@ -1156,6 +1160,9 @@ class Clock:
             raise NotMasterClockError("Only the master clock can be fast-forwarded.")
         if b < self.beat():
             raise ValueError("Cannot fast-forward to a beat in the past.")
+        if math.isinf(b):
+            self.scheduler.set_fast_forward_goal(float("inf"))
+            return
         self.scheduler.set_fast_forward_goal(self.clock_to_scheduler_time(b, units="beats"))
 
     def fast_forward_in_beats(self, b: float) -> None:
