@@ -28,6 +28,7 @@ import cb2.metric_phase
 import logging
 from typing import Union, Sequence, Tuple, Callable
 from cb2.enums import DurationUnits, TempoUnits
+from cb2.metric_phase import MetricPhaseTarget
 
 
 def tempo_modification(fn):
@@ -490,7 +491,11 @@ class TempoHistory(TempoEnvelope):
     @lru_cache(maxsize=32)
     def time_at_beat(self, beat):
         """
-        Project forward to determine the time at the given beat.
+        Determine the time at the given beat.
+
+        For beats at or ahead of the committed pointer (the common case, used e.g. by wait()), we
+        integrate forward from the pointer (cheap). For beats behind the pointer (e.g. when resolving
+        TimeStamps) we integrate from the origin instead to avoid a negative integral.
 
         :param beat: The beat at which to calculate the time.
         """
@@ -498,20 +503,27 @@ class TempoHistory(TempoEnvelope):
             while self.follow_func_or_envelope_loop.current_end_beat < beat:
                 self._extend_function_or_envelope_loop()
         self.extend_to(beat)
-        time_at_beat = self.time() + self.integrate_interval(self.beat(), beat)
+        if beat >= self._beat:
+            time_at_beat = self._t + self.integrate_interval(self._beat, beat)
+        else:
+            time_at_beat = self.integrate_interval(0, beat)
         return snap_float_to_nice_decimal(time_at_beat)
 
     @lru_cache(maxsize=32)
     def beat_at_time(self, t):
         """
-        Project forward to determine the time at the given beat.
+        Determine the beat at the given time. See :meth:`time_at_beat` for why we branch on whether
+        the target is ahead of or behind the committed pointer.
 
         :param t: The time at which to calculate the beat
         """
         if self.follow_func_or_envelope_loop is not None:
             while self.follow_func_or_envelope_loop.current_end_time < t:
                 self._extend_function_or_envelope_loop()
-        beat_at_time = self.get_upper_integration_bound(self.beat(), t - self.time(), max_error=1e-12)
+        if t >= self._t:
+            beat_at_time = self.get_upper_integration_bound(self._beat, t - self._t, max_error=1e-12)
+        else:
+            beat_at_time = self.get_upper_integration_bound(0, t, max_error=1e-12)
         self.extend_to(beat_at_time)
         return snap_float_to_nice_decimal(beat_at_time)
 
@@ -1159,7 +1171,7 @@ class TempoHistory(TempoEnvelope):
     #                                                Advancing Time
     ##################################################################################################################
 
-    def advance(self, duration: float, duration_units: DurationUnits = "beats"):
+    def advance(self, duration: float, duration_units: DurationUnits = "beats") -> tuple[float, float]:
         """
         Advance the current beat/time in the envelope by the given number of beats.
 
@@ -1175,7 +1187,9 @@ class TempoHistory(TempoEnvelope):
             new_beat = self.beat_at_time(new_time)
         # it's important to first calculate both new beat and new time before setting the new values, because
         # function `self.beat_at_time` actually uses self.beat() and self.time(), which could otherwise be out of sync
+        delta_beat, delta_time = new_beat - self._beat, new_time - self._t
         self._beat, self._t = new_beat, new_time
+        return delta_beat, delta_time
 
     def go_to_beat(self, b: float) -> 'TempoEnvelope':
         """

@@ -205,6 +205,58 @@ scamp imports (verify against `scamp/src/scamp/__init__.py`):
 
 Run `scamp/test/test_examples.py` as the integration test before declaring done. Expect minor output diffs (timing precision); review and regenerate goldens.
 
+### Step 10.5 — Bridge missing `Clock` tempo-target / tempo-function methods
+
+**Status:** done. cb2's `TempoHistory` already had the underlying methods; this step added the
+`Clock`-level bridges, gave the duration param a `ResolvableMoment`-first signature with a
+back-compat deprecation path for bare numbers, and converted the obsoleted-by-design legacy APIs
+(synchronization/timing policy, rouse_and_hold/release_from_suspension) to raise-on-access stubs
+with explanatory messages. `Clock.time_in_master()` is a one-line proxy to `master.time()`.
+`log_processing_time` / `stop_logging_processing_time` deferred.
+
+Original scope (kept for the record):
+
+- `Clock.set_beat_length_target` / `set_rate_target` / `set_tempo_target`
+- `Clock.set_beat_length_targets` / `set_rate_targets` / `set_tempo_targets` (plural, loopable)
+- `Clock.apply_beat_length_function` / `apply_rate_function` / `apply_tempo_function`
+- `Clock.stop_tempo_loop_or_function`
+- `Clock.time_in_master` — trivial convenience: `self.scheduler_to_clock_time(scheduler.time(), 'time')`
+  projected to master, or just `master.time()` evaluated from this thread.
+
+Each bridge needs the `@_reschedule_after_tempo_change` wrap (we already use it for the
+beat_length/rate/tempo setters) so a queued descendant wakeup gets re-projected against the new curve.
+
+**`duration` should be a `Moment` / list of `Moment`s now.** In the redesign, the `when`/`duration`
+vocabulary unified around `Moment.after_beats` / `after_time` / `at_beat` / `at_time`. The set-target
+methods predate that and take raw numbers + `duration_units="beats"|"time"` kwarg. New shape:
+
+```python
+clock.set_tempo_target(100, Moment.after_beats(9))    # equivalent to legacy (..., 9)
+clock.set_tempo_target(100, Moment.after_time(2.5))   # what duration_units="time" used to mean
+```
+
+For backwards compatibility accept a bare number too, but emit `DeprecationWarning("pass
+Moment.after_beats(n) instead of a bare number; duration_units is going away")`. After a release,
+drop `duration_units` entirely. The plural forms (`set_*_targets`) become a list of `Moment`s.
+
+Deferred (uncertain whether they translate to the central-scheduler model):
+- `log_processing_time` / `stop_logging_processing_time`
+
+Already-gone-by-design (do not port). Each should remain as an attribute/method on `Clock` that
+**raises a clear error explaining what to do instead** when accessed, rather than silently being
+absent — otherwise users get `AttributeError: 'Session' object has no attribute 'X'` and have to
+guess. Suggest a small `_removed_attribute(name, replacement, reason)` helper that raises
+`AttributeError(f"{name} was removed in clockblocks 1.0: {reason}. Use {replacement} instead.")`:
+
+- `synchronization_policy` (prop+setter) — obsoleted by Step 2's lazy `beat()` (any thread already
+  sees the live position; there's nothing to "synchronize"). No replacement; just gone.
+- `timing_policy` (prop+setter) and `use_absolute_timing_policy` / `use_relative_timing_policy` /
+  `use_mixed_timing_policy` — moved to `Scheduler` because timing is now a scheduler-wide property.
+  Replacement: `scheduler.timing_policy = ...` (and a future `use_*_timing_policy()` on Scheduler
+  if we want to mirror the legacy convenience methods).
+- `rouse_and_hold` / `release_from_suspension` — replaced by `Clock.while_scheduler_quiescent()`
+  (the `with`-block form covers both halves atomically and is exception-safe).
+
 ### Step 11 — Unit tests
 
 Keep cb2's `mock_time.py` compression trick. Cover:

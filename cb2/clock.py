@@ -1,9 +1,11 @@
 import functools
 import threading
+import warnings
 from enum import Enum
 from itertools import count
 from typing import Callable, Sequence, Iterator
-from cb2.tempo_envelope import TempoHistory
+from copy import deepcopy
+from cb2.tempo_envelope import TempoEnvelope, TempoHistory
 from cb2.scheduler import get_scheduler, Scheduler
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.enums import DurationUnits
@@ -349,9 +351,17 @@ class Clock:
         """
         return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
 
+    def time_in_master(self) -> float:
+        """
+        This clock's current position projected onto the master's time axis (true seconds since the
+        master was created). Equivalent to ``self.master.time()``, since master.time() is itself live
+        and any thread reads the same scheduler-derived value.
+        """
+        return self.master.time()
+
     def wall_time_in_scheduler(self) -> float:
         """
-        How long has this clock been alive in the scheduler. Should return a result very close to `Clock.time`
+        How long has this clock been alive in the scheduler.
         """
         return self.scheduler.wall_time() - self._start_time_in_scheduler
 
@@ -418,6 +428,212 @@ class Clock:
     def tempo(self, t):
         self.tempo_history.tempo = t
 
+    def absolute_rate(self) -> float:
+        """
+        Rate of this clock in beats / (true) second, with all parent rates folded in.
+        """
+        return self.rate if self.parent is None else self.rate * self.parent.absolute_rate()
+
+    def absolute_tempo(self) -> float:
+        """Tempo (BPM) in true minutes, with all parent rates folded in."""
+        return self.absolute_rate() * 60
+
+    def absolute_beat_length(self) -> float:
+        """Beat length in true seconds, with all parent rates folded in."""
+        return 1 / self.absolute_rate()
+
+    ##################################################################################################################
+    #                                          Tempo Targets / Functions
+    ##################################################################################################################
+    # Thin Clock-level bridges over TempoHistory's tempo-curve mutation API: they wrap the underlying
+    # call in `@_reschedule_after_tempo_change` (so queued descendant wakeups re-project against the
+    # new curve and so the mutation acquires `_tree_lock` / `while_quiescent` as appropriate) and
+    # accept a duration as either a bare number (deprecated) or a ResolvableMoment.
+    # ------------------------------------------------------------------
+
+    def _duration_from_moment(self, duration, *, legacy_units: str) -> tuple[float, str]:
+        """
+        Coerce a `duration` argument (the per-segment "how long until target" param of the
+        set_*_target methods) into a (value, units) pair to pass through to TempoHistory.
+
+        Three accepted shapes:
+          * ``ResolvableMoment`` — a Moment or MetricPhaseTarget. Resolved against this clock and
+            converted to a duration relative to the current beat/time on whichever axis the moment
+            expresses; the moment's own units win.
+          * ``int | float`` — legacy form. Emits a DeprecationWarning; interpreted with
+            ``legacy_units`` (the value of the deprecated ``duration_units`` kwarg, defaulting to
+            "beats" — matches the legacy default).
+          * anything else → TypeError.
+        """
+        if isinstance(duration, (int, float)):
+            warnings.warn(
+                "Passing a bare number for `duration` is deprecated; pass Moment.after_beats(n) or "
+                "Moment.after_time(t) (or an absolute Moment.at_beat/at_time) instead. "
+                "`duration_units` is going away with it.",
+                DeprecationWarning, stacklevel=3,
+            )
+            return float(duration), legacy_units
+        if not isinstance(duration, (Moment, ResolvableMoment)) and not hasattr(duration, "resolve"):
+            raise TypeError(
+                f"`duration` must be a number or a ResolvableMoment, got {type(duration).__name__}."
+            )
+        abs_moment = duration.resolve(self) if not isinstance(duration, Moment) or duration.relative \
+            else duration
+        units = abs_moment.units
+        now = self.beat() if units == DurationUnits.BEATS else self.time()
+        return abs_moment.value - now, units.value
+
+    def _durations_from_moments(self, durations, *, legacy_units: str) -> tuple[Sequence[float], str]:
+        """Plural form of _duration_from_moment: collapse a list of mixed numbers / Moments into a
+        list of float durations plus a single shared duration_units. All non-number entries must
+        agree on units."""
+        values = []
+        unit_seen = None
+        for d in durations:
+            v, u = self._duration_from_moment(d, legacy_units=legacy_units)
+            values.append(v)
+            if unit_seen is None:
+                unit_seen = u
+            elif u != unit_seen:
+                raise ValueError(
+                    f"All durations must share the same units; got both {unit_seen!r} and {u!r}."
+                )
+        return values, unit_seen if unit_seen is not None else legacy_units
+
+    @_reschedule_after_tempo_change
+    def set_beat_length_target(self, beat_length_target: float,
+                               duration: 'float | ResolvableMoment',
+                               curve_shape: float = 0,
+                               metric_phase_target=None,
+                               duration_units: str = "beats",
+                               truncate: bool = True) -> None:
+        """Reach `beat_length_target` by `duration` from now. `duration` is a ResolvableMoment
+        (``Moment.after_beats(n)``, ``after_time(t)``, or absolute) — a bare number is accepted but
+        deprecated, and `duration_units` survives only as the legacy interpretation of that number.
+        See :meth:`TempoHistory.set_beat_length_target` for the other parameters."""
+        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+        self.tempo_history.set_beat_length_target(
+            beat_length_target, d, curve_shape=curve_shape,
+            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+        )
+
+    @_reschedule_after_tempo_change
+    def set_rate_target(self, rate_target: float,
+                        duration: 'float | ResolvableMoment',
+                        curve_shape: float = 0,
+                        metric_phase_target=None,
+                        duration_units: str = "beats",
+                        truncate: bool = True) -> None:
+        """Reach `rate_target` (beats/second) by `duration` from now. See
+        :meth:`set_beat_length_target` for the duration convention."""
+        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+        self.tempo_history.set_rate_target(
+            rate_target, d, curve_shape=curve_shape,
+            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+        )
+
+    @_reschedule_after_tempo_change
+    def set_tempo_target(self, tempo_target: float,
+                         duration: 'float | ResolvableMoment',
+                         curve_shape: float = 0,
+                         metric_phase_target=None,
+                         duration_units: str = "beats",
+                         truncate: bool = True) -> None:
+        """Reach `tempo_target` (BPM) by `duration` from now. See :meth:`set_beat_length_target` for
+        the duration convention."""
+        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+        self.tempo_history.set_tempo_target(
+            tempo_target, d, curve_shape=curve_shape,
+            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+        )
+
+    @_reschedule_after_tempo_change
+    def set_beat_length_targets(self, beat_length_targets: Sequence[float],
+                                durations: 'Sequence[float | ResolvableMoment]',
+                                curve_shapes: Sequence[float] = None,
+                                metric_phase_targets=None,
+                                duration_units: str = "beats",
+                                truncate: bool = True, loop: bool = False) -> None:
+        """Multi-segment form of :meth:`set_beat_length_target`. All durations must share the same
+        units (no mixing of beat- and time-based Moments in one call)."""
+        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
+        self.tempo_history.set_beat_length_targets(
+            beat_length_targets, ds, curve_shapes=curve_shapes,
+            metric_phase_targets=metric_phase_targets, duration_units=u,
+            truncate=truncate, loop=loop,
+        )
+
+    @_reschedule_after_tempo_change
+    def set_rate_targets(self, rate_targets: Sequence[float],
+                         durations: 'Sequence[float | ResolvableMoment]',
+                         curve_shapes: Sequence[float] = None,
+                         metric_phase_targets=None,
+                         duration_units: str = "beats",
+                         truncate: bool = True, loop: bool = False) -> None:
+        """Multi-segment form of :meth:`set_rate_target`."""
+        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
+        self.tempo_history.set_rate_targets(
+            rate_targets, ds, curve_shapes=curve_shapes,
+            metric_phase_targets=metric_phase_targets, duration_units=u,
+            truncate=truncate, loop=loop,
+        )
+
+    @_reschedule_after_tempo_change
+    def set_tempo_targets(self, tempo_targets: Sequence[float],
+                          durations: 'Sequence[float | ResolvableMoment]',
+                          curve_shapes: Sequence[float] = None,
+                          metric_phase_targets=None,
+                          duration_units: str = "beats",
+                          truncate: bool = True, loop: bool = False) -> None:
+        """Multi-segment form of :meth:`set_tempo_target`."""
+        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
+        self.tempo_history.set_tempo_targets(
+            tempo_targets, ds, curve_shapes=curve_shapes,
+            metric_phase_targets=metric_phase_targets, duration_units=u,
+            truncate=truncate, loop=loop,
+        )
+
+    @_reschedule_after_tempo_change
+    def apply_beat_length_function(self, function: Callable, domain_start: float = 0,
+                                   domain_end: float = None, duration_units: str = "beats",
+                                   truncate: bool = True, loop: bool = False,
+                                   extension_increment: float = 2.0, **kwargs) -> None:
+        """Drive this clock's beat_length from a function. See
+        :meth:`TempoHistory.apply_function` for the full parameter list (passed via **kwargs)."""
+        self.tempo_history.apply_function(
+            function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
+            duration_units=duration_units, truncate=truncate, loop=loop,
+            extension_increment=extension_increment, **kwargs,
+        )
+
+    @_reschedule_after_tempo_change
+    def apply_rate_function(self, function: Callable, domain_start: float = 0,
+                            domain_end: float = None, duration_units: str = "beats",
+                            truncate: bool = True, loop: bool = False,
+                            extension_increment: float = 2.0, **kwargs) -> None:
+        """Drive this clock's rate from a function."""
+        self.tempo_history.apply_function(
+            function, domain_start=domain_start, domain_end=domain_end, units="rate",
+            duration_units=duration_units, truncate=truncate, loop=loop,
+            extension_increment=extension_increment, **kwargs,
+        )
+
+    @_reschedule_after_tempo_change
+    def apply_tempo_function(self, function: Callable, domain_start: float = 0,
+                             domain_end: float = None, duration_units: str = "beats",
+                             truncate: bool = True, loop: bool = False,
+                             extension_increment: float = 2.0, **kwargs) -> None:
+        """Drive this clock's tempo (BPM) from a function."""
+        self.tempo_history.apply_function(
+            function, domain_start=domain_start, domain_end=domain_end, units="tempo",
+            duration_units=duration_units, truncate=truncate, loop=loop,
+            extension_increment=extension_increment, **kwargs,
+        )
+
+    def stop_tempo_loop_or_function(self) -> None:
+        """Stop following any function or looping envelope previously applied to this clock's tempo."""
+        self.tempo_history.stop_follow_function_or_envelope_loop()
+
     def clock_to_scheduler_time(self, beat_or_time, units="beats"):
         """
         Gets the time in the scheduler for a given beat or time in this clock, working recursively up the chain
@@ -463,6 +679,51 @@ class Clock:
         delta = self.beat() - self.tempo_history.beat()
         if delta > 0:
             self.tempo_history.advance(delta)
+
+    def extract_absolute_tempo_envelope(self, start_beat: float = 0, step_size: float = 0.1,
+                                        tolerance: float = 0.005) -> TempoEnvelope:
+        """
+        Extract this clock's absolute tempo curve — its tempo as observed in master (scheduler) time,
+        with parent rate-changes folded in. Used when building a Score from this clock's perspective.
+
+        For master, this is just the tempo_history as-is. Otherwise we walk the inheritance chain:
+        deepcopy each clock's tempo_history, position each at the beat it has when the child is at
+        `start_beat`, then step the child forward `step_size` at a time and cascade the resulting
+        time-deltas up through each parent. Final delta in master seconds / step_size = the
+        effective beat_length sample, which we feed into an output curve.
+        """
+        if self.is_master():
+            return self.tempo_history.as_tempo_envelope()
+
+        clocks = self.inheritance()
+        tempo_histories = [deepcopy(c.tempo_history) for c in clocks]
+        tempo_histories[0].go_to_beat(start_beat)
+        initial_rate = tempo_histories[0].rate
+        for i in range(1, len(tempo_histories)):
+            # parent's beat at this moment = child's parent_offset + child's elapsed time
+            tempo_histories[i].go_to_beat(clocks[i - 1].parent_offset + tempo_histories[i - 1].time())
+            initial_rate *= tempo_histories[i].rate
+
+        def step_and_get_beat_length(step):
+            beat_change = step
+            for th in tempo_histories:
+                _, beat_change = th.advance(beat_change)
+            return beat_change / step
+
+        output_curve = TempoEnvelope(initial_rate, units="rate")
+        while any(th.beat() < th.length() for th in tempo_histories):
+            # sample twice at half step_size so we can use the midpoint as a curvature guide
+            start_level = output_curve.end_level()
+            halfway_level = step_and_get_beat_length(step_size / 2)
+            end_level = step_and_get_beat_length(step_size / 2)
+            if min(start_level, end_level) < halfway_level < max(start_level, end_level):
+                output_curve.append_segment(end_level, step_size, tolerance=tolerance,
+                                            halfway_level=halfway_level)
+            else:
+                # midpoint outside [start, end] => turnaround; fall back to two linear segments
+                output_curve.append_segment(halfway_level, step_size / 2, tolerance=tolerance)
+                output_curve.append_segment(end_level, step_size / 2, tolerance=tolerance)
+        return output_curve
 
     def _reschedule_self_and_descendants(self):
         """
