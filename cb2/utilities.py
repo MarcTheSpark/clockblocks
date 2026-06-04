@@ -1,9 +1,48 @@
 from __future__ import annotations
+import math
 import threading
 import time
 from typing import TYPE_CHECKING, Callable, Sequence, Union
 if TYPE_CHECKING:
     from cb2 import clock, metric_phase, moment
+
+
+# Default tolerances for near-equality comparisons of beats / times.
+# Because of the use of numerical integration, two values representing "the same moment"
+# can easily differ by ~1e-12. 1e-9 sits far below any musically meaningful gap, making
+# it a safe threshold while still distinguishing genuine (audible) differences.
+NEAR_EQUAL_REL_TOL = 1e-9
+NEAR_EQUAL_ABS_TOL = 1e-12
+
+
+def near_equal(a: float, b: float, *, rel_tol: float = NEAR_EQUAL_REL_TOL,
+               abs_tol: float = NEAR_EQUAL_ABS_TOL) -> bool:
+    """
+    True if ``a`` and ``b`` are equal to within floating-point reconstruction noise.
+
+    Thin wrapper over :func:`math.isclose` with project-wide default tolerances plus a small absolute
+    floor: ``math.isclose`` defaults ``abs_tol=0.0``, which is too strict near zero, and several
+    callers compare quantities that can be ~0 (e.g. envelope-segment durations).
+    """
+    return math.isclose(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
+
+
+def meaningfully_less_than(a: float, b: float, *, rel_tol: float = NEAR_EQUAL_REL_TOL,
+                           abs_tol: float = NEAR_EQUAL_ABS_TOL) -> bool:
+    """
+    True if ``a`` is meaningfully less than ``b`` — i.e. ``a < b`` and not merely by rounding
+    noise (see :func:`near_equal`). Use in place of a bare ``<`` when ``a`` and ``b`` are beats/times
+    reconstructed from scheduler time.
+    """
+    return a < b and not near_equal(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
+
+
+def meaningfully_greater_than(a: float, b: float, *, rel_tol: float = NEAR_EQUAL_REL_TOL,
+                              abs_tol: float = NEAR_EQUAL_ABS_TOL) -> bool:
+    """
+    True if ``a`` is meaningfully greater than ``b`` (mirror of :func:`meaningfully_less_than`).
+    """
+    return a > b and not near_equal(a, b, rel_tol=rel_tol, abs_tol=abs_tol)
 
 
 def snap_float_to_nice_decimal(x: float, order_of_magnitude_difference=7) -> float:
