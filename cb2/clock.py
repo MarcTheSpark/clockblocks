@@ -2,6 +2,7 @@ import functools
 import math
 import threading
 import warnings
+from contextlib import nullcontext
 from enum import Enum
 from itertools import count
 from typing import Callable, Sequence, Iterator
@@ -205,23 +206,22 @@ class Clock:
         """
         return self.parent is None
 
-    # ------------------------------------------------------------------
-    # Back-compat shims for the original clockblocks' rouse_and_hold /
-    # release_from_suspension. In cb2 they're no longer needed: beat()/time()
-    # are live (Step 2 — derived from scheduler time on demand) so there's
-    # nothing to "rouse" to make a read current, and external-thread mutations
-    # are serialized by _tree_lock / scheduler.while_quiescent() instead of a
-    # coarse hold. Kept as no-ops so existing scamp call sites keep working;
-    # remove once scamp's call sites are scrubbed.
-    # ------------------------------------------------------------------
+    def while_scheduler_quiescent(self):
+        """
+        Context manager that ensures the scheduler is not mid-action while the body runs. Wraps
+        :meth:`Scheduler.while_quiescent` with a same-family skip: if the calling thread is already a
+        clock thread of this scheduler (either a clock executing user code between waits, or a foreign
+        thread already inside an outer ``while_scheduler_quiescent`` block that tagged ``__clock__``),
+        re-acquiring the lock would deadlock — so we yield a no-op instead, since the caller already
+        has exclusive access by construction.
 
-    def rouse_and_hold(self) -> None:
-        """No-op back-compat shim. See class docstring of clockblocks 1.0."""
-        pass
-
-    def release_from_suspension(self) -> None:
-        """No-op back-compat shim. See class docstring of clockblocks 1.0."""
-        pass
+        Use this anywhere foreign-thread callers might mutate state a scheduled action reads
+        (e.g. a pygame handler calling :meth:`Transcriber.start_transcribing`).
+        """
+        active_clock = getattr(threading.current_thread(), '__clock__', None)
+        if getattr(active_clock, 'scheduler', None) is self.scheduler:
+            return nullcontext()
+        return self.scheduler.while_quiescent()
 
     def children(self) -> Sequence['Clock']:
         """

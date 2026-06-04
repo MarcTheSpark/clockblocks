@@ -122,8 +122,10 @@ class Scheduler(threading.Thread):
         action. So don't call this from within a scheduled action: you'd block waiting for that action
         to finish, but it can't finish while it's stuck waiting here.
 
-        (The clock system uses this so a tempo change made from a non-clock thread doesn't rewrite a
-        clock's tempo while a scheduled action is in flight relying on it.)
+        In the context of the clock system, it also shouldn't be called from the clock thread, since that
+        will only be running while the scheduler is parked inside of _execute_event. For this reason we
+        have :meth:`Clock.while_scheduler_quiescent`, which safely wraps this method by detecting whether
+        we are running from a clock and no-op'ing in that case.
         """
         with self._execution_lock:
             yield self
