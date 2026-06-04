@@ -1283,6 +1283,80 @@ class Clock:
                 if c.parent is not None:
                     c.parent._detach_child(c)
 
+    ##################################################################################################################
+    #                                            Removed Legacy APIs
+    ##################################################################################################################
+    # APIs from the original clockblocks that no longer exist in cb2, kept as raise-on-access stubs so
+    # users porting old code get an actionable message instead of a bare AttributeError.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _removed_attribute(name: str, replacement: str, reason: str):
+        raise AttributeError(
+            f"{name} was removed in clockblocks 1.0: {reason}. Use {replacement} instead."
+        )
+
+    @property
+    def synchronization_policy(self):
+        Clock._removed_attribute(
+            "Clock.synchronization_policy", "(no replacement needed)",
+            "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
+            "is nothing to synchronize between sibling clocks"
+        )
+
+    @synchronization_policy.setter
+    def synchronization_policy(self, value):
+        Clock._removed_attribute(
+            "Clock.synchronization_policy", "(no replacement needed)",
+            "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
+            "is nothing to synchronize between sibling clocks"
+        )
+
+    @property
+    def timing_policy(self):
+        Clock._removed_attribute(
+            "Clock.timing_policy", "session.scheduler.timing_policy",
+            "timing is now a scheduler-wide property under the central scheduler"
+        )
+
+    @timing_policy.setter
+    def timing_policy(self, value):
+        Clock._removed_attribute(
+            "Clock.timing_policy", "session.scheduler.timing_policy",
+            "timing is now a scheduler-wide property under the central scheduler"
+        )
+
+    def use_absolute_timing_policy(self) -> None:
+        Clock._removed_attribute(
+            "Clock.use_absolute_timing_policy()", "session.scheduler.timing_policy = 1.0",
+            "timing is now a scheduler-wide property under the central scheduler"
+        )
+
+    def use_relative_timing_policy(self) -> None:
+        Clock._removed_attribute(
+            "Clock.use_relative_timing_policy()", "session.scheduler.timing_policy = 0.0",
+            "timing is now a scheduler-wide property under the central scheduler"
+        )
+
+    def use_mixed_timing_policy(self, absolute_relative_mix: float) -> None:
+        Clock._removed_attribute(
+            "Clock.use_mixed_timing_policy()", "session.scheduler.timing_policy = <0..1>",
+            "timing is now a scheduler-wide property under the central scheduler"
+        )
+
+    def rouse_and_hold(self, *args, **kwargs) -> None:
+        Clock._removed_attribute(
+            "Clock.rouse_and_hold()", "`with clock.while_scheduler_quiescent(): ...`",
+            "the rouse half is obsolete (lazy beat()/time() are live from any thread), and the hold "
+            "half is now an exception-safe `with` block that pairs acquire/release automatically"
+        )
+
+    def release_from_suspension(self, *args, **kwargs) -> None:
+        Clock._removed_attribute(
+            "Clock.release_from_suspension()", "`with clock.while_scheduler_quiescent(): ...`",
+            "the rouse/hold pair is now an exception-safe `with` block"
+        )
+
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)
         return ("Clock('{}')".format(self.name) if self.name is not None else "UNNAMED") + "[" + child_list + "]"
