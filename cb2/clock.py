@@ -112,6 +112,13 @@ class Clock:
         # comes from this counter so siblings get distinct, monotonically-increasing ids.
         self._child_counter = count()
         self.clock_id = (0,) if parent is None else parent.clock_id + (next(parent._child_counter),)
+        # Scheduler-event priority: deeper clocks sort *before* shallower ones at the same scheduled
+        # time, so when a parent and its descendant both wake at t, the descendant fires first.
+        # Among sibling clocks, the one forked first fires first. 
+        # So we sort first by reverse depth (negative length of id) and then by the id which represents forking order
+        # One quirk: if you have two cousin clocks, one forked earlier from a later-forked parent, and one forked
+        # later from an earlier-forked parent, the one with the earlier parent wins. Not sure if this matters much
+        self._priority = (-len(self.clock_id), self.clock_id)
 
         # tempo envelope, in seconds since I was created
         self.tempo_history = TempoHistory(
@@ -140,8 +147,9 @@ class Clock:
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
             self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
-                                           (0, ), {"description": f"Initial wake for Clock(name={self.name!r})",
-                                                   "acting_clock": self})
+                                           self._priority,
+                                           {"description": f"Initial wake for Clock(name={self.name!r})",
+                                            "acting_clock": self})
             self._wait_event.wait()
 
             threading.current_thread().__clock__ = self
@@ -240,7 +248,7 @@ class Clock:
         if self._waiting_for_children and not self._children and self._state is ClockState.ALIVE:
             self._waiting_for_children = False
             self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
-                                           self.clock_id,
+                                           self._priority,
                                            {"description": f"{self} wake (children finished)",
                                             "acting_clock": self})
 
@@ -556,7 +564,7 @@ class Clock:
         # moment is None signifies an indefinite wait where the only thing that can wake us (below)
         # is kill() setting our _wait_event. Otherwise queue the wake-up that fires when we reach `moment`.
         if moment is not None:
-            self._schedule_at(moment, self._wake_and_advance_to_next_wait_call, self.clock_id,
+            self._schedule_at(moment, self._wake_and_advance_to_next_wait_call, self._priority,
                               description=f"{self} wakeup action")
 
         # ---------------------------- STEP 3: Hand off to the scheduler -----------------------------
@@ -611,13 +619,9 @@ class Clock:
         CPU execution; the scheduler runs one clock's code at a time.
 
         :param forked_function: the function to be run on the new child clock
-        :param args: arguments to be passed to the forked function. One subtlety to note here: if the number of
-            arguments passed is one fewer than the number taken by the function, the clock on which the function is
-            forked will be passed as the first argument, followed by the arguments given. For instance, if we define
-            "forked_function(clock, a, b)", and then call "parent.fork(forked_function, (13, 6))", 13 will be passed
-            to "a" and 6 to "b", while the clock on which forked_function is running will be passed to "clock". On the
-            other hand, if the signature of the function were "forked_function(a, b)", 13 would be simply be passed to
-            "a" and 6 to "b".
+        :param args: positional arguments to be passed to the forked function. (Unlike legacy clockblocks,
+            cb2 does *not* inject the child clock as an extra first argument when the signature is one short
+            — call :func:`current_clock` from inside the forked function if you need a reference to it.)
         :param kwargs: keyword arguments to be passed to the forked function
         :param name: name to be given to the spawned child clock
         :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
@@ -727,7 +731,7 @@ class Clock:
                     threading.Thread(target=_fork_wrapper, args=args, kwargs=kwargs, daemon=True).start()
                     child._scheduler_park_condition.wait()
 
-            self._schedule_at(start_moment, _start_new_clock, child.clock_id,
+            self._schedule_at(start_moment, _start_new_clock, child._priority,
                               description=f"Forking of {child}",
                               extra_metadata={"forked_child": child})
             return child
@@ -762,7 +766,7 @@ class Clock:
                     f"Cannot schedule_action on a clock that is {self._state.value} (not ALIVE)."
                 )
             moment = to_absolute_moment(when, self, allow_number=False)
-            self._schedule_at(moment, lambda: action(*args, **kwargs), self.clock_id,
+            self._schedule_at(moment, lambda: action(*args, **kwargs), self._priority,
                               description=f"Scheduled action on {self}")
 
     def fork_unsynchronized(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
