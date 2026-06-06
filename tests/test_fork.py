@@ -5,7 +5,6 @@ import unittest
 from cb2.clock import Clock, ClockState
 from cb2.moment import Moment
 from cb2.utilities import current_clock
-from cb2 import scheduler as scheduler_mod
 
 
 class ForkTestCase(unittest.TestCase):
@@ -18,15 +17,11 @@ class ForkTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- basic fork ----
 

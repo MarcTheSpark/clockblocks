@@ -5,7 +5,6 @@ from cb2.clock import Clock
 from cb2.moment import Moment, to_absolute_moment
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
-from cb2 import scheduler as scheduler_mod
 
 
 class MomentTestCase(unittest.TestCase):
@@ -15,15 +14,11 @@ class MomentTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- Moment resolution (no timing) ----
 

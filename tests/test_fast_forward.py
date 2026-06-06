@@ -4,7 +4,6 @@ import unittest
 
 from cb2.clock import Clock, NotMasterClockError
 from cb2.utilities import current_clock
-from cb2 import scheduler as scheduler_mod
 
 
 class FastForwardTestCase(unittest.TestCase):
@@ -13,20 +12,16 @@ class FastForwardTestCase(unittest.TestCase):
     so a wait(n) that is *not* fast-forwarded takes ~n wall-clock seconds, while a fast-forwarded one
     returns essentially instantly. We assert on both wall-clock elapsed time and the clock's beat.
 
-    Like the other suites, each test gets a fresh master + scheduler (the scheduler is a module-level
-    singleton), torn down explicitly so a parked scheduler can't leak into the next test.
+    Like the other suites, each test gets a fresh master that mints its own scheduler, torn down
+    explicitly so the scheduler thread doesn't leak into the next test.
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- basic toggle ----
 
@@ -120,7 +115,7 @@ class FastForwardTestCase(unittest.TestCase):
         # ~2s into the post-goal real-time tail (beats 5..10 == ~5s), poke the scheduler to force an early
         # wakeup. The poked action is scheduled far in the future so it only notifies the condition — it
         # never competes to become the next event, so the early wakeup itself is the only thing under test.
-        sched = scheduler_mod._scheduler
+        sched = self.master.scheduler
         poke = threading.Timer(2.0, lambda: sched.schedule_action(1000.0, lambda: None, metadata="poke"))
 
         start = time.time()

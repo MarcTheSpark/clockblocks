@@ -5,7 +5,6 @@ import unittest
 from cb2.clock import Clock, DeadClockError
 from cb2.moment import Moment
 from cb2.utilities import current_clock
-from cb2 import scheduler as scheduler_mod
 
 
 class ScheduleActionTestCase(unittest.TestCase):
@@ -17,15 +16,11 @@ class ScheduleActionTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- basic firing ----
 
@@ -46,7 +41,7 @@ class ScheduleActionTestCase(unittest.TestCase):
         self.master.schedule_action(act, when=Moment.after_beats(0.02))
         self.master.wait(0.05)
         self.assertIsNone(seen.get("clock"))
-        self.assertIs(seen.get("thread"), scheduler_mod._scheduler)
+        self.assertIs(seen.get("thread"), self.master.scheduler)
 
     def test_schedule_action_rejects_bare_number(self):
         """`when` requires an explicit Moment, since a bare number's meaning would be ambiguous."""

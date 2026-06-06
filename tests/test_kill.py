@@ -4,28 +4,22 @@ import unittest
 from cb2.clock import Clock, ClockKilledError, DeadClockError, ClockState, WrongThreadError
 from cb2.moment import Moment
 from cb2.utilities import current_clock
-from cb2 import scheduler as scheduler_mod
 
 
 class KillTestCase(unittest.TestCase):
     """
     Real-time tests for Step 4 (kill / DeadClockError / ClockKilledError / state machine).
 
-    Each test runs against a fresh master + fresh scheduler. The scheduler is a module-level
-    singleton, so tearDown kills it explicitly to keep tests independent — otherwise a parked
-    scheduler from a prior test would prevent the next master's initial wake from firing.
+    Each test runs against a fresh master, which mints its own scheduler. tearDown kills that
+    scheduler so its thread doesn't linger between tests.
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- clock_id ----
 

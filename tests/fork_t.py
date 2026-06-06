@@ -1,13 +1,7 @@
-import threading
 import time
-
 from cb2.clock import Clock
 from cb2.moment import Moment
 from cb2.utilities import wait, current_clock
-from cb2.scheduler import get_scheduler
-from cb2.tempo_envelope import TempoEnvelope
-import math
-import logging
 
 
 c = Clock("MASTER", initial_tempo=20)

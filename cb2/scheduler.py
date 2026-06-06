@@ -346,18 +346,3 @@ class Scheduler(threading.Thread):
         except Exception as e:
             logger.exception(f"Error executing event '{event.metadata}': {e}")
         self._last_wake_time = time.time()
-
-# Module-level scheduler instance.
-_scheduler: Scheduler | None = None
-
-def get_scheduler() -> Scheduler:
-    """
-    Returns a module-level scheduler instance, creating and starting it if necessary.
-    """
-    global _scheduler
-    sched = _scheduler
-    if sched is None or not sched.is_alive():
-        sched = Scheduler(daemon=True)
-        sched.start()
-        _scheduler = sched
-    return sched

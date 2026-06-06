@@ -2,22 +2,17 @@ import unittest
 
 from cb2.clock import Clock
 from cb2.time_stamp import TimeStamp
-from cb2 import scheduler as scheduler_mod
 
 
 class TimeStampTestCase(unittest.TestCase):
     """Unit tests for TimeStamp: capture-now then resolve into any clock's frame."""
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     def test_implicit_clock_from_thread(self):
         # master's __init__ binds itself as __clock__ on the test thread, so TimeStamp() picks it up
@@ -70,11 +65,9 @@ class TimeStampTestCase(unittest.TestCase):
 
     def test_foreign_family_rejected(self):
         ts = TimeStamp(self.master)
-        # Build a second family on a new scheduler instance
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # A second master is a separate family on its own scheduler — foreign by construction.
         other = Clock(name="other")
+        self.addCleanup(other.kill)
         with self.assertRaises(ValueError):
             ts.beat_in_clock(other)
         with self.assertRaises(ValueError):

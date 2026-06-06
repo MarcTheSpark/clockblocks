@@ -5,7 +5,6 @@ import unittest
 from cb2.clock import Clock, ClockblocksError, NoActiveClockError, NotMasterClockError
 from cb2 import utilities
 from cb2.utilities import current_clock
-from cb2 import scheduler as scheduler_mod
 
 
 class ModuleApiTestCase(unittest.TestCase):
@@ -19,15 +18,11 @@ class ModuleApiTestCase(unittest.TestCase):
     """
 
     def setUp(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
         self.master = Clock(name="master")
 
     def tearDown(self):
-        if scheduler_mod._scheduler is not None:
-            scheduler_mod._scheduler.kill()
-            scheduler_mod._scheduler = None
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
 
     # ---- wait_for_children_to_finish ----
 

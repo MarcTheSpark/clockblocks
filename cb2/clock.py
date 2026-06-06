@@ -8,7 +8,7 @@ from itertools import count
 from typing import Callable, Sequence, Iterator
 from copy import deepcopy
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory
-from cb2.scheduler import get_scheduler, Scheduler
+from cb2.scheduler import Scheduler
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.enums import DurationUnits
 from cb2.utilities import _PrintColors, current_clock, _spawn_unsynchronized
@@ -102,10 +102,31 @@ def _reschedule_after_tempo_change(fn):
 
 
 class Clock:
+    """
+    Recursively nestable clock. Clocks can fork child-clocks, which can in turn fork their own
+    child-clocks. A clock with no parent is the *master*, and the whole family stays coordinated under it.
+
+    A master created on the main thread needs no cleanup. If you create one on another thread, call
+    ``master.kill()`` when you're done with it so its background timing thread doesn't linger (or use
+    :meth:`run_as_server`, which manages that thread for you).
+
+    :param name: (optional) can be useful for keeping track in confusing multi-threaded situations
+    :param parent: the parent clock for this clock; a value of None indicates the master clock
+    :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
+    :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
+    :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
+    :param timing_policy: master-only; sets the family's :attr:`timing_policy` (0.0 = relative, 1.0 =
+        absolute). Leaving it None keeps the scheduler default.
+    :param pool_size: the size of the thread pool for unsynchronized forks. Only has an effect on the
+        master clock.
+    :ivar name: the name of this clock (string)
+    :ivar parent: the parent Clock to which this clock belongs (Clock, or None if master clock)
+    :ivar tempo_history: TempoHistory describing how this clock has changed or will change tempo
+    """
 
     def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
-                 initial_tempo: float = None, initial_beat_length: float = None, scheduler: Scheduler = None,
-                 pool_size: int = 200):
+                 initial_tempo: float = None, initial_beat_length: float = None,
+                 timing_policy: float = None, pool_size: int = 200):
         # `pool_size` is accepted for back-compat with the original clockblocks API; the cb2 thread pool
         # (Step 9 of PLAN.md) isn't wired up yet, so the value is currently ignored.
         del pool_size
@@ -130,9 +151,22 @@ class Clock:
             units="rate"
         )
 
-        # get a default (shared) scheduler unless one is specifically provided
-        self.scheduler = self.parent.scheduler if self.parent is not None else \
-            get_scheduler() if scheduler is None else scheduler
+        # A clock family shares exactly one scheduler, created along with the master clock.
+        # Children inherit the master scheduler from their parent. There is deliberately no
+        # way to hand a master an existing scheduler: if you want two clocks in sync,
+        # fork them from one master; if you don't, make two masters and they run on independent
+        # schedulers with independent timing policies.
+        if self.parent is not None:
+            self.scheduler = self.parent.scheduler
+        else:
+            self.scheduler = Scheduler(daemon=True)
+            self.scheduler.start()
+
+        # `timing_policy` is a master-only convenience: it forwards to the family's scheduler. Passing it
+        # to a forked child is an error (the setter raises NotMasterClockError); leaving it None keeps the
+        # scheduler's default.
+        if timing_policy is not None:
+            self.timing_policy = timing_policy
 
         self._scheduler_park_condition = threading.Condition()
         self._wait_event = threading.Event()
@@ -1180,6 +1214,41 @@ class Clock:
         """
         return self.scheduler.is_fast_forwarding()
 
+    @property
+    def timing_policy(self) -> float:
+        """
+        How the scheduler trades off staying on absolute schedule vs. honoring each requested wait
+        duration: 0.0 = relative (always wait the full requested delay, drift allowed), 1.0 = absolute
+        (shorten waits to catch up to the ideal schedule), values in between blend the two.
+
+        Timing lives on the family's scheduler; this property forwards to ``self.scheduler.timing_policy``
+        so callers never need to touch the scheduler directly. It applies to the whole clock family (each
+        master has its own scheduler). Readable from any clock; settable only on the master.
+        """
+        return self.scheduler.timing_policy
+
+    @timing_policy.setter
+    def timing_policy(self, value: float) -> None:
+        if not self.is_master():
+            raise NotMasterClockError(
+                "timing_policy applies to the whole clock family; set it on the master clock."
+            )
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("timing_policy must be between 0 (relative) and 1 (absolute).")
+        self.scheduler.timing_policy = value
+
+    def use_absolute_timing_policy(self) -> None:
+        """Shorthand for ``timing_policy = 1.0`` (always catch up to absolute schedule)."""
+        self.timing_policy = 1.0
+
+    def use_relative_timing_policy(self) -> None:
+        """Shorthand for ``timing_policy = 0.0`` (always wait the full requested delay)."""
+        self.timing_policy = 0.0
+
+    def use_mixed_timing_policy(self, absolute_relative_mix: float) -> None:
+        """Shorthand for ``timing_policy = absolute_relative_mix`` (a blend, 0=relative .. 1=absolute)."""
+        self.timing_policy = absolute_relative_mix
+
     def kill(self) -> None:
         """
         End the function running on this clock and cascade to all descendants.
@@ -1221,9 +1290,8 @@ class Clock:
                 _scheduler_park_condition (releasing the scheduler — critical for the master since
                 there's no _fork_wrapper wrapper to do it later). If the main thread is parked inside
                 wait() at STEP 3, it wakes, sees DEAD at STEP 4a, and raises ClockKilledError.
-                Uncaught, the main thread dies and the daemon scheduler dies with the process —
-                but for run_as_server-style scenarios where the scheduler singleton must remain
-                usable for a subsequent master, the kill() notify is what makes that possible.
+                Finally, because each master owns its scheduler 1:1, killing the master also kills that
+                scheduler (STEP 4 below) so its thread doesn't park forever.
         """
         if self._state is ClockState.DEAD:
             return
@@ -1283,6 +1351,12 @@ class Clock:
                 if c.parent is not None:
                     c.parent._detach_child(c)
 
+        # ----------------------------------- STEP 4: Kill scheduler -----------------------------------
+        # Clean up the scheduler when killing the master
+        # (No need to hold tree lock here anymore; it's irrelevant)
+        if self.is_master():
+            self.scheduler.kill()
+
     ##################################################################################################################
     #                                            Removed Legacy APIs
     ##################################################################################################################
@@ -1310,38 +1384,6 @@ class Clock:
             "Clock.synchronization_policy", "(no replacement needed)",
             "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
             "is nothing to synchronize between sibling clocks"
-        )
-
-    @property
-    def timing_policy(self):
-        Clock._removed_attribute(
-            "Clock.timing_policy", "session.scheduler.timing_policy",
-            "timing is now a scheduler-wide property under the central scheduler"
-        )
-
-    @timing_policy.setter
-    def timing_policy(self, value):
-        Clock._removed_attribute(
-            "Clock.timing_policy", "session.scheduler.timing_policy",
-            "timing is now a scheduler-wide property under the central scheduler"
-        )
-
-    def use_absolute_timing_policy(self) -> None:
-        Clock._removed_attribute(
-            "Clock.use_absolute_timing_policy()", "session.scheduler.timing_policy = 1.0",
-            "timing is now a scheduler-wide property under the central scheduler"
-        )
-
-    def use_relative_timing_policy(self) -> None:
-        Clock._removed_attribute(
-            "Clock.use_relative_timing_policy()", "session.scheduler.timing_policy = 0.0",
-            "timing is now a scheduler-wide property under the central scheduler"
-        )
-
-    def use_mixed_timing_policy(self, absolute_relative_mix: float) -> None:
-        Clock._removed_attribute(
-            "Clock.use_mixed_timing_policy()", "session.scheduler.timing_policy = <0..1>",
-            "timing is now a scheduler-wide property under the central scheduler"
         )
 
     def rouse_and_hold(self, *args, **kwargs) -> None:
