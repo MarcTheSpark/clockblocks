@@ -262,12 +262,30 @@ guess. Suggest a small `_removed_attribute(name, replacement, reason)` helper th
 
 ### Documentation pass
 
-Go through all of the docstrings in the original clockblocks 1.0 (`clockblocks/src/clockblocks/`) and
-port over wording that still applies — method/param descriptions, usage notes, examples — adapting or
-dropping anything tied to the abandoned architecture (per-parent queues, `rouse_and_hold`,
-synchronization policy, etc.). The redesign rewrote a lot of docstrings from scratch or left them
-terse; much of the original user-facing prose is still good and shouldn't be lost. Keep it user-facing
-and concise (don't narrate the internals or the old-vs-new differences).
+**Status: largely done.** Went through the package making docstrings user-facing (implementation detail
+pushed into comments), ported still-applicable wording from original clockblocks 1.0, documented the
+enums, added a `Scheduler` class docstring, moved the four-path clock-termination walkthrough out of
+`kill()` into a module-level "Clock termination / lifecycle paths" comment, and added the GPL-3.0 header
+to the files missing it.
+
+Original intent (kept for reference): go through all of the docstrings in the original clockblocks 1.0
+(`clockblocks/src/clockblocks/`) and port over wording that still applies — method/param descriptions,
+usage notes, examples — adapting or dropping anything tied to the abandoned architecture (per-parent
+queues, `rouse_and_hold`, synchronization policy, etc.). Keep it user-facing and concise (don't narrate
+the internals or the old-vs-new differences).
+
+**Deferred — qualify bare cross-module cross-references (do during the rename).** Many docstrings use
+bare names for cross-*module* references, e.g. `scheduler.py` / `utilities.py` writing `:class:`Clock``,
+`:meth:`Clock.wait``, `:attr:`Clock.timing_policy``. Sphinx's Python domain only auto-finds a bare name
+in the *same* module, so from another module these render as plain monospace, not a hyperlink (no hard
+error unless built with `-W`). The docs are one combined scamp+clockblocks Sphinx build with **no
+intersphinx**, so cross-package/cross-module links work only when fully qualified
+(`:class:`~package.module.Name``) — the convention the existing scamp docstrings already follow (e.g.
+`:func:`~clockblocks.clock.Clock.fork``, `:class:`~scamp.session.Session``). Pair this cleanup with the
+`cb2/` → `clockblocks/` rename below, since every `~cb2.…` prefix has to be rewritten to
+`~clockblocks.…` at that point anyway — doing both at once avoids touching the same lines twice.
+(References *to scamp* classes are already qualified, e.g. `~scamp.session.Session` /
+`~scamp.transcriber.Transcriber`.)
 
 ### Step 11 — Unit tests
 
@@ -284,6 +302,105 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 - Fast-forward (Step 6)
 - TimeStamp consistency across clocks (Step 7)
 
+### Step 12 — Master lifecycle context manager (`with Clock()/Session():`)
+
+**Status: done.** Terminal parks now propagate (dropped the `except` in `wait_forever` /
+`wait_for_children_to_finish`); `run_as_server`'s server loop absorbs the kill so its daemon thread
+exits quietly; `Clock.__enter__`/`__exit__` added (`__exit__` kills, suppressing only
+`ClockKilledError` / `DeadClockError`). The "MASTER, killed" lifecycle comment and the affected
+docstrings were updated, and `tests/test_kill.py` / `tests/test_module_api.py` cover the new behavior
+(86 tests pass). scamp's one `wait_for_children_to_finish` call site — `performance.py` — was reviewed
+and needs no change (forked path: the raise is caught by `_fork_wrapper`; blocking path: kill mid-
+playback now raises rather than silently returning, which is the intended semantics). Original design
+notes kept below.
+
+Give `Clock` `__enter__`/`__exit__` so a master can be used as a context manager. `__exit__` calls
+`self.kill()` (the master owns its scheduler 1:1, so this also stops the background thread). Because
+`Session` subclasses `Clock`, this gives `with Session() as s:` for free.
+
+This solves two distinct things at once, both discussed under the master-lifecycle design note below:
+
+1. **Guaranteed teardown / no strayed scheduler thread.** The opt-in fix for the "natural-end master
+   falls off the end without `kill()`" leak — relevant when a master runs on a non-main thread in a
+   long-lived process. On exit (normal *or* exceptional) the scheduler thread is torn down.
+2. **A top-level boundary for `ClockKilledError`, analogous to `_fork_wrapper`.** Today a plain
+   `wait()` correctly *raises* `ClockKilledError` so running code unwinds promptly (don't change that —
+   swallowing it would let one more chunk of work run before the next entry-check notices). Sub-clocks
+   are fine because `_fork_wrapper` catches that exception once at the top; the master is the only clock
+   with no such boundary, so an external kill mid-`wait()` throws into unguarded top-level code.
+   `__exit__` should catch `ClockKilledError` (and `DeadClockError`) so a killed master shuts down
+   cleanly instead of surfacing a traceback — making it the natural seam for a user who wants custom
+   kill handling to put their own `try/except`.
+
+Keep it opt-in: existing scripts that just call `Clock()` / `Session()` and rely on main-thread exit
+remain valid (on the main thread, thread-end *is* process exit and the daemon scheduler dies with it).
+
+**Prerequisite — terminal parks must propagate `ClockKilledError` (revised decision).** Originally
+`wait_forever()` / `wait_for_children_to_finish()` swallowed the kill exception and returned normally.
+Change them to **propagate** it (drop the internal `except (ClockKilledError, DeadClockError): pass`), so
+*every* wait variant behaves the same: a kill mid-wait raises, caught at the appropriate boundary —
+`_fork_wrapper` for sub-clocks, `__exit__` (or a user `try/except`) for the master. This removes the
+terminal-park special case and is what lets the context manager's boundary uniformly abandon the body on
+*any* kill (without it, a kill during a terminal park would be swallowed and the body would run on
+post-kill until the next clock call's `DeadClockError`).
+
+Why propagating is correct, not just convenient:
+- **The common bare-script shutdown never goes through `kill()`.** A script ending in `s.wait_forever()`
+  is stopped by Ctrl-C / process termination → `KeyboardInterrupt` / process exit, *never*
+  `ClockKilledError`. So propagating adds no tracebacks to that path. The only thing that raises
+  `ClockKilledError` is a *programmatic* `kill()` (GUI stop button, controlling thread) — by definition
+  "something interrupted the natural flow," exactly when an exception is the right signal. A GUI app
+  catches it naturally (`except ClockKilledError:` == "cancelled by the UI").
+- **`wait_for_children_to_finish()` gains a useful distinction.** It still returns normally on natural
+  completion (all children finished — the common path) but now *raises* on kill-cascade, so the two
+  reasons it can unblock are finally distinguishable: completion runs your post-park code (save/export);
+  kill skips it and unwinds.
+- **`wait_forever()` never returns normally anyway** (it only unblocks via kill), so "propagate" just
+  means it signals the kill instead of silently dropping into trailing code.
+
+"Cleanup regardless of how we stop" then becomes idiomatic `try/finally`, which is *more* robust than the
+old swallow because it also covers Ctrl-C:
+
+```python
+with Session() as s:
+    s.fork(part)
+    try:
+        s.wait_forever()
+    finally:
+        save_recording()      # runs on kill, Ctrl-C, or any exit
+```
+
+Migration: ported code relying on `wait_forever()` returning cleanly after a programmatic `kill()` (to
+run trailing code) must wrap it in `try/except ClockKilledError` or `try/finally`. Low cost —
+`wait_forever()` is almost always the last statement. (A `raise_on_killed` parameter was considered and
+rejected: a boolean that flips exception behavior is an unneeded knob when `try/except` already says
+"I'll handle the kill.") When implementing, update the "MASTER, killed" lifecycle comment in `clock.py`,
+which currently states the parks swallow.
+
+### Step 13 — Round out the module-level "act on the current clock" helpers
+
+`utilities.py` exposes `wait` / `wait_forever` / `wait_for_children_to_finish` / `fork` /
+`fork_unsynchronized` / `current_clock` — top-level functions that grab `current_clock()` and act on it,
+so user code doesn't have to thread a clock reference around. Extend that same pattern to the tempo API,
+which today is only reachable as methods on a `Clock` object.
+
+Add module-level forwarders to `current_clock()` for:
+- the tempo-curve family: `set_tempo_target(s)` / `set_rate_target(s)` / `set_beat_length_target(s)`,
+  `apply_tempo_function` / `apply_rate_function` / `apply_beat_length_function`,
+  `stop_tempo_loop_or_function`.
+- the instantaneous setters. `tempo` / `rate` / `beat_length` are *properties* on `Clock`, and you
+  can't have a module-level property, so add plain `set_tempo(x)` / `set_rate(x)` / `set_beat_length(x)`
+  functions that forward to the corresponding property setter on `current_clock()`. (Consider matching
+  `get_tempo()` / etc. readers, or leave reads to `current_clock().tempo` — decide during impl.)
+
+Each forwarder mirrors `wait`/`fork`: resolve `current_clock()`, raise `NoActiveClockError` if there's
+none, otherwise call through. **Document prominently that these act on *this* (the current) clock, not
+the master** — exactly like `wait()`, whose delay is in the current clock's beats. So calling
+`set_tempo(120)` inside a forked function changes that fork's tempo, *not* the master's; to change the
+master you call the method on the master object (or run on the master's own thread). This is the same
+"the current clock is the implicit subject" rule the existing helpers follow; tempo just makes the
+"which clock?" question more salient than `wait` does, so it's worth spelling out.
+
 ## Known design questions to revisit during implementation
 
 - **Scheduler-action serialization.** Original semantics serialize per master clock; cb2 inherits this property because `_wake_and_advance_to_next_wait_call` blocks on `_scheduler_park_condition`. Confirm this is what we want (the alternative — letting the scheduler issue another wakeup while a clock is still in user code — would allow real parallelism between clocks but break determinism users rely on).
@@ -292,7 +409,7 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 - **Multiple master clocks.** **Resolved.** The old module-level `get_scheduler()` singleton (which made two `Clock(parent=None)` calls share a scheduler) is **gone**, along with the `scheduler=` constructor arg. Every master now mints and starts its own `Scheduler`; children inherit the parent's. Rationale: a shared scheduler *is* what makes a clock family — it's the shared timing source. If you want two clocks in sync, fork them from one master; if you don't, make two masters and they run on independent schedulers with independent timing policies (and `timing_policy` set on one can't surprise the other). Two live masters sharing one scheduler used to deadlock at bootstrap anyway (the scheduler stays parked waiting for the first master to reach its next `wait()` while the second master's initial wake never fires), so nothing real is lost.
 - **Natural-end master strands its scheduler (the "B" question).** *Cross-master deadlock: resolved by the per-master-scheduler change above.* When a master's top-level code falls off the end without `kill()`, there's still no `_fork_wrapper` cleanup, so its scheduler thread stays parked on `_scheduler_park_condition` forever — but now that's a private, daemon, per-master scheduler, so it can't poison anyone else. A *second* master gets its own fresh scheduler and bootstraps fine; the old singleton deadlock (and the `scamp/test/test_examples.py` cross-example hang it caused) can no longer happen. The scamp test runner's "kill the active master between examples" workaround is therefore no longer load-bearing for correctness (fine to keep as hygiene). Explicit teardown is clean: **`master.kill()` kills the master's scheduler** (the two are 1:1).
   - **`run_as_server` is the intended indefinite-park case, and is fine.** It backgrounds the master on a daemon thread that sits in `wait_forever()` (`_wait(None)`) so it can accept forks at any time; its owning thread is *alive* (not a falloff), the scheduler is released and idle, and `kill()` tears it down. No special cleanup needed.
-  - **Remaining, lower-stakes leak:** a master whose owning thread *falls off the end without `kill()`* leaks one parked daemon thread until process exit. Only bites when the master runs on a non-main thread in a long-lived process; on the main thread the thread ending *is* process exit and the daemon scheduler dies with it. We **accept and document** this (see the `Clock` class docstring's lifecycle note: "create a master off the main thread → call `master.kill()` when done"). Not fixed in code: `weakref.finalize` can't help (the parked scheduler thread's suspended frame holds `self`, pinning the master alive, so it never gets collected and the finalizer never fires); `atexit` fires only at interpreter shutdown, not thread end. A context-manager master (`with Clock()/Session():`) remains available as an opt-in for anyone who wants guaranteed teardown, but isn't required.
+  - **Remaining, lower-stakes leak:** a master whose owning thread *falls off the end without `kill()`* leaks one parked daemon thread until process exit. Only bites when the master runs on a non-main thread in a long-lived process; on the main thread the thread ending *is* process exit and the daemon scheduler dies with it. We **accept and document** this (see the `Clock` class docstring's lifecycle note: "create a master off the main thread → call `master.kill()` when done"). Not fixed in code: `weakref.finalize` can't help (the parked scheduler thread's suspended frame holds `self`, pinning the master alive, so it never gets collected and the finalizer never fires); `atexit` fires only at interpreter shutdown, not thread end. The opt-in fix is a context-manager master (`with Clock()/Session():`) — see **Step 12**, which also gives the master a top-level `ClockKilledError` boundary; it's opt-in, not required.
 
 ## Out of scope for 1.0
 
@@ -304,7 +421,7 @@ Keep cb2's `mock_time.py` compression trick. Cover:
 
 1. All Step-11 unit tests pass.
 2. `scamp/test/test_examples.py` passes with goldens regenerated and diffs reviewed.
-3. `cb2/` renamed to `clockblocks/` (after atomic swap with the existing dir, which moves to `clockblocks_legacy/` or a tag for one release).
+3. `cb2/` renamed to `clockblocks/` (after atomic swap with the existing dir, which moves to `clockblocks_legacy/` or a tag for one release). As part of this, rewrite every `~cb2.…` cross-reference to `~clockblocks.…` and qualify the remaining bare cross-module xrefs (see the deferred item under "Documentation pass").
 4. Old `_WaitKeeper`, `rouse_and_hold`, `_woken_early`, `_synchronization_policy`, and the three busy-wait spin loops are gone from the new codebase.
 
 ## Possible 1.5 features
