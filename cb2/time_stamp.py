@@ -1,3 +1,19 @@
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+#  This file is part of SCAMP (Suite for Computer-Assisted Music in Python)                      #
+#  Copyright © 2020 Marc Evanstein <marc@marcevanstein.com>.                                     #
+#                                                                                                #
+#  This program is free software: you can redistribute it and/or modify it under the terms of    #
+#  the GNU General Public License as published by the Free Software Foundation, either version   #
+#  3 of the License, or (at your option) any later version.                                      #
+#                                                                                                #
+#  This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;     #
+#  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.     #
+#  See the GNU General Public License for more details.                                          #
+#                                                                                                #
+#  You should have received a copy of the GNU General Public License along with this program.    #
+#  If not, see <http://www.gnu.org/licenses/>.                                                   #
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+
 from __future__ import annotations
 from functools import total_ordering
 from typing import TYPE_CHECKING
@@ -10,21 +26,22 @@ if TYPE_CHECKING:
 @total_ordering
 class TimeStamp:
     """
-    A snapshot of "now" as a clock-agnostic point on the scheduler's timeline, projectable
-    into any clock's beat or time frame on demand.
+    A snapshot of "now" as a clock-agnostic point on the scheduler's timeline, projectable into any
+    clock's beat or time frame on demand.
 
-    Constructed at the moment of interest (e.g. note-on); later queries answer "what beat /
-    what time was this in clock X?" by running the cached scheduler-time back through
-    ``Clock.scheduler_to_clock_time``. Because tempo histories are append-only past the
-    committed point, this resolution is cheap and the old master-side ``time_stamp_data``
-    dedup cache is no longer needed.
+    Construct one at the moment of interest (e.g. note-on); later queries answer "what beat / what time
+    was this in clock X?" for any clock in the same family.
 
-    :param clock: any clock in the family of interest; if None, the clock is captured
+    :param clock: any clock in the family of clocks we are interested in; if None, the clock is captured
         implicitly from the current thread.
-    :ivar scheduler_time: the scheduler-time at which this TimeStamp was created. This is
-        the canonical, family-invariant axis; per-clock beats/times are derived from it.
+    :ivar scheduler_time: the scheduler-time at which this TimeStamp was created. This is the canonical,
+        family-invariant axis; per-clock beats and times are derived from it.
     """
 
+    # Implementation: we store only the scheduler-time and the master. Each query runs that scheduler-time
+    # back through the target clock's tempo history (Clock.scheduler_to_clock_time). Tempo histories only
+    # grow past the committed point, so resolution is cheap and needs no cached per-clock beat snapshots
+    # (as we did in the original clockblocks).
     def __init__(self, clock: 'Clock' = None):
         from cb2.clock import Clock
         clock = current_clock() if clock is None else clock

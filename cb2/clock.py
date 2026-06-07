@@ -1,3 +1,24 @@
+"""
+Module defining the central :class:`Clock` class — recursively nestable clocks that coordinate musical
+time under a master clock and its background :class:`~cb2.scheduler.Scheduler`.
+"""
+
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+#  This file is part of SCAMP (Suite for Computer-Assisted Music in Python)                      #
+#  Copyright © 2020 Marc Evanstein <marc@marcevanstein.com>.                                     #
+#                                                                                                #
+#  This program is free software: you can redistribute it and/or modify it under the terms of    #
+#  the GNU General Public License as published by the Free Software Foundation, either version   #
+#  3 of the License, or (at your option) any later version.                                      #
+#                                                                                                #
+#  This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;     #
+#  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.     #
+#  See the GNU General Public License for more details.                                          #
+#                                                                                                #
+#  You should have received a copy of the GNU General Public License along with this program.    #
+#  If not, see <http://www.gnu.org/licenses/>.                                                   #
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+
 import functools
 import math
 import threading
@@ -58,6 +79,49 @@ class ClockState(Enum):
     PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
     ALIVE = "alive"      # forked_function is running (or about to run)
     DEAD = "dead"        # killed, or forked_function returned
+
+
+# ======================================================================================================
+# Clock termination / lifecycle paths
+# ------------------------------------------------------------------------------------------------------
+# Every clock ends in one of four ways. They converge on the same final state (DEAD, detached from the
+# parent, scheduler released), but reach it differently. kill() and _fork_wrapper both implement parts of
+# this; this is the single reference for how they fit together.
+#
+#   SUB-CLOCK, natural end:
+#       The user function returns inside _fork_wrapper (no exception). _fork_wrapper removes the child
+#       from parent._children, sets state=DEAD, then notifies _scheduler_park_condition (the scheduler is
+#       parked there awaiting a next wait() that will never come). The thread exits.
+#
+#   SUB-CLOCK, killed:
+#       kill() (possibly cascaded from an ancestor) sets state=DEAD, removes the clock's queued wake-up
+#       (and any other event for it) from the scheduler heap, sets _wait_event, notifies
+#       _scheduler_park_condition, and detaches it from its parent. If it was parked inside wait(), it
+#       wakes, sees DEAD, and raises ClockKilledError. If it wasn't in wait(), its next wait() raises
+#       DeadClockError at the entry check. Either error propagates into _fork_wrapper, which catches it and
+#       falls through to the same cleanup as the natural-end path (detach + notify are idempotent).
+#
+#   MASTER, natural end:
+#       The owning thread finishes its top-level code. There is no _fork_wrapper, so nothing notifies the
+#       scheduler — it stays parked on the master's _scheduler_park_condition. On the main thread this is
+#       harmless (the thread ending is process exit, and the daemon scheduler dies with it). On another
+#       thread in a long-lived process it leaks the parked scheduler daemon until exit, which is why a master
+#       created off the main thread should be killed explicitly (see Clock's class docstring).
+#
+#   MASTER, killed:
+#       kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
+#       _scheduler_park_condition (releasing the scheduler — critical here, since there's no _fork_wrapper
+#       to do it later). Finally, because a master owns its scheduler 1:1, killing the master also kills
+#       that scheduler so its thread doesn't park forever. Two sub-cases depending on who calls kill():
+#         - Killed from another thread (e.g. a GUI/pygame callback) while the owning thread is parked in
+#           a wait: owning thread wakes, sees DEAD, and raises ClockKilledError out of the wait. Every wait
+#           variant propagates it (wait_forever / wait_for_children_to_finish included — they no longer
+#           swallow), so it's caught at the managing boundary: run_as_server's server loop or a
+#           `with clock:` block for a master, or the user's own try/except.
+#         - Self-kill (the owning thread calls master.kill() itself): it can only do so while running, not
+#           parked, so nothing observes DEAD here — kill() just winds things down and returns normally. No
+#           ClockKilledError; a *later* wait()/fork() on this thread would raise DeadClockError at entry.
+# ======================================================================================================
 
 
 def _reschedule_after_tempo_change(fn):
@@ -250,7 +314,7 @@ class Clock:
         has exclusive access by construction.
 
         Use this anywhere foreign-thread callers might mutate state a scheduled action reads
-        (e.g. a pygame handler calling :meth:`Transcriber.start_transcribing`).
+        (e.g. a pygame handler calling scamp's :meth:`~scamp.transcriber.Transcriber.start_transcribing`).
         """
         active_clock = getattr(threading.current_thread(), '__clock__', None)
         if getattr(active_clock, 'scheduler', None) is self.scheduler:
@@ -413,6 +477,7 @@ class Clock:
         return f"[{name} beat={self.beat():.3f} time={self.time():.3f} wall={self.wall_time_in_scheduler():.3f}]"
 
     def print_status(self, verbose: bool = False) -> None:
+        """Print this clock's :meth:`status` snapshot."""
         print(self.status(verbose), flush=True)
 
     @property
@@ -1229,9 +1294,14 @@ class Clock:
     @property
     def timing_policy(self) -> float:
         """
-        How the scheduler trades off staying on absolute schedule vs. honoring each requested wait
-        duration: 0.0 = relative (always wait the full requested delay, drift allowed), 1.0 = absolute
-        (shorten waits to catch up to the ideal schedule), values in between blend the two.
+        How the family trades off relative vs. absolute timing, as a float from 0 to 1.
+
+        At 0.0 (relative) each wait call is kept as faithful as possible to its requested duration. This
+        can let the clock fall behind real time: if heavy processing makes one note late, that lateness is
+        never made up. At 1.0 (absolute) the clock instead stays faithful to the time elapsed since it
+        began — a wait that ran long is followed by shorter waits to catch up, at the cost of some
+        relative-timing accuracy. A value in between is a hybrid: when the clock gets behind it is allowed
+        to catch up, but only partway for each wait call, preserving some of the relative timing.
 
         Timing lives on the family's scheduler; this property forwards to ``self.scheduler.timing_policy``
         so callers never need to touch the scheduler directly. It applies to the whole clock family (each
@@ -1263,53 +1333,27 @@ class Clock:
 
     def kill(self) -> None:
         """
-        End the function running on this clock and cascade to all descendants.
+        End this clock (and the corresponding forked function if not master) and cascade to all descendant clocks.
 
-        Removes any queued scheduler events for self/descendants (pending wakeups, pending forks),
-        flips state to DEAD, and wakes any parked wait so it raises ClockKilledError. The whole thing
-        runs under `_tree_lock` so it's atomic against a concurrent fork(): either we collect a child
-        and kill it, or fork sees us DEAD and refuses — never an orphan. (A victim's wakeup that fires
-        before we set DEAD is harmless: the victim sees ALIVE, advances, runs to its next wait, and
-        raises DeadClockError there — the same "killed while awake" path handled below.)
+        Pending scheduled work for this clock and its descendants is cancelled and the clocks are
+        marked dead. A clock currently blocked in :meth:`wait` raises :class:`ClockKilledError`; any
+        later :meth:`wait` or :meth:`fork` on a dead clock raises :class:`DeadClockError`. Killing the
+        master also tears down the family's scheduler.
 
-        This is as good a place as any to clarify the possible code paths for terminating clocks:
+        Safe to call from any thread, and killing an already-dead clock is a no-op.
 
-            SUB-CLOCK, natural end:
-                User function returns inside _fork_wrapper. The except blocks aren't entered.
-                _fork_wrapper removes child from parent._children, sets state=DEAD, then notifies
-                _scheduler_park_condition (the scheduler is parked there awaiting our next
-                wait that will never come). Thread exits.
-
-            SUB-CLOCK, killed:
-                kill() (possibly cascaded from an ancestor) sets state=DEAD on us, removes
-                our queued wake-up (and any other event related to this clock) from the heap,
-                sets _wait_event, notifies _scheduler_park_condition, and detaches us from our
-                parent's _children list. If we were parked inside wait() at STEP 3, we wake at
-                STEP 4a, see DEAD, and raise ClockKilledError. If we weren't in wait, the next
-                wait() raises DeadClockError at the entry check (STEP 1). Either error propagates
-                into _fork_wrapper, which catches it and falls through to the same cleanup as the
-                natural-end path (the cleanup's detach and notify are both idempotent).
-
-            MASTER, natural end:
-                Main thread finishes its top-level code. There is no _fork_wrapper wrapper, so no
-                automatic notify. The scheduler would be left parked on _scheduler_park_condition,
-                but since it's a daemon thread and the process is exiting, this doesn't matter.
-                (Will matter once run_as_server lands and the master runs in a background
-                thread — Step 5 will need its own cleanup wrapper.)
-
-            MASTER, killed:
-                kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
-                _scheduler_park_condition (releasing the scheduler — critical for the master since
-                there's no _fork_wrapper wrapper to do it later). If the main thread is parked inside
-                wait() at STEP 3, it wakes, sees DEAD at STEP 4a, and raises ClockKilledError.
-                Finally, because each master owns its scheduler 1:1, killing the master also kills that
-                scheduler (STEP 4 below) so its thread doesn't park forever.
+        (See the "Clock termination / lifecycle paths" note near the top of this module for how the
+        four termination paths work internally.)
         """
         if self._state is ClockState.DEAD:
             return
 
-        # Everything below runs under _tree_lock: collecting victims walks the tree, and the
-        # flag-DEAD + cancel-events + detach must be atomic against a concurrent fork() (see docstring).
+        # Everything below runs under _tree_lock so it's atomic against a concurrent fork(). This is important
+        # because we look at the state of the tree and then take action on it; if a fork could arrive between
+        # walking the tree and implementing the kill (flag as DEAD, cancel events, detach from parent), we might
+        # miss a just-forked child.
+        # With the tree lock, either fork arrives fully before (and therefore we see the new child and kill it) or
+        # fork arrives fully after (and therefore raises a DeadClockError).
         with self._tree_lock:
             if self._state is ClockState.DEAD:
                 # Lost the race to another kill() while acquiring the lock; it did our work.
@@ -1371,8 +1415,8 @@ class Clock:
 
     def __enter__(self) -> 'Clock':
         """
-        Use this clock — typically a master clock or :class:`Session` — as a context manager:
-        ``with Session() as s: ...``. Returns self; see :meth:`__exit__` for what leaving does.
+        Use this clock — typically a master clock or a scamp :class:`~scamp.session.Session` — as a context
+        manager: ``with Session() as s: ...``. Returns self; see :meth:`__exit__` for what leaving does.
         """
         return self
 

@@ -377,6 +377,10 @@ class TempoEnvelope(Envelope):
 
 @dataclasses.dataclass
 class FunctionFollowInfo:
+    """
+    Internal bookkeeping for a tempo curve that follows a user function: the function itself plus the
+    state needed to keep extending the envelope to approximate it as the clock advances.
+    """
     func: Callable[[float], float]
     next_domain_start: float
     extension_increment: float
@@ -392,6 +396,10 @@ class FunctionFollowInfo:
 
 @dataclasses.dataclass
 class EnvelopeLoopInfo:
+    """
+    Internal bookkeeping for a tempo envelope set to loop: the envelope being repeated plus the
+    running beat/time extents needed to keep appending copies as the clock advances.
+    """
     env: TempoEnvelope
     length_in_beats: float
     length_in_time: float
@@ -534,6 +542,15 @@ class TempoHistory(TempoEnvelope):
     @tempo_modification
     def append_envelope(self, envelope_to_append: TempoEnvelope, truncate: bool = False,
                         loop: bool = False) -> TempoEnvelope:
+        """
+        Append another tempo envelope onto the end of this one, starting from the current beat.
+
+        :param envelope_to_append: the TempoEnvelope to add on
+        :param truncate: if True, first discard any existing segments that extend past the current beat,
+            so the appended envelope begins cleanly from now
+        :param loop: if True, keep repeating `envelope_to_append` indefinitely from this point on
+        :return: self, for chaining purposes
+        """
         # truncate removes any segments that extend into the future
         if truncate:
             self.remove_segments_after(self.beat())

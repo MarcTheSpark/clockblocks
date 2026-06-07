@@ -1,3 +1,19 @@
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+#  This file is part of SCAMP (Suite for Computer-Assisted Music in Python)                      #
+#  Copyright © 2020 Marc Evanstein <marc@marcevanstein.com>.                                     #
+#                                                                                                #
+#  This program is free software: you can redistribute it and/or modify it under the terms of    #
+#  the GNU General Public License as published by the Free Software Foundation, either version   #
+#  3 of the License, or (at your option) any later version.                                      #
+#                                                                                                #
+#  This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;     #
+#  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.     #
+#  See the GNU General Public License for more details.                                          #
+#                                                                                                #
+#  You should have received a copy of the GNU General Public License along with this program.    #
+#  If not, see <http://www.gnu.org/licenses/>.                                                   #
+#  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+
 from __future__ import annotations
 import math
 import threading
@@ -94,14 +110,23 @@ def _thread_clock_attr():
 
 
 def current_clock() -> clock.Clock | None:
-    # utility for getting the clock we are currently using (we attach it to the thread when it's started)
+    """
+    Get the :class:`Clock` active on the current thread, or None if none is active.
+    """
+    # The clock is attached to its thread (as __clock__) when the thread is started. A thread spawned by
+    # fork_unsynchronized carries the _UNSYNCHRONIZED sentinel instead; we report that as None here.
     c = _thread_clock_attr()
     return None if c is _UNSYNCHRONIZED else c
 
 
 def _spawn_unsynchronized(forked_function: Callable, args: Sequence, kwargs: dict) -> None:
-    """Start `forked_function` on a new daemon thread tagged as unsynchronized, so it may use the
-    sleep-based waits (current_clock() stays None there). Backs Clock.fork_unsynchronized."""
+    """
+    Start `forked_function` on a new daemon thread tagged as unsynchronized, so it may use the
+    sleep-based waits (current_clock() stays None there). Backs Clock.fork_unsynchronized.
+
+    This is currently used in scamp for parameter curve automation; hopefully we will be able to
+    replace this with scheduled actions and remove this in future.
+    """
     kwargs = {} if kwargs is None else kwargs
 
     def runner():
@@ -112,6 +137,16 @@ def _spawn_unsynchronized(forked_function: Callable, args: Sequence, kwargs: dic
 
 
 def wait(dt: float, units="beats") -> None:
+    """
+    Call :meth:`Clock.wait` on the clock currently active on this thread.
+
+    On an unsynchronized thread (one spawned by :func:`fork_unsynchronized`) there is no clock, so this
+    falls back to a plain real-time :func:`time.sleep` and ``units`` is ignored (``dt`` is in seconds).
+    On an ordinary thread that never entered the clock system, raises NoActiveClockError.
+
+    :param dt: duration to wait
+    :param units: either "beats" or "time" (see :meth:`Clock.wait`)
+    """
     c = _thread_clock_attr()
     if c is _UNSYNCHRONIZED:
         time.sleep(dt)  # no clock => no tempo; units is ignored (dt is real seconds)
