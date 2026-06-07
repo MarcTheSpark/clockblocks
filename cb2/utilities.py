@@ -125,8 +125,9 @@ def wait(dt: float, units="beats") -> None:
 def wait_forever() -> None:
     """
     Block forever on the currently active clock (see :meth:`Clock.wait_forever`) — usually to keep the
-    main script alive while child clocks do the work. On an unsynchronized thread, sleeps indefinitely;
-    on an ordinary (non-clock) thread, raises NoActiveClockError.
+    main script alive while child clocks do the work. Unblocks only if the clock is killed, raising
+    :class:`ClockKilledError`. On an unsynchronized thread, sleeps indefinitely; on an ordinary
+    (non-clock) thread, raises NoActiveClockError.
     """
     c = _thread_clock_attr()
     if c is _UNSYNCHRONIZED:

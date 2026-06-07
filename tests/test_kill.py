@@ -165,6 +165,52 @@ class KillTestCase(unittest.TestCase):
         # if this returns at all, the scheduler is still healthy
         self.master.wait(0.01)
 
+    # ---- terminal parks now propagate ClockKilledError ----
+
+    def test_kill_propagates_through_wait_for_children(self):
+        """A master parked in wait_for_children_to_finish(), killed from outside, raises
+        ClockKilledError (it no longer swallows). A normal return means children really finished."""
+        def proc():
+            current_clock().wait(5.0)   # long-lived child so the parent actually parks
+
+        self.master.fork(proc)
+        killer = threading.Timer(0.05, self.master.kill)
+        killer.start()
+        with self.assertRaises(ClockKilledError):
+            self.master.wait_for_children_to_finish()
+        killer.join()
+        self.assertIs(self.master._state, ClockState.DEAD)
+
+    # ---- context manager ----
+
+    def test_context_manager_kills_and_stops_scheduler_on_exit(self):
+        """Leaving a `with Clock()` block kills the clock and (master being 1:1 with its scheduler)
+        stops that scheduler thread."""
+        with Clock(name="cm") as c:
+            self.assertTrue(c.alive)
+            sched = c.scheduler
+        self.assertIs(c._state, ClockState.DEAD)
+        self.assertFalse(c.alive)
+        sched.join(timeout=2)
+        self.assertFalse(sched.is_alive(), "scheduler thread should have stopped after __exit__")
+
+    def test_context_manager_suppresses_kill_during_wait(self):
+        """An external kill interrupts a wait inside the block; __exit__ suppresses the resulting
+        ClockKilledError so nothing escapes the `with`."""
+        with Clock(name="cm") as c:
+            killer = threading.Timer(0.05, c.kill)
+            killer.start()
+            c.wait(5.0)   # interrupted by kill -> ClockKilledError -> suppressed by __exit__
+        killer.join(timeout=1)
+        self.assertIs(c._state, ClockState.DEAD)
+
+    def test_context_manager_propagates_other_exceptions(self):
+        """A non-kill exception in the body still propagates, but the clock is killed on the way out."""
+        with self.assertRaises(ValueError):
+            with Clock(name="cm") as c:
+                raise ValueError("boom")
+        self.assertIs(c._state, ClockState.DEAD)
+
 
 if __name__ == "__main__":
     unittest.main()

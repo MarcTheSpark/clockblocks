@@ -1081,20 +1081,28 @@ class Clock:
         """
         Block this clock's own thread indefinitely, yielding to the scheduler so child clocks keep
         running. Typically called once a clock has forked its work and has nothing left to do itself
-        (e.g. the master clock keeping the main thread alive). Returns when the clock is killed.
+        (e.g. the master clock keeping the main thread alive).
 
-        Implemented as a single _wait(None): no wakeup is scheduled, so the clock simply parks until
-        kill() wakes it.
+        This only ever unblocks via :meth:`kill`, at which point it raises :class:`ClockKilledError`.
+        For a forked clock, this is caught by the fork wrapper and it cleanly unwinds.
+        For a master clock it would need to be caught. A built-in way to do this is by using the clock
+        as a context manager, which does exception handling and teardown for you. (:meth:`run_as_server`
+        also absorbs the exception automatically within the spawned thread).
+
+        That said, typically this is used at end of script and killed via ctrl-c/process exit, so no
+        explicit catching of this exception is necessary.
         """
-        try:
-            self._wait(None)
-        except (ClockKilledError, DeadClockError):
-            pass
+        # Implemented as a single _wait(None): no wakeup is scheduled,
+        # so the clock simply parks until kill() wakes it.
+        self._wait(None)
 
     def wait_for_children_to_finish(self) -> None:
         """
         Block this clock's own thread until all of its child clocks have finished, yielding to the
         scheduler so they can run, then return as soon as the last child ends.
+
+        If this clock is itself killed while waiting, raises :class:`ClockKilledError` rather than
+        returning — so a normal return always means the children genuinely finished.
         """
         # Park on an indefinite _wait(None) (no scheduled wake-up); _detach_child watches
         # _waiting_for_children and schedules the wakeup that releases us when the last child detaches.
@@ -1108,8 +1116,6 @@ class Clock:
             self._waiting_for_children = True
         try:
             self._wait(None)
-        except (ClockKilledError, DeadClockError):
-            pass
         finally:
             self._waiting_for_children = False
 
@@ -1128,7 +1134,13 @@ class Clock:
 
         def run_server():
             threading.current_thread().__clock__ = self
-            self.wait_forever()
+            # run_as_server is a managed entry point, so it absorbs the kill: wait_forever() now raises
+            # ClockKilledError when the clock is killed, and we swallow it here so the server thread
+            # exits quietly instead of dumping a traceback through the thread excepthook.
+            try:
+                self.wait_forever()
+            except (ClockKilledError, DeadClockError):
+                pass
 
         threading.Thread(target=run_server, daemon=True).start()
         # The calling thread no longer owns this clock.
@@ -1356,6 +1368,26 @@ class Clock:
         # (No need to hold tree lock here anymore; it's irrelevant)
         if self.is_master():
             self.scheduler.kill()
+
+    def __enter__(self) -> 'Clock':
+        """
+        Use this clock — typically a master clock or :class:`Session` — as a context manager:
+        ``with Session() as s: ...``. Returns self; see :meth:`__exit__` for what leaving does.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """
+        On leaving the ``with`` block, :meth:`kill` this clock — which, for a master, also tears down
+        its scheduler thread (the two are 1:1). This guarantees cleanup even when the clock runs off the
+        main thread, where simply falling off the end would otherwise leak the parked scheduler daemon.
+
+        A :class:`ClockKilledError` / :class:`DeadClockError` propagating out of the block (e.g. an
+        external ``kill()`` interrupted a wait) is suppressed — being killed is a clean way for a managed
+        clock to end. Any other exception propagates normally (after the clock is killed).
+        """
+        self.kill()
+        return exc_type is not None and issubclass(exc_type, (ClockKilledError, DeadClockError))
 
     ##################################################################################################################
     #                                            Removed Legacy APIs

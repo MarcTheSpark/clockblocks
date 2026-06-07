@@ -2,7 +2,7 @@ import time
 import threading
 import unittest
 
-from cb2.clock import Clock, ClockblocksError, NoActiveClockError, NotMasterClockError
+from cb2.clock import Clock, ClockblocksError, NoActiveClockError, NotMasterClockError, ClockState
 from cb2 import utilities
 from cb2.utilities import current_clock
 
@@ -85,18 +85,22 @@ class ModuleApiTestCase(unittest.TestCase):
 
     # ---- wait_forever ----
 
-    def test_wait_forever_returns_when_clock_killed(self):
-        returned = threading.Event()
+    def test_wait_forever_raises_when_clock_killed(self):
+        # wait_forever() unblocks by *raising* ClockKilledError, not returning. For a forked clock the
+        # fork wrapper catches it, so the line after wait_forever() is never reached and the child ends DEAD.
+        reached_after = threading.Event()
 
         def proc():
-            current_clock().wait_forever()   # blocks until the clock is killed
-            returned.set()                   # reached only once wait_forever returns
+            current_clock().wait_forever()   # blocks until the clock is killed, then raises
+            reached_after.set()              # must NOT be reached
 
         child = self.master.fork(proc)
         self.master.wait(0.05)               # let the child enter wait_forever
         child.kill()
-        self.assertTrue(returned.wait(timeout=3),
-                        "wait_forever did not return after the clock was killed")
+        self.master.wait(0.1)                # give the child thread time to unwind
+        self.assertFalse(reached_after.is_set(),
+                         "code after wait_forever() ran; it should have raised ClockKilledError instead")
+        self.assertIs(child._state, ClockState.DEAD)
 
     # ---- fork_unsynchronized ----
 
