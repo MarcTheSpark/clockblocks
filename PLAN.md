@@ -1,467 +1,128 @@
 # cb2 → clockblocks 1.0: Redesign Plan
 
-`cb2/` is a scratch space for a complete redesign of clockblocks that will eventually become clockblocks 1.0. This document captures why the redesign is happening, what the new architecture looks like, what's already in cb2/, and what's left to do.
+`cb2/` is a scratch space for a complete redesign of clockblocks that will eventually become clockblocks 1.0. This document captures why the redesign is happening, the new architecture, and what's left to do.
 
 ## Why redesign
 
-The original `clockblocks/` is correct but architecturally tangled. The core insanity:
+The original `clockblocks/` is correct but architecturally tangled:
 
-1. **No central scheduler.** Each `Clock` owns a `_queue` of child `_WakeUpCall`s. Only the master calls `sleep_precisely_until`. When a child waits, it registers a wakeup time with its parent and `_wait_event.wait()`s. The parent's own `wait()` loop pops the child's wakeup, sleeps the master, signals the child, then waits for the child to hit its next wait before continuing. An N-deep clock tree means N threads parked in nested wait loops at any instant.
-
-2. **Three different busy-wait sync points** (`_wait_for_children_to_finish_processing`, `_wait_for_child_to_finish_processing`, and the post-fork dormancy poll) spinning at `time.sleep(0.000001)`.
-
-3. **`rouse_and_hold` + `_WaitKeeper`.** Foreign-thread or parent-thread mutations must wake the dormant clock early (`WokenEarlyError`/`_woken_early`), propagate the hold up the parent chain, do the mutation, then release. Every `@tempo_modification` setter wraps this dance.
-
-4. **Eager "catch up all relatives" on every wake.** Each clock's `tempo_history` only advances when that clock wakes, so siblings/cousins drift. Every wakeup walks the family tree (`_catch_up_children`) advancing everyone's tempo curves, with timing warnings when it's slow.
-
+1. **No central scheduler.** Each `Clock` owns a `_queue` of child wakeups; only the master sleeps. A child registers a wakeup with its parent and blocks; the parent pops it, sleeps, signals the child, waits for the child to reach its next wait, then continues. An N-deep tree means N threads parked in nested wait loops.
+2. **Three busy-wait sync points** spinning at `time.sleep(0.000001)`.
+3. **`rouse_and_hold` + `_WaitKeeper`.** Foreign/parent-thread mutations must wake the dormant clock early, propagate a hold up the chain, mutate, then release. Every `@tempo_modification` setter wraps this dance.
+4. **Eager "catch up all relatives" on every wake.** A clock's `tempo_history` only advances when it wakes, so siblings drift; every wakeup walks the family tree advancing everyone.
 5. **Per-clock state mountain:** `_queue`, `_queue_lock`, `_dormant`, `_wait_event`, `_woken_early`, `_wait_keeper`, `_envelope_loop_or_function`, `_fast_forward_goal`, `_priority_counter` — all coupled.
-
 6. **Fast-forward** cheats by retroactively rewinding `_start_time`.
 
-## Architectural pivot (already in cb2)
+## The architecture (already in cb2)
 
-**One central `Scheduler` thread** running a heap of `(scheduler_time, action)` events. Each clock thread, on `wait()`, computes its absolute scheduler-time via `clock_to_scheduler_time` (walking up parents converting beats↔time↔parent_beat↔parent_time…), schedules a wakeup, and blocks. The scheduler pops the next event, sleeps until its time, fires `_wake_and_advance_to_next_wait_call`, then blocks on a condition until the woken clock has hit its next `wait` (preserving the original's single-clock-at-a-time property without nested wait loops).
+**One central `Scheduler` thread** running a heap of `(scheduler_time, action)` events. On `wait()`, a clock computes its absolute scheduler-time via `clock_to_scheduler_time` (walking up parents), schedules a wakeup, and blocks. The scheduler pops the next event, sleeps until its time, wakes the clock, then blocks on a condition until that clock reaches its next `wait` (preserving the original's single-clock-at-a-time property without nested wait loops).
 
-This collapses:
-- N nested wait loops → 1 scheduler loop
-- per-clock `_queue` + `_queue_lock` → 1 heap
-- `rouse_and_hold` ceremony → "modify the scheduled event in place" (or scheduler `hold`/`release`)
-- "catch up all relatives" → just compute `beat()` lazily from scheduler time when asked
-- ~8 pieces of per-clock state → ~2 (`_wait_event`, `_scheduler_park_condition`)
+This collapses: N nested wait loops → 1 scheduler loop; per-clock `_queue` → 1 heap; `rouse_and_hold` → "modify the scheduled event in place"; "catch up all relatives" → compute `beat()` lazily from scheduler time when asked; ~8 pieces of per-clock state → ~2.
 
-## What cb2 has today
+### Files in cb2
 
-- `cb2/scheduler.py` — central scheduler with heap, hold/release, timing-policy blend (~190 lines, mostly done)
-- `cb2/clock.py` — `Clock` with family tree, tempo properties (delegating to `TempoHistory`), `wait()`, `fork()`, `clock_to_scheduler_time` / `scheduler_to_clock_time` (~410 lines)
-- `cb2/tempo_envelope.py` — original `TempoEnvelope`/`TempoHistory` ported, with an `@lru_cache` decorator on `time_at_beat`/`beat_at_time`
-- `cb2/metric_phase.py` — `MetricPhaseTarget` ported essentially unchanged
-- `cb2/enums.py` — `DurationUnits`, `TempoUnits`
-- `cb2/test/mock_time.py` — clever compression-factor `time.sleep`/`time.time`/`threading.Event` mocks for fast deterministic tests
+- `scheduler.py` — central scheduler: heap, hold/release, timing-policy blend, fast-forward
+- `clock.py` — `Clock`: family tree, tempo properties (delegating to `TempoHistory`), `wait()`, `fork()`, `kill()`, `clock_to_scheduler_time` / `scheduler_to_clock_time`, lifecycle context manager
+- `tempo_envelope.py` — `TempoEnvelope`/`TempoHistory`, lazy extension, `@lru_cache` on conversions
+- `time_stamp.py` — `TimeStamp` (captured scheduler-time, projects into any clock in the family)
+- `moment.py` — `ResolvableMoment` (`at_beat`/`at_time`/`after_beats`/`after_time`), the unified "when" vocabulary
+- `metric_phase.py` — `MetricPhaseTarget`
+- `enums.py` — `DurationUnits`, `TempoUnits`, `ClockState`
+- `utilities.py` — module-level `wait`/`fork`/`fork_unsynchronized`/`wait_forever`/`wait_for_children_to_finish`/`current_clock`
+- `test/mock_time.py` — compression-factor `time` / `Event` mocks for fast deterministic tests
 
-## What cb2 is missing
+---
 
-The architectural shape is right, but the unfinished pieces are the hard ones:
+## Completed steps
 
-- **No `kill` / `ClockKilledError` / `DeadClockError`.** `child._killed = True` is set in `fork` but never initialized or checked.
-- **No `TimeStamp`, no synchronization policy.** cb2's `beat()` from a sibling thread is stale — but the right fix is lazy beat-from-scheduler-time, not the original's eager catch-up.
-- **Scheduler serializes everything.** `_execute_event` blocks on `_scheduler_park_condition` until the woken clock hits its next wait. Original has the same property (master sleeps, children serialize behind the parent), so semantics match — but it's worth confirming.
-- **No SCAMP-facing surface compatibility.** scamp imports `Clock`, `TempoEnvelope`, `TempoHistory`, `wait`, `fork`, `current_clock`, `TimeStamp`, `MetricPhaseTarget`, fast-forwarding, etc.
+Tight summaries of the key decision in each; see git history and code comments for full detail.
 
-## Implementation plan (in dependency order)
+- **Step 1 — Lazy tempo extension.** `extend_to` / `_extend_function_or_envelope_loop` called from `time_at_beat`/`beat_at_time`; `_envelope_loop_or_function` moved to `TempoHistory`. Supports both `set_*_targets(loop=True)` and `apply_*_function(domain_end=None)` (ported extrema/inflection logic). `lru_cache` **kept** — lazy `extend_to(b)` only appends past beat `b`, so cached conversions stay valid; invalidated on mutation by `@tempo_modification`.
 
-### Step 1 — Lazy tempo extension in `TempoHistory`
+- **Step 2 — Lazy `beat()` / `time()` from any thread.** Clock-level reads (`Clock.beat()`/`.time()`) go through `scheduler_to_clock_time(scheduler.time())` → live position from any thread. `TempoHistory.beat()`/`.time()` are the **committed pointer** — the position the owning thread's `wait()` has advanced to (kept because `wait()` and curve mutation need it). Reads never mutate `tempo_history`. `current_time_in_scheduler()` removed — use `clock.scheduler.time()`.
 
-**Status:** done. `extend_to` and `_extend_function_or_envelope_loop` are called from `time_at_beat` / `beat_at_time`; `bring_up_to_date` is implemented in `clock.py`.
+- **Step 3 — Reschedule-on-tempo-change.** `Scheduler.reschedule(matches, recompute)` re-heapifies; `Clock._reschedule_self_and_descendants()` matches by `acting_clock` and recomputes via `clock_to_scheduler_time`. The `@_reschedule_after_tempo_change` decorator brackets tempo/rate/beat_length setters with the Step-8 locks. Replaces `rouse_and_hold` for tempo changes from non-owning threads.
 
-**On `lru_cache`:** kept. The original PLAN said to drop it, claiming caching was incompatible with lazy extension. That was wrong — lazy `extend_to(b)` only adds segments past beat `b`, so a cached `time_at_beat(b)` stays valid. The cache is correctly invalidated on mutation by the `@tempo_modification` decorator wrapping every curve-mutating method (and the standalone `cache_clear()` pair in the manual `_beat`/`_t` setter). Hits save real work — `time_at_beat` does interval integration and `beat_at_time` does iterative root-finding to `max_error=1e-12`. Whether the workload hits the 32-entry cache often is empirical; revisit during profiling once Step 2 (lazy `beat()`/`time()`) and Step 7 (`TimeStamp`) land, since both produce access patterns where many callers query the same `(clock, scheduler_time)` simultaneously.
+- **Step 4 — Kill / lifecycle errors.** Three-state `ClockState` enum (PENDING/ALIVE/DEAD). `ClockblocksError` base + `ClockKilledError`, `DeadClockError`, `WrongThreadError`. `kill()` cascades, removes pending wakeups *and* forks (`Scheduler.remove_events`), wakes parked waits, detaches from parent. `wait()`/`fork()` reject non-ALIVE and cross-thread calls. Tests: `test_kill.py`, `test_fork.py`.
 
-Make `time_at_beat`, `beat_at_time`, and `advance` auto-extend looping envelopes / function-defined tempos on demand.
+- **Step 4.5 — Legibility pass.** Applied the `wait()` STEP shape to `fork()`, extracted `_resolve_start_delay`. Left `wait()`/`kill()` as-is (already the model).
 
-The `_envelope_loop_or_function` state currently lives on the original `Clock`; in cb2 it should move to `TempoHistory` so that any caller asking "what time is beat 5000?" on a looping clock gets the right answer without the clock having to be involved. `TempoHistory.extend_to(beat)` becomes the single extension primitive, called from inside the conversion methods. This is the keystone — Steps 2, 3, and 7 all assume it works.
+- **Step 5 — Module API + server.** `current_clock()`, module-level `wait`/`fork`/`fork_unsynchronized`/`wait_forever`/`wait_for_children_to_finish` (delegating to `current_clock()`), `run_as_server`. Adapted to the scheduler model (not verbatim ports). `wait_for_children_to_finish` polls at 1-beat granularity; a precise "wake when children finish" signal is deferred. Tests: `test_module_api.py`.
 
-Keep looping support for **both** `set_*_targets(loop=True)` (easy: append a copy of segments) **and** `apply_*_function(domain_end=None)` (the hard one: needs the existing extrema-and-inflection logic from `clockblocks/clock.py:1238-1287` ported into `TempoHistory`).
+- **Step 6 — Fast-forward.** Scheduler-side `_fast_forward_goal` (a scheduler-time) set via `set_fast_forward_goal()`. Run loop skips timed waits while fast-forwarding and settles cleanly when a finite goal is reached or the goal is cleared mid-flight (`_reanchor_timing` re-pegs the timing-policy reference points). Replaces the original's `_start_time`-rewinding cheat — cb2's `time()`/`beat()` derive from `_ideal_time`, so nothing needs faking. Master-only API mirrors original (`fast_forward*`, `is_fast_forwarding`). Tests: `test_fast_forward.py`.
 
-### Step 2 — Lazy `beat()` / `time()` from any thread
+- **Step 7 — `TimeStamp`.** Thin wrapper around a captured `scheduler_time` + the family master. `beat_in_clock(c)`/`time_in_clock(c)` go through `c.scheduler_to_clock_time(...)`. Equality/ordering on `scheduler_time` alone (`wall_time` dropped). Kept **distinct from `Moment`**: captured-past + clock-agnostic vs declared-future + anchored to one clock — scamp's transcriber wants the former. Tests: `test_time_stamp.py`.
 
-**Status:** done. `Clock.beat()` and `Clock.time()` go through `scheduler_to_clock_time(scheduler.time(), ...)` so any thread gets a live position. `TempoHistory.beat()` / `.time()` are kept as the "committed pointer" — the position the owning thread's `wait()` has actually advanced to. This is the chosen split (option (b) of the original two options): clock-level reads are live, tempo-history-level reads are committed.
+- **Step 8 — External-thread mutation lock.** Replaced the original's stompable `held()` gate with three primitives: `_queue_change_condition` (guards heap, held across peek+compute+wait to fix a lost-wakeup), `_execution_lock` (held while an action runs; exposed as `while_quiescent()` for external mutators), `_clock_tree_lock` (per-family, serializes `fork`/`kill` structural ops). `_reschedule_after_tempo_change` branches on `current_clock()`: external thread takes `while_quiescent()` + `_tree_lock`; own-thread call takes only `_tree_lock` (else self-deadlock). Lock order: `_execution_lock` → `_tree_lock` → `_queue_change_condition`. Hardened Steps 3 and 4.
 
-Why not Option (a) (drop committed pointer entirely): `wait()` and the tempo curve mutation logic in `tempo_history` (truncate / advance / append) all need a notion of "where in the curve are we right now from the perspective of this curve's append-only history". That's the committed pointer. Removing it would require restructuring `TempoHistory` to be stateless about position, which is a bigger surgery than is warranted.
+- **Step 10.5 — Clock tempo-target / tempo-function bridges.** Added `Clock`-level bridges over `TempoHistory`'s methods (`set_*_target(s)`, `apply_*_function`, `stop_tempo_loop_or_function`), each `@_reschedule_after_tempo_change`-wrapped. `duration` param takes a `ResolvableMoment` (`Moment.after_beats(n)`/`after_time(t)`) with a `DeprecationWarning` back-compat path for bare numbers (`duration_units` going away). `Clock.time_in_master()` proxies `master.time()`. Obsoleted legacy APIs raise explanatory errors instead of `AttributeError`: `synchronization_policy` (gone — Step 2 made it moot), `rouse_and_hold`/`release_from_suspension` (→ `while_scheduler_quiescent()`). `timing_policy` + `use_*_timing_policy` **kept as real methods** forwarding to `self.scheduler.timing_policy` (settable only on master). `log_processing_time` deferred.
 
-Implementation notes:
-- `wait()` now uses `self.tempo_history.beat()` (committed) on the post-wait advance line, since `self.beat()` is live and would make the delta zero.
-- `current_time_in_scheduler()` was removed. With lazy reads it became a round-trip back to `self.scheduler.time()`, and putting it on `Clock` misleadingly suggests different clocks could have different scheduler times. Use `clock.scheduler.time()` at callsites instead.
-- `bring_up_to_date()` already does the right thing: `delta = scheduler_to_clock_time(...) - tempo_history.beat()`.
+- **Step 12 — Master lifecycle context manager.** `Clock.__enter__`/`__exit__` (`__exit__` kills, suppressing only `ClockKilledError`/`DeadClockError`); `with Session() as s:` for free. Terminal parks (`wait_forever`/`wait_for_children_to_finish`) now **propagate** `ClockKilledError` rather than swallowing it, so every wait variant behaves the same (kill mid-wait raises, caught at `_fork_wrapper` for sub-clocks or `__exit__`/user `try/except` for the master). Rationale: bare-script shutdown is Ctrl-C/process-exit, never `ClockKilledError`; only a *programmatic* `kill()` raises, exactly when an exception is the right signal. `run_as_server`'s loop absorbs the kill so its daemon thread exits quietly. Opt-in — main-thread scripts relying on thread-end teardown stay valid. scamp's `performance.py` call site reviewed, needs no change. Tests pass (86).
 
-Reads do not mutate `tempo_history` — that would be a write through a getter and would race between threads. The owning thread's `wait()` is the only path that advances the committed pointer.
+- **Documentation pass — largely done.** Docstrings made user-facing (implementation detail pushed to comments), wording ported from original clockblocks where still applicable, enums + `Scheduler` documented, clock-termination walkthrough moved to a module-level lifecycle comment, GPL-3.0 headers added.
+  - **Deferred to the rename:** qualify bare cross-*module* xrefs (`:class:`Clock`` → `:class:`~clockblocks.clock.Clock``). The docs are one combined scamp+clockblocks Sphinx build with no intersphinx, so cross-module links work only when fully qualified. Pair with the `cb2`→`clockblocks` rename, since every `~cb2.…` prefix has to be rewritten to `~clockblocks.…` anyway.
 
-### Step 3 — Reschedule-on-tempo-change
+---
 
-**Status:** done. `Scheduler.reschedule(matches, recompute)` walks the heap and re-heapifies; `Clock._reschedule_self_and_descendants()` matches by `acting_clock` and recomputes via `clock_to_scheduler_time`; `@_reschedule_after_tempo_change` decorator wraps the tempo/rate/beat_length setters and brackets the mutation with the locks described in Step 8 (originally `scheduler.held()`, now `while_quiescent()` / `_tree_lock`).
-
-When a tempo setter runs against a clock whose wakeup is already queued (because it's dormant, or because the change affects a descendant's queued wakeup), the heap entry is now wrong. The fix:
-
-1. Decorator `@tempo_modification` finds all heap entries whose `acting_clock` is `self` or a descendant of `self`.
-2. Recomputes their `t` via `clock_to_scheduler_time` against the new tempo curve.
-3. Replaces them in the heap (`heapq` doesn't support update-in-place — either re-heapify or use the standard "lazy deletion via sentinel" pattern).
-
-This replaces `rouse_and_hold` for the common case (tempo changed from a non-clock thread). It also means the scheduler needs an API to atomically rewrite events for a given clock.
-
-For tempo changes coming from a *sibling clock's* thread, same mechanism — the affected sibling is dormant and queued, just rewrite.
-
-### Step 4 — Kill / DeadClockError / ClockKilledError
-
-**Status:** done. Three-state `ClockState` enum (PENDING/ALIVE/DEAD) replaces the original `_killed` flag plan. `ClockblocksError` base, `ClockKilledError`, `DeadClockError`, and `WrongThreadError` are defined; `kill()` cascades, removes pending wakeups *and* pending forks via new `Scheduler.remove_events`, wakes any parked wait, releases the scheduler, and eagerly detaches from the parent's `_children`. `wait()` rejects non-ALIVE clocks and cross-thread calls; `fork()` rejects non-ALIVE. `_process` catches both lifecycle errors. Tests: `tests/test_kill.py` (11) + `tests/test_fork.py` (4).
-
-### Step 4.5 — Legibility pass on wait() / fork() / kill()
-
-**Status:** done. Applied the `wait()` STEP shape to `fork()` and extracted one helper; deliberately left `wait()` and `kill()` as-is.
-
-- `fork()`: extracted `_resolve_start_delay(schedule_at)` (clock.py) — the numeric-beat / `MetricPhaseTarget` / `None` branching is now a self-contained method, so fork()'s body reads as create-child → resolve-delay → define-lifecycle → schedule.
-- `fork()`: gave the body STEP 1–4 comments and the inner `_process` closure Step 3a–3e sub-comments (setup / run user fn / cleanup / release scheduler / done_callback). Also collapsed the two identical `except ClockKilledError / except DeadClockError` blocks into one `except (ClockKilledError, DeadClockError)`.
-- `wait()`: left unchanged. It's already the model the others are measured against; extracting STEP 2/4 would mean threading `wake_up_beat` through a helper return value for marginal gain.
-- `kill()`: left unchanged. Its STEP 1–3 comments already match the `wait()`/`fork()` shape.
-
-Decision: stopped here rather than factor further — the closures capture too much (`child`, `self`, `process_function`, `args`, `done_callback`, `start_delay`) to extract cleanly into methods, and STEP comments deliver the readability without the parameter-passing ceremony.
-
-### Step 5 — `current_clock()`, top-level `wait()`/`fork()`, `run_as_server`, `wait_forever`
-
-**Status:** done. `Clock.fork_unsynchronized` / `wait_forever` / `wait_for_children_to_finish` /
-`run_as_server` (clock.py), plus module-level `fork` / `fork_unsynchronized` / `wait_forever` /
-`wait_for_children_to_finish` wrappers in `cb2/utilities.py` delegating to `current_clock()`
-(`current_clock()` and module `wait()` already existed). Tests: `tests/test_module_api.py` (8).
-
-Not a verbatim port — the originals leaned on the abandoned per-parent-queue / `rouse_and_hold` /
-`_wait_keeper` machinery. Adapted to the scheduler model:
-- `wait_forever` loops `self.wait(1.0)`, breaking on `ClockKilledError` / `DeadClockError`.
-- `wait_for_children_to_finish` loops `self.wait(1.0)` until `self._children` is empty. The caller
-  must keep yielding to the scheduler (via `wait`) so the children can actually run, so this polls
-  at 1-beat granularity rather than waking exactly when the last child ends. Good enough for a
-  caller that has nothing left to do; a precise "wake me when children finish" signal (the old
-  rouse mechanism) is deferred.
-- `fork_unsynchronized` spawns a plain daemon `Thread` (no clock bound to it). Step 9's thread pool
-  will replace the raw `Thread` with `_run_in_pool`.
-- `run_as_server` backgrounds the master on a daemon thread that takes ownership
-  (`__clock__ = self`) and calls `wait_forever`; the calling thread relinquishes ownership
-  (`__clock__ = None`) and returns. Adapted (not verbatim) to cb2's `current_clock()`/`wait()`.
-
-Still TODO from the original surface: `fork()`'s "pass the clock as first arg" convenience and
-`fork_unsynchronized` pool routing (Step 9).
-
-### Step 6 — Fast-forward
-
-**Status:** done. Scheduler-side toggle, with all the Clock API mirroring the original. Tests:
-`tests/test_fast_forward.py` (13).
-
-Scheduler side (`scheduler.py`): a `_fast_forward_goal` (a *scheduler-time*, `float('inf')` for
-indefinite, or `None`) set via `set_fast_forward_goal()` (which notifies the run loop so a goal change
-takes effect immediately rather than after the current timed wait). In the run loop, STEP 1b decides each
-event with two helpers:
-- `_fast_forwarding_through(next_event)` — pure predicate: is a goal set and `next_event.t < goal`? If so
-  the wait is skipped (`_ideal_time` leaps to the event when it fires) and `_was_fast_forwarding` is set.
-- otherwise `_end_fast_forward_if_active(now)` settles any fast-forward that was in progress before the
-  wait is timed normally. It's a no-op unless FF is ending one of two ways: (1) a finite goal reached
-  (`next_event.t >= goal`) → advance `_ideal_time` to the goal, clear it, re-anchor, then time the
-  remaining `goal -> event` span normally (zero at the boundary, so an event landing exactly on the goal
-  still fires instantly — matching the original, where *reaching* the goal ends FF); or (2) FF switched
-  off externally (goal cleared mid-flight), detected via `_was_fast_forwarding` → re-anchor. Both endings
-  clear `_was_fast_forwarding`, so an early wakeup during the post-goal real-time tail can't re-anchor a
-  second time and drop the already-elapsed wait.
-
-`_reanchor_timing(now)` re-pegs `_last_wake_time = now` and `_start_time = now - _ideal_time` so both the
-relative and absolute timing policies resume cleanly. This replaces the original's `_start_time`-rewinding
-cheat: cb2's `time()`/`beat()` derive from `_ideal_time` (not wall clock), so nothing needs faking to keep
-the clock position correct — re-anchoring only restores the *timing-policy* reference points.
-
-API on `Clock` (master-only, raising `NotMasterClockError` off-master) mirrors original: `fast_forward()`,
-`fast_forward_to_time`, `fast_forward_in_time`, `fast_forward_to_beat`, `fast_forward_in_beats`,
-`is_fast_forwarding`. The `*_to_*` methods convert the requested clock time/beat to scheduler-time via
-`clock_to_scheduler_time` and reject targets in the past; `is_fast_forwarding` reflects the shared
-scheduler state, so it's true for the whole family at once.
-
-### Step 7 — `TimeStamp`
-
-**Status:** done. `cb2/time_stamp.py` defines `TimeStamp` as a thin wrapper around a captured
-`scheduler_time` plus the family's master. `beat_in_clock(c)` / `time_in_clock(c)` go through
-`c.scheduler_to_clock_time(self.scheduler_time, desired_units=...)`; `time_in_master` is a
-convenience for `time_in_clock(master)` (it is **not** equal to `scheduler_time` — the master
-has a `parent_offset == scheduler.time()` at its construction). Foreign-family clocks are
-rejected. Equality / ordering compare on `scheduler_time` alone — `wall_time` was dropped
-(scamp never read it; under fast-forward it was a non-deterministic tiebreaker anyway). The
-old master-side `time_stamp_data` dedup cache is gone — resolution is cheap. Tests:
-`tests/test_time_stamp.py` (6).
-
-**Kept distinct from `Moment`** (vs. subsuming it into an absolute Moment): different intent
-(captured-past vs declared-future), different shape (clock-agnostic vs anchored to one
-clock's beat/time axis), and scamp's transcriber use-case wants exactly the clock-agnostic
-shape — store one scheduler-time, project into many clocks later.
-
-### Step 8 — External-thread mutation lock
-
-**Status:** done. The original `Scheduler.held()` approach (an unconditional coarse pause via a `threading.Event` gate) is **gone** — it was non-reentrant and stompable (two holders, e.g. a tempo change racing a kill, clobbered each other), and being level-checked at the top of the run loop it couldn't even preempt an action already in flight, so it didn't actually stop the scheduler from waking a clock and racing its `tempo_history` mid-rewrite.
-
-Replaced by a three-primitive model (see the block comment at the top of `Scheduler.__init__`, and the `_tree_lock` property in `clock.py`):
-
-- **`_queue_change_condition`** (scheduler) — guards the heap and signals changes to it. The run loop now holds it across peek+compute+wait as a single critical section, fixing a **lost-wakeup**: previously `_get_next_event` and `_wait_for` were two separate acquisitions, so a `reschedule` landing in the gap notified into the void and the loop slept the stale (longer) duration, firing the event late.
-- **`_execution_lock`** (scheduler) — held by the run loop for the full duration of each action's execution, so "held" == "an action is running". Exposed via the `while_quiescent()` context manager: an external thread takes it to mutate action-related state only when no action is in flight. (It can be held across `_execute_event` — unlike the queue lock — precisely because a running clock never needs it, only external mutators do.)
-- **`_clock_tree_lock`** (per family, on the master; via `Clock._tree_lock`) — serializes structural ops on the clock tree. `fork()` (create+append+schedule) and `kill()` (collect+flag+remove) are now atomic against each other, so a fork can't be orphaned by a concurrent kill; `_fork_wrapper` cleanup detaches under it too.
-
-`_reschedule_after_tempo_change` branches on `current_clock()`: an **external** thread (`current_clock() is None`) takes `while_quiescent()` then `_tree_lock`; a call **on a clock's own thread** takes only `_tree_lock`, since the scheduler is already frozen on that clock (a clock-thread call to `while_quiescent()` would self-deadlock). Lock order is `_execution_lock` → `_tree_lock` → `_queue_change_condition`, and the order matters — see the decorator docstring for the deadlock it avoids.
-
-This also hardened Step 3 (the reschedule now runs under `_tree_lock`, so descendant enumeration can't race a concurrent fork/kill) and Step 4 (`kill()` no longer uses the scheduler hold; it relies on `_tree_lock` plus the invariant that every victim observes `DEAD`).
+## Remaining work
 
 ### Step 9 — Thread-pool for forks
 
-Port `_run_in_pool` + `_pool_semaphore` from original (`clockblocks/clock.py:793-801`). Real perf win when many short forks happen (which scamp does constantly for note playback). Threads-per-fork (cb2's current approach) is fine for correctness but slow.
+Port `_run_in_pool` + `_pool_semaphore` from original (`clockblocks/clock.py:793-801`). Real perf win when many short forks happen (scamp does this constantly for note playback). Threads-per-fork (cb2's current approach) is fine for correctness but slow.
 
-**Longer-term, eliminate `fork_unsynchronized` for the common case.** Its main use in scamp is high-frequency, low-overhead bursts — glissandi and continuous expression/volume curves — i.e. many MIDI messages with tiny waits between them. The new `Clock.schedule_action()` (leaf callbacks fired directly on the scheduler — no child clock, no per-step scheduler/clock context-switch handoff) is the intended replacement for that pattern: sample the envelope and schedule N sends as leaf events instead of forking a thread that micro-waits. The thread pool here is a stopgap for genuinely thread-y work; the gliss/expression path should move to `schedule_action`. Benchmark first — the single-sleeper scheduler may already remove most of the old per-clock busy-wait lag that motivated `fork_unsynchronized` in the first place.
+**Longer-term, eliminate `fork_unsynchronized` for the common case.** Its main scamp use is high-frequency low-overhead bursts — glissandi, continuous expression/volume curves (many MIDI messages with tiny waits). `Clock.schedule_action()` (leaf callbacks fired directly on the scheduler — no child clock, no per-step context-switch handoff) is the intended replacement: sample the envelope and schedule N leaf sends instead of forking a micro-waiting thread. The pool is a stopgap for genuinely thread-y work. **Benchmark first** — the single-sleeper scheduler may already remove most of the per-clock busy-wait lag that motivated `fork_unsynchronized`.
 
-### Step 10 — SCAMP integration surface
+### Step 10 — SCAMP integration
 
-scamp imports (verify against `scamp/src/scamp/__init__.py`):
-- `Clock`, `TempoEnvelope`, `TempoHistory`, `MetricPhaseTarget`
-- `wait`, `wait_for_children_to_finish`, `wait_forever`, `fork`, `fork_unsynchronized`, `current_clock`
-- `TimeStamp`
-- Plus all the `set_tempo_target` / `apply_*_function` family on `Clock`
+scamp imports (verify against `scamp/src/scamp/__init__.py`): `Clock`, `TempoEnvelope`, `TempoHistory`, `MetricPhaseTarget`; `wait`, `wait_for_children_to_finish`, `wait_forever`, `fork`, `fork_unsynchronized`, `current_clock`; `TimeStamp`; the full `set_tempo_target` / `apply_*_function` family.
 
 Run `scamp/test/test_examples.py` as the integration test before declaring done. Expect minor output diffs (timing precision); review and regenerate goldens.
 
-### Step 10.5 — Bridge missing `Clock` tempo-target / tempo-function methods
+### Step 11 — Unit-test coverage checklist
 
-**Status:** done. cb2's `TempoHistory` already had the underlying methods; this step added the
-`Clock`-level bridges, gave the duration param a `ResolvableMoment`-first signature with a
-back-compat deprecation path for bare numbers, and converted the obsoleted-by-design legacy APIs
-(synchronization/timing policy, rouse_and_hold/release_from_suspension) to raise-on-access stubs
-with explanatory messages. `Clock.time_in_master()` is a one-line proxy to `master.time()`.
-`log_processing_time` / `stop_logging_processing_time` deferred.
-
-Original scope (kept for the record):
-
-- `Clock.set_beat_length_target` / `set_rate_target` / `set_tempo_target`
-- `Clock.set_beat_length_targets` / `set_rate_targets` / `set_tempo_targets` (plural, loopable)
-- `Clock.apply_beat_length_function` / `apply_rate_function` / `apply_tempo_function`
-- `Clock.stop_tempo_loop_or_function`
-- `Clock.time_in_master` — trivial convenience: `self.scheduler_to_clock_time(scheduler.time(), 'time')`
-  projected to master, or just `master.time()` evaluated from this thread.
-
-Each bridge needs the `@_reschedule_after_tempo_change` wrap (we already use it for the
-beat_length/rate/tempo setters) so a queued descendant wakeup gets re-projected against the new curve.
-
-**`duration` should be a `Moment` / list of `Moment`s now.** In the redesign, the `when`/`duration`
-vocabulary unified around `Moment.after_beats` / `after_time` / `at_beat` / `at_time`. The set-target
-methods predate that and take raw numbers + `duration_units="beats"|"time"` kwarg. New shape:
-
-```python
-clock.set_tempo_target(100, Moment.after_beats(9))    # equivalent to legacy (..., 9)
-clock.set_tempo_target(100, Moment.after_time(2.5))   # what duration_units="time" used to mean
-```
-
-For backwards compatibility accept a bare number too, but emit `DeprecationWarning("pass
-Moment.after_beats(n) instead of a bare number; duration_units is going away")`. After a release,
-drop `duration_units` entirely. The plural forms (`set_*_targets`) become a list of `Moment`s.
-
-Deferred (uncertain whether they translate to the central-scheduler model):
-- `log_processing_time` / `stop_logging_processing_time`
-
-Already-gone-by-design (do not port). Each should remain as an attribute/method on `Clock` that
-**raises a clear error explaining what to do instead** when accessed, rather than silently being
-absent — otherwise users get `AttributeError: 'Session' object has no attribute 'X'` and have to
-guess. Suggest a small `_removed_attribute(name, replacement, reason)` helper that raises
-`AttributeError(f"{name} was removed in clockblocks 1.0: {reason}. Use {replacement} instead.")`:
-
-- `synchronization_policy` (prop+setter) — obsoleted by Step 2's lazy `beat()` (any thread already
-  sees the live position; there's nothing to "synchronize"). No replacement; just gone.
-- `timing_policy` (prop+setter) and `use_absolute_timing_policy` / `use_relative_timing_policy` /
-  `use_mixed_timing_policy` — **kept on `Clock` as real methods** (not stubs). Timing lives on the
-  family's scheduler, but the master clock is the public surface for global state, so `Clock.timing_policy`
-  forwards to `self.scheduler.timing_policy` (readable from any clock; settable only on the master,
-  range-checked to 0..1). Users never touch the scheduler. There is no ambiguity about *which* family
-  is affected because a master now owns its scheduler outright — see the resolved "multiple masters"
-  design note below.
-- `rouse_and_hold` / `release_from_suspension` — replaced by `Clock.while_scheduler_quiescent()`
-  (the `with`-block form covers both halves atomically and is exception-safe).
-
-### Documentation pass
-
-**Status: largely done.** Went through the package making docstrings user-facing (implementation detail
-pushed into comments), ported still-applicable wording from original clockblocks 1.0, documented the
-enums, added a `Scheduler` class docstring, moved the four-path clock-termination walkthrough out of
-`kill()` into a module-level "Clock termination / lifecycle paths" comment, and added the GPL-3.0 header
-to the files missing it.
-
-Original intent (kept for reference): go through all of the docstrings in the original clockblocks 1.0
-(`clockblocks/src/clockblocks/`) and port over wording that still applies — method/param descriptions,
-usage notes, examples — adapting or dropping anything tied to the abandoned architecture (per-parent
-queues, `rouse_and_hold`, synchronization policy, etc.). Keep it user-facing and concise (don't narrate
-the internals or the old-vs-new differences).
-
-**Deferred — qualify bare cross-module cross-references (do during the rename).** Many docstrings use
-bare names for cross-*module* references, e.g. `scheduler.py` / `utilities.py` writing `:class:`Clock``,
-`:meth:`Clock.wait``, `:attr:`Clock.timing_policy``. Sphinx's Python domain only auto-finds a bare name
-in the *same* module, so from another module these render as plain monospace, not a hyperlink (no hard
-error unless built with `-W`). The docs are one combined scamp+clockblocks Sphinx build with **no
-intersphinx**, so cross-package/cross-module links work only when fully qualified
-(`:class:`~package.module.Name``) — the convention the existing scamp docstrings already follow (e.g.
-`:func:`~clockblocks.clock.Clock.fork``, `:class:`~scamp.session.Session``). Pair this cleanup with the
-`cb2/` → `clockblocks/` rename below, since every `~cb2.…` prefix has to be rewritten to
-`~clockblocks.…` at that point anyway — doing both at once avoids touching the same lines twice.
-(References *to scamp* classes are already qualified, e.g. `~scamp.session.Session` /
-`~scamp.transcriber.Transcriber`.)
-
-### Step 11 — Unit tests
-
-Keep cb2's `mock_time.py` compression trick. Cover:
+Keep `mock_time.py`'s compression trick. Cover (✓ = a test exists; confirm the full matrix):
 - Single-clock wait timing under each timing_policy
 - Nested fork (child, grandchild) timing
-- Tempo change from owning thread
-- Tempo change from sibling thread (Step 3)
-- Tempo change from non-clock thread (Step 8)
-- Looping envelope wrap-around (Step 1)
-- Function-defined tempo extension across a wait boundary (Step 1)
-- Kill cascades (Step 4)
+- Tempo change from owning thread / sibling thread (Step 3) / non-clock thread (Step 8)
+- Looping envelope wrap-around, function-defined tempo extension across a wait boundary (Step 1)
+- Kill cascades (Step 4) ✓
 - Tempo change reschedules a pending `schedule_at` fork (Step 3)
-- Fast-forward (Step 6)
-- TimeStamp consistency across clocks (Step 7)
+- Fast-forward (Step 6) ✓
+- TimeStamp consistency across clocks (Step 7) ✓
 
-### Step 12 — Master lifecycle context manager (`with Clock()/Session():`)
+### Step 13 — Module-level "act on the current clock" tempo helpers
 
-**Status: done.** Terminal parks now propagate (dropped the `except` in `wait_forever` /
-`wait_for_children_to_finish`); `run_as_server`'s server loop absorbs the kill so its daemon thread
-exits quietly; `Clock.__enter__`/`__exit__` added (`__exit__` kills, suppressing only
-`ClockKilledError` / `DeadClockError`). The "MASTER, killed" lifecycle comment and the affected
-docstrings were updated, and `tests/test_kill.py` / `tests/test_module_api.py` cover the new behavior
-(86 tests pass). scamp's one `wait_for_children_to_finish` call site — `performance.py` — was reviewed
-and needs no change (forked path: the raise is caught by `_fork_wrapper`; blocking path: kill mid-
-playback now raises rather than silently returning, which is the intended semantics). Original design
-notes kept below.
+`utilities.py` already exposes `wait`/`fork`/etc. that grab `current_clock()`. Extend the pattern to tempo:
+- curve family: `set_tempo_target(s)` / `set_rate_target(s)` / `set_beat_length_target(s)`, `apply_*_function`, `stop_tempo_loop_or_function`
+- instantaneous setters: `tempo`/`rate`/`beat_length` are *properties* (no module-level property), so add `set_tempo(x)`/`set_rate(x)`/`set_beat_length(x)` forwarding to the property setter on `current_clock()`. (Decide during impl whether to add `get_*` readers.)
 
-Give `Clock` `__enter__`/`__exit__` so a master can be used as a context manager. `__exit__` calls
-`self.kill()` (the master owns its scheduler 1:1, so this also stops the background thread). Because
-`Session` subclasses `Clock`, this gives `with Session() as s:` for free.
+Each forwarder resolves `current_clock()`, raises `NoActiveClockError` if none. **Document prominently that these act on *this* (the current) clock, not the master** — like `wait()`. `set_tempo(120)` inside a fork changes *that fork's* tempo; to change the master, call the method on the master object.
 
-This solves two distinct things at once, both discussed under the master-lifecycle design note below:
+---
 
-1. **Guaranteed teardown / no strayed scheduler thread.** The opt-in fix for the "natural-end master
-   falls off the end without `kill()`" leak — relevant when a master runs on a non-main thread in a
-   long-lived process. On exit (normal *or* exceptional) the scheduler thread is torn down.
-2. **A top-level boundary for `ClockKilledError`, analogous to `_fork_wrapper`.** Today a plain
-   `wait()` correctly *raises* `ClockKilledError` so running code unwinds promptly (don't change that —
-   swallowing it would let one more chunk of work run before the next entry-check notices). Sub-clocks
-   are fine because `_fork_wrapper` catches that exception once at the top; the master is the only clock
-   with no such boundary, so an external kill mid-`wait()` throws into unguarded top-level code.
-   `__exit__` should catch `ClockKilledError` (and `DeadClockError`) so a killed master shuts down
-   cleanly instead of surfacing a traceback — making it the natural seam for a user who wants custom
-   kill handling to put their own `try/except`.
+## Other Features to consider
 
-Keep it opt-in: existing scripts that just call `Clock()` / `Session()` and rely on main-thread exit
-remain valid (on the main thread, thread-end *is* process exit and the daemon scheduler dies with it).
+- Bring back wait_precisely_until? Maybe only on longer waits? The busy wait thing could work on the scheduler no? Is there a way of gaining that precision without using busy wait.
+- Drive the scheduler's "now" from an external thread rather than wall-clock sleep — e.g. follow Logic / a DAW transport instead of free-running. Scheduler-side change only: replace `sleep_until(t)` with "wait until the external source signals scheduler-time `t`" via an injectable time source (default = monotonic clock). Open questions: startup offset/rate mapping; host tempo changes as continuous mapping vs discrete tick stream. Worth prototyping against MIDI clock / MTC first.
 
-**Prerequisite — terminal parks must propagate `ClockKilledError` (revised decision).** Originally
-`wait_forever()` / `wait_for_children_to_finish()` swallowed the kill exception and returned normally.
-Change them to **propagate** it (drop the internal `except (ClockKilledError, DeadClockError): pass`), so
-*every* wait variant behaves the same: a kill mid-wait raises, caught at the appropriate boundary —
-`_fork_wrapper` for sub-clocks, `__exit__` (or a user `try/except`) for the master. This removes the
-terminal-park special case and is what lets the context manager's boundary uniformly abandon the body on
-*any* kill (without it, a kill during a terminal park would be swallowed and the body would run on
-post-kill until the next clock call's `DeadClockError`).
-
-Why propagating is correct, not just convenient:
-- **The common bare-script shutdown never goes through `kill()`.** A script ending in `s.wait_forever()`
-  is stopped by Ctrl-C / process termination → `KeyboardInterrupt` / process exit, *never*
-  `ClockKilledError`. So propagating adds no tracebacks to that path. The only thing that raises
-  `ClockKilledError` is a *programmatic* `kill()` (GUI stop button, controlling thread) — by definition
-  "something interrupted the natural flow," exactly when an exception is the right signal. A GUI app
-  catches it naturally (`except ClockKilledError:` == "cancelled by the UI").
-- **`wait_for_children_to_finish()` gains a useful distinction.** It still returns normally on natural
-  completion (all children finished — the common path) but now *raises* on kill-cascade, so the two
-  reasons it can unblock are finally distinguishable: completion runs your post-park code (save/export);
-  kill skips it and unwinds.
-- **`wait_forever()` never returns normally anyway** (it only unblocks via kill), so "propagate" just
-  means it signals the kill instead of silently dropping into trailing code.
-
-"Cleanup regardless of how we stop" then becomes idiomatic `try/finally`, which is *more* robust than the
-old swallow because it also covers Ctrl-C:
-
-```python
-with Session() as s:
-    s.fork(part)
-    try:
-        s.wait_forever()
-    finally:
-        save_recording()      # runs on kill, Ctrl-C, or any exit
-```
-
-Migration: ported code relying on `wait_forever()` returning cleanly after a programmatic `kill()` (to
-run trailing code) must wrap it in `try/except ClockKilledError` or `try/finally`. Low cost —
-`wait_forever()` is almost always the last statement. (A `raise_on_killed` parameter was considered and
-rejected: a boolean that flips exception behavior is an unneeded knob when `try/except` already says
-"I'll handle the kill.") When implementing, update the "MASTER, killed" lifecycle comment in `clock.py`,
-which currently states the parks swallow.
-
-### Step 13 — Round out the module-level "act on the current clock" helpers
-
-`utilities.py` exposes `wait` / `wait_forever` / `wait_for_children_to_finish` / `fork` /
-`fork_unsynchronized` / `current_clock` — top-level functions that grab `current_clock()` and act on it,
-so user code doesn't have to thread a clock reference around. Extend that same pattern to the tempo API,
-which today is only reachable as methods on a `Clock` object.
-
-Add module-level forwarders to `current_clock()` for:
-- the tempo-curve family: `set_tempo_target(s)` / `set_rate_target(s)` / `set_beat_length_target(s)`,
-  `apply_tempo_function` / `apply_rate_function` / `apply_beat_length_function`,
-  `stop_tempo_loop_or_function`.
-- the instantaneous setters. `tempo` / `rate` / `beat_length` are *properties* on `Clock`, and you
-  can't have a module-level property, so add plain `set_tempo(x)` / `set_rate(x)` / `set_beat_length(x)`
-  functions that forward to the corresponding property setter on `current_clock()`. (Consider matching
-  `get_tempo()` / etc. readers, or leave reads to `current_clock().tempo` — decide during impl.)
-
-Each forwarder mirrors `wait`/`fork`: resolve `current_clock()`, raise `NoActiveClockError` if there's
-none, otherwise call through. **Document prominently that these act on *this* (the current) clock, not
-the master** — exactly like `wait()`, whose delay is in the current clock's beats. So calling
-`set_tempo(120)` inside a forked function changes that fork's tempo, *not* the master's; to change the
-master you call the method on the master object (or run on the master's own thread). This is the same
-"the current clock is the implicit subject" rule the existing helpers follow; tempo just makes the
-"which clock?" question more salient than `wait` does, so it's worth spelling out.
-
-## Known design questions to revisit during implementation
-
-- **Scheduler-action serialization.** Original semantics serialize per master clock; cb2 inherits this property because `_wake_and_advance_to_next_wait_call` blocks on `_scheduler_park_condition`. Confirm this is what we want (the alternative — letting the scheduler issue another wakeup while a clock is still in user code — would allow real parallelism between clocks but break determinism users rely on).
-- **`schedule_at` with `MetricPhaseTarget`** at fork time needs the parent's `beat()` to be accurate at the moment of the fork call. Step 2 (lazy beat) handles this for the foreign-thread case; for the owning-thread case it's already correct.
-- **Priority ordering.** Original uses `_priority_counter` to break ties between sibling clocks woken at the same beat (earlier-forked first). cb2's `priority: Tuple[int, ...]` in `QueueEvent` is in the right shape; need to make sure `clock_id` (which is constructed as the parent's clock_id plus a counter) gives the same ordering as original's priority.
-- **Multiple master clocks.** **Resolved.** The old module-level `get_scheduler()` singleton (which made two `Clock(parent=None)` calls share a scheduler) is **gone**, along with the `scheduler=` constructor arg. Every master now mints and starts its own `Scheduler`; children inherit the parent's. Rationale: a shared scheduler *is* what makes a clock family — it's the shared timing source. If you want two clocks in sync, fork them from one master; if you don't, make two masters and they run on independent schedulers with independent timing policies (and `timing_policy` set on one can't surprise the other). Two live masters sharing one scheduler used to deadlock at bootstrap anyway (the scheduler stays parked waiting for the first master to reach its next `wait()` while the second master's initial wake never fires), so nothing real is lost.
-- **Natural-end master strands its scheduler (the "B" question).** *Cross-master deadlock: resolved by the per-master-scheduler change above.* When a master's top-level code falls off the end without `kill()`, there's still no `_fork_wrapper` cleanup, so its scheduler thread stays parked on `_scheduler_park_condition` forever — but now that's a private, daemon, per-master scheduler, so it can't poison anyone else. A *second* master gets its own fresh scheduler and bootstraps fine; the old singleton deadlock (and the `scamp/test/test_examples.py` cross-example hang it caused) can no longer happen. The scamp test runner's "kill the active master between examples" workaround is therefore no longer load-bearing for correctness (fine to keep as hygiene). Explicit teardown is clean: **`master.kill()` kills the master's scheduler** (the two are 1:1).
-  - **`run_as_server` is the intended indefinite-park case, and is fine.** It backgrounds the master on a daemon thread that sits in `wait_forever()` (`_wait(None)`) so it can accept forks at any time; its owning thread is *alive* (not a falloff), the scheduler is released and idle, and `kill()` tears it down. No special cleanup needed.
-  - **Remaining, lower-stakes leak:** a master whose owning thread *falls off the end without `kill()`* leaks one parked daemon thread until process exit. Only bites when the master runs on a non-main thread in a long-lived process; on the main thread the thread ending *is* process exit and the daemon scheduler dies with it. We **accept and document** this (see the `Clock` class docstring's lifecycle note: "create a master off the main thread → call `master.kill()` when done"). Not fixed in code: `weakref.finalize` can't help (the parked scheduler thread's suspended frame holds `self`, pinning the master alive, so it never gets collected and the finalizer never fires); `atexit` fires only at interpreter shutdown, not thread end. The opt-in fix is a context-manager master (`with Clock()/Session():`) — see **Step 12**, which also gives the master a top-level `ClockKilledError` boundary; it's opt-in, not required.
-
-## Out of scope for 1.0
-
-- Parallelism between sibling clocks (see serialization note above).
-- Sub-microsecond precision improvements.
-- Network sync / distributed clocks.
 
 ## Done criteria
 
 1. All Step-11 unit tests pass.
 2. `scamp/test/test_examples.py` passes with goldens regenerated and diffs reviewed.
-3. `cb2/` renamed to `clockblocks/` (after atomic swap with the existing dir, which moves to `clockblocks_legacy/` or a tag for one release). As part of this, rewrite every `~cb2.…` cross-reference to `~clockblocks.…` and qualify the remaining bare cross-module xrefs (see the deferred item under "Documentation pass").
-4. Old `_WaitKeeper`, `rouse_and_hold`, `_woken_early`, `_synchronization_policy`, and the three busy-wait spin loops are gone from the new codebase.
+3. `cb2/` renamed to `clockblocks/` (atomic swap; old dir → `clockblocks_legacy/` or a tag for one release). Rewrite every `~cb2.…` xref to `~clockblocks.…` and qualify remaining bare cross-module xrefs (see the deferred Documentation-pass item).
+4. Old `_WaitKeeper`, `rouse_and_hold`, `_woken_early`, `_synchronization_policy`, and the three busy-wait spin loops are gone.
 
-## Possible 1.5 features
 
-Features that aren't required for 1.0 parity but feel natural to add given the redesign,
-and that the new architecture should make easier than the old one did.
+### Resolved design questions
 
-### `ScheduledMoment` and `schedule_at` by time — **landed early as `Moment`**
+- **Scheduler-action serialization.** cb2 serializes per master clock (`_wake_and_advance_to_next_wait_call` blocks on `_scheduler_park_condition` until the woken clock reaches its next wait), matching original. This is key to musical coordination.
+- **Priority ordering.** Original uses `_priority_counter` to break ties between siblings woken at the same beat (earlier-forked first). cb2's `priority: Tuple[int, ...]` in `QueueEvent` is the right shape; confirm `clock_id` (parent's id + counter) gives the same ordering.
+- **Multiple master clocks.** The shared-scheduler singleton (`get_scheduler()`) and `scheduler=` arg are **gone**. Every master mints+starts its own `Scheduler`; children inherit the parent's. A shared scheduler *is* what makes a family — fork from one master to sync; make two masters to run independently (independent timing policies). Two live masters sharing one scheduler used to deadlock at bootstrap anyway.
+- **Natural-end master strands its scheduler.** A master whose owning thread falls off the end without `kill()` leaks one parked daemon thread until process exit — but it's now a private per-master scheduler, so it poisons no one. Only bites a master on a non-main thread in a long-lived process; on the main thread, thread-end *is* process exit. **Accepted and documented** (`Clock` docstring: "create a master off the main thread → call `master.kill()` when done"). `weakref.finalize`/`atexit` can't help (the parked frame pins `self`). Opt-in fix is the Step-12 context manager. `run_as_server` is fine — its owning thread is alive, scheduler released and idle, `kill()` tears it down.
+- **`schedule_at` with `MetricPhaseTarget`** needs the parent's `beat()` accurate at fork time — Step 2 (lazy beat) handles the foreign-thread case; owning-thread was already correct.
 
-This was originally a 1.5 idea but ended up implemented as part of the wait/fork-`when` work, not
-deferred. Both extensions are done (`cb2/moment.py`):
 
-- The "when" vocabulary is a **`ResolvableMoment`**: `Moment.at_beat` / `at_time` / `after_beats` /
-  `after_time`, or a `MetricPhaseTarget` (which now also `resolve()`s, in beats or time). Scheduling by
-  time vs beat is just a `Moment`'s `units`. A bare number is accepted only where the method name fixes
-  its meaning: `wait(duration)` (relative) and `wait_until(when)` (absolute). `fork(when=…)` and
-  `schedule_action(when=…)` *require* an explicit Moment — a bare number there is rejected with a
-  `TypeError`, since "when" alone wouldn't say whether it's relative or absolute.
-- Event metadata stores the absolute `target_moment`, and `_reschedule_self_and_descendants` calls
-  `moment.scheduler_time(acting_clock)` on tempo changes — preserving beat *or* time as the moment
-  dictates. New kinds of moment can be added without touching the reschedule logic.
+## Out of scope for 1.0
 
-**Resolved (Step 7).** `TimeStamp` is kept as a distinct primitive. An absolute `Moment` is
-anchored to one clock's beat/time axis (forward-facing — "schedule at this point on this
-clock"); a `TimeStamp` stores only a scheduler-time and projects into any clock in the family
-(backward-facing — "this happened, what beat/time was it on each clock?"). Scamp's
-transcriber wants the latter shape.
-
-### Externally-driven scheduler clock
-
-Let the scheduler's notion of "now" be driven by an external thread rather than wall-clock sleep.
-Use case: drive the clock tree from Logic (or any DAW / external transport) so that scamp's
-playback follows the host instead of free-running.
-
-This should be a scheduler-side change only: replace (or augment) the `sleep_until(t)` step in
-`Scheduler.run` with "wait until the external source signals that scheduler-time has reached `t`."
-Concretely: an injectable time source (default = monotonic wall clock; alternative = a callable
-that blocks until the host has advanced to a given beat/time). Clock-side code is unaffected.
-
-Open questions: how does the external source map its own time to scheduler time on startup
-(offset + rate)? What happens on host tempo changes — does the scheduler see them as a continuous
-mapping, or are we treating the host as a discrete tick stream? Worth prototyping against MIDI
-clock / MTC before committing to a shape.
+- Network sync / distributed clocks.
