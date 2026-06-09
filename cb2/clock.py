@@ -20,11 +20,15 @@ time under a master clock and its background :class:`~cb2.scheduler.Scheduler`.
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
 import functools
+import logging
 import math
+import sys
 import threading
+import traceback
 import warnings
 from contextlib import nullcontext
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from typing import Callable, Sequence, Iterator
 from copy import deepcopy
@@ -32,7 +36,7 @@ from cb2.tempo_envelope import TempoEnvelope, TempoHistory
 from cb2.scheduler import Scheduler
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.enums import DurationUnits
-from cb2.utilities import _PrintColors, current_clock, _spawn_unsynchronized
+from cb2.utilities import _PrintColors, current_clock, _UNSYNCHRONIZED
 import textwrap
 
 
@@ -165,6 +169,17 @@ def _reschedule_after_tempo_change(fn):
     return wrapper
 
 
+def _threadpool_error_callback(e: BaseException) -> None:
+    # Reports exceptions raised inside a pool task. A Future stashes its exception and never re-raises it
+    # unless someone reads .result()/.exception() (we don't), so without this they vanish silently. We
+    # surface them here in red on stderr, mimicking the traceback an uncaught thread exception would print.
+    exc_type = type(e).__name__
+    formatted_traceback = ''.join(traceback.format_tb(e.__traceback__))
+    print(f"{_PrintColors.RED}Error encountered on forked clock. "
+          f"Traceback (most recent call last):\n{formatted_traceback}{exc_type}: {e}{_PrintColors.END}",
+          file=sys.stderr)
+
+
 class Clock:
     """
     Recursively nestable clock. Clocks can fork child-clocks, which can in turn fork their own
@@ -181,8 +196,16 @@ class Clock:
     :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
     :param timing_policy: master-only; sets the family's :attr:`timing_policy` (0.0 = relative, 1.0 =
         absolute). Leaving it None keeps the scheduler default.
-    :param pool_size: the size of the thread pool for unsynchronized forks. Only has an effect on the
-        master clock.
+    :param pool_size: (only meaningful for master clock) the maximum number of worker threads in the
+        family's shared thread pool, used for every ``fork`` and ``fork_unsynchronized``. Workers are
+        created lazily as forks demand them (an idle clock costs no threads), up to this cap. If all
+        threads in the pool are simultaneously in use, we use a plain thread (with a warning).
+    :param prewarm_pool: (only meaningful for master clock) how many pool worker threads to spin up
+        eagerly at construction, so the first that many forks skip the (admittedly sub-millisecond)
+        thread-creation latency (a warm fork is ~3x cheaper). Clamped to ``pool_size``; 0 disables.
+        It is genuinely unclear this is worth it — the lazy pool already amortizes creation to ~zero
+        after the first few forks — so it's kept small by default; set it to 0 if you'd rather an
+        idle clock cost no threads at all.
     :ivar name: the name of this clock (string)
     :ivar parent: the parent Clock to which this clock belongs (Clock, or None if master clock)
     :ivar tempo_history: TempoHistory describing how this clock has changed or will change tempo
@@ -190,10 +213,7 @@ class Clock:
 
     def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
                  initial_tempo: float = None, initial_beat_length: float = None,
-                 timing_policy: float = None, pool_size: int = 200):
-        # `pool_size` is accepted for back-compat with the original clockblocks API; the cb2 thread pool
-        # (Step 9 of PLAN.md) isn't wired up yet, so the value is currently ignored.
-        del pool_size
+                 timing_policy: float = None, pool_size: int = 200, prewarm_pool: int = 10):
         self.name = name
         self.parent = parent
         self._children = []
@@ -240,6 +260,27 @@ class Clock:
         self._waiting_for_children = False
 
         if self.is_master():
+            # The whole family shares one thread pool, owned by the master, that carries out every fork and
+            # fork_unsynchronized in the family (see _run_in_pool). Reusing pooled workers is significantly cheaper
+            # than spawning a fresh Thread per fork (which is important for rapid note playback in SCAMP, since
+            # each note playback is done with a fork). That said, benchmarking suggests the actual time-cost of
+            # raw thread creation is pretty small; it's not clear if this is worth it.
+            #
+            # We use concurrent.futures.ThreadPoolExecutor rather than multiprocessing.pool.ThreadPool on
+            # purpose: the latter builds an internal multiprocessing SimpleQueue whose two SemLocks are real
+            # OS semaphores, which on macOS (spawn start method) is reported by the resource_tracker as "2 leaked
+            # semaphore objects to clean up at shutdown" whenever the process is Ctrl-C'd before they're
+            # unlinked. ThreadPoolExecutor is pure-threading (no multiprocessing, no semaphores) and spawns
+            # its workers lazily up to max_workers, so an idle Session costs no threads.
+            #
+            # _pool_semaphore tracks how many active threads we are using, since if we go over max_workers
+            # new _run_in_pool would block until one is free. By tracking we can switch to a raw thread
+            # when we reach the capacity of the ThreadPoolExecutor
+            self._pool = ThreadPoolExecutor(max_workers=pool_size,
+                                            thread_name_prefix=f"clock-pool-{self.name or id(self)}")
+            self._pool_semaphore = threading.BoundedSemaphore(pool_size)
+            self._prewarm_pool(min(prewarm_pool, pool_size))
+
             # The whole family shares one structural lock, owned by the master. fork / kill / external
             # tempo changes acquire it (via _tree_lock) so the clock tree (_children, _state) and any
             # enumeration of it stays invariant for the duration of a structural operation.
@@ -969,6 +1010,58 @@ class Clock:
             self._wait_event.set()
             self._scheduler_park_condition.wait()
 
+    def _prewarm_pool(self, n: int) -> None:
+        """
+        Eagerly spin up `n` persistent pool workers so the first `n` forks skip the ~60us
+        thread-creation latency (a warm fork is ~3x cheaper). Each warm-up task parks on a Barrier,
+        which forces the executor to create fresh workers until n exist. Then the Barrier releases
+        and the workers return to the pool idle. Uses only public API (submit + Barrier), and bypasses
+        _pool_semaphore, since creation and release from the Barrier takes very little time.
+
+        NB: it is unclear this is actually worth doing. The lazy pool already amortizes creation cost
+        to ~zero after the first few forks, and the per-fork steady-state win comes from worker *reuse*,
+        not from prewarming; prewarming only shaves the one-time ramp, at the cost of giving every clock
+        a small fixed thread/latency footprint at construction. Default is small (10) and `prewarm_pool=0`
+        disables it. Revisit if benchmarking shows a perceptible hitch at start of playback.
+
+        One point in its favor: thread creation isn't flat — the *first* several threads take longer to
+        create, so prewarming front-loads the most expensive creations. The total is still sub-millisecond
+        and one-time, but it's why the default is left non-zero rather than 0.
+        """
+        if n <= 0:
+            return
+        barrier = threading.Barrier(n + 1)
+        for _ in range(n):
+            self._pool.submit(barrier.wait)
+        barrier.wait()  # returns once all n workers have spun up and reached the barrier
+
+    def _run_in_pool(self, target: Callable, args: Sequence | None, kwargs: dict | None) -> None:
+        """
+        Run `target` on the family's shared thread pool (owned by the master). Backs fork() and
+        fork_unsynchronized(). If the pool is fully occupied, fall back to a plain daemon Thread
+        and warn, rather than blocking the caller.
+        """
+        master = self.master
+        kwargs = {} if kwargs is None else kwargs
+        args = () if args is None else args
+        semaphore = master._pool_semaphore
+        if semaphore.acquire(blocking=False):
+            # The done-callback fires exactly once when the future finishes (completed, errored, or
+            # canceled), so the semaphore is released exactly once (no double-release on a BoundedSemaphore).
+            def _on_done(future):
+                semaphore.release()
+                # A canceled future (only happens via shutdown(cancel_futures=True) in kill()) has no
+                # exception to report; otherwise surface any error the task raised.
+                if not future.cancelled() and future.exception() is not None:
+                    _threadpool_error_callback(future.exception())
+
+            master._pool.submit(target, *args, **kwargs).add_done_callback(_on_done)
+        else:
+            logging.warning("Ran out of threads in the master clock's thread pool; small thread-creation "
+                            "delays may result. You can increase the number of threads via the master "
+                            "clock's `pool_size` argument.")
+            threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True).start()
+
     def fork(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,
              initial_rate: float = None, initial_tempo: float = None, initial_beat_length: float = None,
              when: ResolvableMoment | None = None, done_callback: Callable[[], None] = None):
@@ -1042,38 +1135,47 @@ class Clock:
                 child._start_time_in_scheduler = self.scheduler.time()
                 child._state = ClockState.ALIVE
 
-                # ~~~~~ Wrapper step 2: Run the user function ~~~~~
-                # ClockKilledError fires from inside wait() when kill() wakes us mid-wait.
-                # DeadClockError is also possible if a thread from outside the clock system kills the clock while
-                # it's awake and in the middle of running user code: when the user code finishes what it was doing
-                # and reaches its next wait call, it's calling wait on a dead clock, which raises DeadClockError.
                 try:
-                    forked_function(*args, **kwds)
-                except (ClockKilledError, DeadClockError):
-                    pass
+                    # ~~~~~ Wrapper step 2: Run the user function ~~~~~
+                    # ClockKilledError fires from inside wait() when kill() wakes us mid-wait.
+                    # DeadClockError is also possible if a thread from outside the clock system kills the clock
+                    # while it's awake and in the middle of running user code: when the user code finishes what
+                    # it was doing and reaches its next wait call, it's calling wait on a dead clock, which
+                    # raises DeadClockError.
+                    try:
+                        forked_function(*args, **kwds)
+                    except (ClockKilledError, DeadClockError):
+                        pass
 
-                # ~~~~~ Wrapper step 3: Cleanup ~~~~~
-                # Detach from the forking parent (self) and mark DEAD, under _tree_lock so it's
-                # consistent with kill()'s detach and with any concurrent fork/kill. This is for natural
-                # exits and is redundant for killed clocks.
-                with self._tree_lock:
-                    # _detach_child does the list removal and, if this was the last child of a parent
-                    # blocked in wait_for_children_to_finish(), releases it.
-                    self._detach_child(child)
-                    child._state = ClockState.DEAD
+                    # ~~~~~ Wrapper step 3: Cleanup ~~~~~
+                    # Detach from the forking parent (self) and mark DEAD, under _tree_lock so it's
+                    # consistent with kill()'s detach and with any concurrent fork/kill. This is for natural
+                    # exits and is redundant for killed clocks.
+                    with self._tree_lock:
+                        # _detach_child does the list removal and, if this was the last child of a parent
+                        # blocked in wait_for_children_to_finish(), releases it.
+                        self._detach_child(child)
+                        child._state = ClockState.DEAD
 
-                # ~~~~~ Wrapper step 4: Release the scheduler ~~~~~
-                # After the user function returns, the scheduler is parked on _scheduler_park_condition
-                # (either from the most recent _wake_and_advance_to_next_wait_call, or — if the user function
-                # never called wait — from _start_new_clock). Notify it so it can proceed to the next event.
-                # Again, this is redundant for killed clocks, as the _scheduler_park_condition will already
-                # have been notified from within kill()
-                with child._scheduler_park_condition:
-                    child._scheduler_park_condition.notify_all()
+                    # ~~~~~ Wrapper step 4: Release the scheduler ~~~~~
+                    # After the user function returns, the scheduler is parked on _scheduler_park_condition
+                    # (either from the most recent _wake_and_advance_to_next_wait_call, or — if the user function
+                    # never called wait — from _start_new_clock). Notify it so it can proceed to the next event.
+                    # Again, this is redundant for killed clocks, as the _scheduler_park_condition will already
+                    # have been notified from within kill()
+                    with child._scheduler_park_condition:
+                        child._scheduler_park_condition.notify_all()
 
-                # ~~~~~ Wrapper Step 5: done_callback if requested by user ~~~~~
-                if done_callback is not None:
-                    done_callback()
+                    # ~~~~~ Wrapper Step 5: done_callback if requested by user ~~~~~
+                    if done_callback is not None:
+                        done_callback()
+                finally:
+                    # ~~~~~ Wrapper step 6: Untag the (pooled, reused) worker thread ~~~~~
+                    # Drop this thread's reference to the now-dead child so an idle pool worker doesn't pin
+                    # it (and its tempo_history etc.) alive until its next task. Done last, in a finally, so
+                    # done_callback still sees current_clock() == child and so it runs even on an error path.
+                    # The next task on this worker re-tags __clock__ before reading it, so None is safe here.
+                    threading.current_thread().__clock__ = None
 
             # ---------- STEP 4: Define the launcher, schedule it, and return the child ----------
 
@@ -1089,7 +1191,7 @@ class Clock:
                     # kill() will have removed this event in most cases, but guard against the race.
                     return
                 with child._scheduler_park_condition:
-                    threading.Thread(target=_fork_wrapper, args=args, kwargs=kwargs, daemon=True).start()
+                    self._run_in_pool(_fork_wrapper, args, kwargs)
                     child._scheduler_park_condition.wait()
 
             self._schedule_at(start_moment, _start_new_clock, child._priority,
@@ -1138,9 +1240,19 @@ class Clock:
         thread is tagged "unsynchronized" so it *may* still call the sleep-based wait()/wait_forever()
         — those become plain real-time sleeps (no tempo, so `units` is ignored).
 
-        (Step 9 will route this through a reusable thread pool; for now it spawns a daemon Thread.)
+        Runs on the family's shared thread pool (see :meth:`_run_in_pool`), so spawning is cheap. (The
+        module-level :func:`fork_unsynchronized`, by contrast, has no clock and so no pool to draw on,
+        and falls back to a plain daemon Thread via :func:`_spawn_unsynchronized`.)
         """
-        _spawn_unsynchronized(forked_function, args, kwargs)
+        kwargs = {} if kwargs is None else kwargs
+
+        def _unsynchronized_runner(*a, **kw):
+            # Tag this (possibly reused) pool worker as unsynchronized so current_clock() is None and the
+            # sleep-based waits are permitted. A later _fork_wrapper / runner on the same worker re-tags it.
+            threading.current_thread().__clock__ = _UNSYNCHRONIZED
+            forked_function(*a, **kw)
+
+        self._run_in_pool(_unsynchronized_runner, args, kwargs)
 
     def wait_forever(self) -> None:
         """
@@ -1407,11 +1519,16 @@ class Clock:
                 if c.parent is not None:
                     c.parent._detach_child(c)
 
-        # ----------------------------------- STEP 4: Kill scheduler -----------------------------------
-        # Clean up the scheduler when killing the master
+        # ------------------------------ STEP 4: Kill scheduler and pool -------------------------------
+        # Clean up the scheduler and thread pool when killing the master.
         # (No need to hold tree lock here anymore; it's irrelevant)
         if self.is_master():
             self.scheduler.kill()
+            # All victims have been flagged DEAD, woken, and detached above, so any pooled fork workers
+            # have already unwound (or are about to). shutdown(wait=False) lets the executor's workers
+            # exit once their current task returns without blocking us here; cancel_futures drops anything
+            # still queued (there shouldn't be any — the semaphore caps submissions at the worker count).
+            self._pool.shutdown(wait=False, cancel_futures=True)
 
     def __enter__(self) -> 'Clock':
         """
