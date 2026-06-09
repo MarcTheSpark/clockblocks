@@ -104,11 +104,26 @@ Keep `mock_time.py`'s compression trick. Cover (✓ = a test exists; confirm the
 
 Each forwarder resolves `current_clock()`, raises `NoActiveClockError` if none. **Document prominently that these act on *this* (the current) clock, not the master** — like `wait()`. `set_tempo(120)` inside a fork changes *that fork's* tempo; to change the master, call the method on the master object.
 
+### Step 14 — Precise event timing (monotonic basis + guard-band spin)
+
+Bring back the original's `sleep_precisely_until` precision, but at the *one* place cb2 actually sleeps — the scheduler's STEP 1c wait (`scheduler.py`). The single-sleeper design is what makes this cheap: a busy-wait now burns **at most one core, only during the final approach to an event, only for the guard width**, and benefits *every* clock in the family. (Contrast the original's three per-master spin loops — the thing the redesign set out to kill.)
+
+**14a — Prerequisite: switch the timing basis off `time.time()`.** Independently worth doing. `time.time()` is `CLOCK_REALTIME` — NTP slews it and it can *step backwards*, which lands directly in `_compute_wait_duration`'s absolute term (`_start_time + next_event.t - now`) as a timing glitch. Replace `_start_time` / `now` / `_last_wake_time` and `_compute_wait_duration` with **`time.perf_counter()`** throughout (monotonic, highest-resolution, and the same clock we'll spin on — so the sleep and the bookkeeping share one domain; `Condition.wait(timeout)`'s relative timeout is already measured against the monotonic clock internally, so this also removes the cross-domain skew). `wall_time()` only improves (elapsed duration is exactly monotonic's job; nobody here needs epoch/calendar time, and `TimeStamp` already dropped `wall_time`).
+
+**14b — Guard-band spin.** Master-only `precise_timing` flag (default off) + tunable `spin_guard` (default 500µs, matching the original). In STEP 1c, when `precise_timing` and `wait_duration > spin_guard`: coarse-wait on the condition for `wait_duration - spin_guard` (still wake-early-able by queue changes), `continue`; once `wait_duration <= spin_guard`, **release `_queue_change_condition`** and busy-spin on `perf_counter()` to the deadline, then fall through to STEP 2.
+
+Decisions settled in discussion:
+- **Release the lock during the spin (tier 2).** Holding it loses *nothing* — the spin never calls `.wait()` (so no lost-wakeup hazard), and `_execute_event`'s head-recheck (line ~365) + the `_killed` recheck independently keep it correct. But `_queue_change_condition` is the one lock every mutator takes; holding it through the spin freezes the *whole family* (other clocks' forks, unrelated reschedules, even `kill()`) for the guard while burning a core. Releasing it lets everything else run; the line-365 recheck catches any change when we go to pop. No generation counter needed — that's an optional tier-3 refinement (abort the spin mid-guard on a preempting reschedule/kill) worth adding only if sub-500µs preemption latency matters.
+- **Gate on `wait_duration > spin_guard`, not "only long waits" per se.** The spin cost is *fixed per event* (= guard width of core burn), so cost-as-fraction-of-core = `spin_guard × event_rate`. For dense events (glissandi, continuous-volume curves) whose gaps fall below the guard, this gate naturally skips the spin (no coarse wait to truncate) instead of pegging a core — and dovetails with the Step-9 plan to move dense curve work onto `schedule_action` leaf callbacks (the spin then lands on the batch boundary, not each sample).
+- **Empirical note.** Per-call sleep/`wait(timeout)` overshoot is ~constant in absolute terms (dominated by OS wakeup latency at the moment of waking, independent of duration) — so long waits aren't inherently worse *per call*. The real duration-proportional error is clock-domain skew (14a fixes it) and *accumulated* per-event jitter across many short waits (the absolute-timing policy fixes drift; the spin fixes per-event jitter — complementary).
+- **Not the whole floor.** RT scheduling (`SCHED_FIFO`) would lower the jitter floor further without spinning (needs privileges); Windows `Condition.wait` does *not* use the high-res timer path `time.sleep` got in 3.11, so the spin matters more there. Deferred; the guard-band spin is the portable closer.
+
+Tests: extend `mock_time.py`-style timing tests — assert spin engages only under the gate, that a queue change during the coarse phase still wakes early, and that precise mode hits the deadline within a tight tolerance under the real clock.
+
 ---
 
 ## Other Features to consider
 
-- Bring back wait_precisely_until? Maybe only on longer waits? The busy wait thing could work on the scheduler no? Is there a way of gaining that precision without using busy wait.
 - Drive the scheduler's "now" from an external thread rather than wall-clock sleep — e.g. follow Logic / a DAW transport instead of free-running. Scheduler-side change only: replace `sleep_until(t)` with "wait until the external source signals scheduler-time `t`" via an injectable time source (default = monotonic clock). Open questions: startup offset/rate mapping; host tempo changes as continuous mapping vs discrete tick stream. Worth prototyping against MIDI clock / MTC first.
 
 
