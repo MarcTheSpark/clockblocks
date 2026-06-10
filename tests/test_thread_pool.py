@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 
 from cb2.clock import Clock
+from cb2.clock import ClockFamilyOptions
 from cb2.utilities import current_clock
 
 
@@ -53,17 +54,17 @@ class ThreadPoolTestCase(unittest.TestCase):
 
     def test_prewarm_spins_up_workers_at_construction(self):
         """prewarm_pool=N should eagerly create N persistent worker threads before any fork."""
-        self.master = Clock(name="master", pool_size=50, prewarm_pool=8)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(pool_size=50, prewarm_pool=8))
         self.assertEqual(len(self.master._pool._threads), 8)
 
     def test_prewarm_zero_creates_no_workers(self):
         """prewarm_pool=0 keeps an idle clock thread-free (no pool workers until a fork demands one)."""
-        self.master = Clock(name="master", prewarm_pool=0)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(prewarm_pool=0))
         self.assertEqual(len(self.master._pool._threads), 0)
 
     def test_prewarm_clamped_to_pool_size(self):
         """A prewarm count larger than pool_size is clamped to pool_size."""
-        self.master = Clock(name="master", pool_size=3, prewarm_pool=100)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(pool_size=3, prewarm_pool=100))
         self.assertLessEqual(len(self.master._pool._threads), 3)
 
     # ---- pool reuse ----
@@ -73,7 +74,7 @@ class ThreadPoolTestCase(unittest.TestCase):
         spawning a fresh thread each time. The pool distributes across its (persistent) workers, so the
         count of distinct worker threads is bounded by pool_size — with a per-fork-thread implementation
         it would instead climb to one per fork."""
-        self.master = Clock(name="master", pool_size=3)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(pool_size=3))
         idents = set()
 
         def proc():
@@ -93,7 +94,7 @@ class ThreadPoolTestCase(unittest.TestCase):
     def test_pool_exhaustion_falls_back_to_thread_with_warning(self):
         """With every pool worker parked in a long fork, a further fork must still run — on a raw
         fallback Thread — and emit a warning rather than block."""
-        self.master = Clock(name="master", pool_size=2)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(pool_size=2))
         release = threading.Event()
         started = []
 
@@ -141,7 +142,7 @@ class ThreadPoolTestCase(unittest.TestCase):
         """An exception in a pooled task must release its semaphore slot (via error_callback), so the
         pool doesn't slowly leak capacity. With pool_size=1, repeated erroring tasks should keep using
         the (one) pool worker — i.e. never fall back to a warned raw Thread."""
-        self.master = Clock(name="master", pool_size=1)
+        self.master = Clock(name="master", clock_family_options=ClockFamilyOptions(pool_size=1))
 
         def boom():
             raise RuntimeError("intentional")

@@ -24,6 +24,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass(order=True)
 class QueueEvent:
     # Ordering is by t first, then by priority. action/metadata are not orderable.
@@ -31,6 +32,7 @@ class QueueEvent:
     priority: Tuple[int, ...]
     action: Callable[[], None] = field(compare=False)
     metadata: Any = field(default=None, compare=False)
+
 
 class Scheduler(threading.Thread):
     """
@@ -48,16 +50,27 @@ class Scheduler(threading.Thread):
     and killing a clock removes them via :meth:`remove_events`.
     """
 
-    def __init__(self, timing_policy: float = 0.98, daemon: bool = True):
+    def __init__(self, timing_policy: float = 0.98, precise_timing: bool = False,
+                 spin_guard_duration: float = 0.0005, daemon: bool = True):
         """
         :param timing_policy:
-            0 -> Relative timing (wait the full scheduled delay),
-            1 -> Absolute timing (cut wait time to catch up to the schedule),
+            0 -> Absolute timing (cut wait time to catch up to the schedule since start),
+            1 -> Relative timing (wait the full scheduled delay; errors accumulate),
             0.5 -> A blend of the two.
+            (Matches the original clockblocks convention; the default 0.98 is nearly fully relative.)
+        :param precise_timing:
+            When True, close the final approach to each event with a busy-spin instead of resting on
+            the (jittery) OS wait timeout, hitting the event time to within microseconds. Costs one core
+            for at most ``spin_guard_duration`` seconds per event — see :meth:`run` STEP 1c.
+        :param spin_guard_duration:
+            Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. The coarse
+            OS wait stops this far short of the deadline and the remainder is spun out. Default 500µs.
         :param daemon: run as a daemon thread (the default) so it can't keep the process alive on its own.
         """
         super().__init__(daemon=daemon)
         self.timing_policy = timing_policy
+        self.precise_timing = precise_timing
+        self.spin_guard_duration = spin_guard_duration
 
         # Heap-based queue for scheduled events.
         self._queue = []
@@ -118,8 +131,13 @@ class Scheduler(threading.Thread):
         return self._ideal_time
 
     def wall_time(self) -> float:
-        """Return the actual wall-clock time elapsed since the scheduler started."""
-        return time.time() - self._start_time if self._start_time else 0.0
+        """
+        Return the actual time elapsed since the scheduler started.
+
+        Measured with :func:`time.perf_counter` (a monotonic, high-resolution counter), so this is
+        true elapsed real time — never affected by NTP corrections (slews or steps) to CLOCK_REALTIME.
+        """
+        return time.perf_counter() - self._start_time if self._start_time else 0.0
 
     def set_fast_forward_goal(self, goal: float | None) -> None:
         """
@@ -212,7 +230,7 @@ class Scheduler(threading.Thread):
         change can't be lost, and why execution is wrapped in `_execution_lock` — are explained inline
         at STEP 1 and STEP 2 below.
         """
-        self._start_time = time.time()
+        self._start_time = time.perf_counter()
         self._last_wake_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
@@ -237,7 +255,7 @@ class Scheduler(threading.Thread):
 
                 # ~~~~~~ STEP 1b: Peek at the queue, and calculate wait duration to next scheduled event ~~~~~~
                 next_event = self._queue[0]
-                now = time.time()
+                now = time.perf_counter()
 
                 # Fast-forward short-circuits the wait. If we're fast-forwarding *through* this event (it
                 # lies before the goal), fire it with no wall-clock delay. Otherwise we're about to wait in
@@ -251,18 +269,53 @@ class Scheduler(threading.Thread):
                     wait_duration = self._compute_wait_duration(next_event, now)
 
                 # ~~~~~~ STEP 1c: Wait for the next scheduled event (if in the future) ~~~~~~
-                if wait_duration > 0:
-                    # Note that since we've been holding _queue_change_condition, nothing can have changed about the
-                    # queue since we calculated the wait duration. Calling wait releases the underlying lock so that
-                    # functions can now modify the queue. If they do so before the wait_duration has played out,
-                    # they notify _queue_change_condition, wake us up early, and we re-enter the loop so that we
-                    # can recalculate based on the updated queue.
-                    self._queue_change_condition.wait(timeout=wait_duration)
-                    continue
+                # Two paths, depending on whether we're spinning (busy-waiting) to hit the target time precisely
+                # Coarse mode leaves spin_deadline as None to signal no busy wait; precise mode waits coarsely
+                # up to the guard band defined by spin_guard_duration, and then sets spin_deadline to
+                # busy wait the final microseconds.
+                spin_deadline = None
+                if not self.precise_timing:
+                    # Coarse mode: rest on the OS wait for the whole remaining duration, then re-enter the
+                    # loop to re-evaluate. If the event is already due (<= 0), fall through to execute it now.
+                    # If the event is still not quite due, we wait again on the tiny remaining duration until
+                    # it eventually passes the deadline.
+                    if wait_duration > 0:
+                        self._queue_change_condition.wait(timeout=wait_duration)
+                        continue
+                else:
+                    # Precise mode: coarse-wait down to within spin_guard_duration of the deadline
+                    # (as above this might take a couple passes), then busy-spin the remainder below
+                    # for a microsecond-accurate landing.
+                    if wait_duration > self.spin_guard_duration:
+                        self._queue_change_condition.wait(timeout=wait_duration - self.spin_guard_duration)
+                        continue
+                    elif wait_duration > 0:
+                        # Inside the guard band, but not past the deadline, so we arm the busy wait.
+                        # The deadline is measured from `now` (the same time the wait_duration was computed
+                        # against) so it is exactly the intended wake time.
+                        # Note that we don't spin *here* because we're holding _queue_change_condition's
+                        # lock. The scheduler is effectively unresponsive while holding that lock, since
+                        # anything that modifies the queue needs it. During any of the _queue_change_condition.wait
+                        # calls above, this is not an issue, because the lock is actually released while
+                        # waiting on a condition; that's part of how conditions work.
+                        spin_deadline = now + wait_duration
+                    # else (<= 0): already due — fall through to execute now.
+
+            # Having exited the with `self._queue_change_condition` block and released the lock, we now check
+            # if spin_deadline is set (i.e. if we're using precise_timing and within the guard band)
+            if spin_deadline is not None:
+                while time.perf_counter() < spin_deadline and not self._killed:
+                    # We poll _killed while spinning so a kill() during the spin tears the loop down promptly.
+                    # Since _queue_change_condition was released, other threads are free to modify the queue here;
+                    # however, we won't respond to those changes until after the (very very short) busy wait
+                    pass
+                if self._killed:
+                    break
 
             # NOTE: there is a gap here between waiting for the event time and performing the action, where we are
             # no longer holding _queue_change_condition. This leaves a window for an external thread to mutate the
-            # queue, which is why we recheck validity at the start of _execute_event and bail if things changed.
+            # queue, perhaps even preempting the event we're waiting for with an earlier event. For this reason
+            # we recheck validity at the start of _execute_event and bail if things changed.
 
             # --------------------------- STEP 2: Perform the scheduled action -------------------------------
             # Executed events happen under the _execution_lock. If an external thread wants to make sure that
@@ -377,4 +430,4 @@ class Scheduler(threading.Thread):
             event.action()
         except Exception as e:
             logger.exception(f"Error executing event '{event.metadata}': {e}")
-        self._last_wake_time = time.time()
+        self._last_wake_time = time.perf_counter()

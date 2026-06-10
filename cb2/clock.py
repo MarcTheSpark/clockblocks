@@ -19,6 +19,8 @@ time under a master clock and its background :class:`~cb2.scheduler.Scheduler`.
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
+from __future__ import annotations
+
 import functools
 import logging
 import math
@@ -27,6 +29,7 @@ import threading
 import traceback
 import warnings
 from contextlib import nullcontext
+from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 from itertools import count
@@ -83,6 +86,53 @@ class ClockState(Enum):
     PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
     ALIVE = "alive"      # forked_function is running (or about to run)
     DEAD = "dead"        # killed, or forked_function returned
+
+
+@dataclass(frozen=True)
+class ClockFamilyOptions:
+    """
+    Fine-tuning options for a clock family, passed to a master :class:`Clock` on construction.
+    A master and all its descendants share one scheduler and one thread pool; these knobs configure both.
+
+    The live knobs (``timing_policy``, ``precise_timing``, ``spin_guard_duration``) can be changed after
+    construction via the matching :class:`Clock` properties; the thread pool knobs are construction-only
+    because the thread pool is built once.
+
+    :param timing_policy:
+        0.0 = absolute timing (measure from clock start and catch up as much as possible),
+        1.0 = relative timing (wait the full delay each time, even when behind),
+        floats between 0 and 1 blend the two. Default value is 0.98 (near-relative,
+        but with a little absolute mixed in so we can catch up on long waits).
+    :param precise_timing:
+        When true, use a busy-wait in the immediate run-up to a scheduled action to arrive as precisely
+        as possible. (OS wait is by nature jittery.) Costs one core for at most ``spin_guard_duration``
+        seconds per event. Helps under any ``timing_policy`` by tightening whatever that policy optimizes.
+    :param spin_guard_duration:
+        Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. Default 500µs.
+    :param pool_size:
+        Max worker threads in the family's shared ThreadPoolExecutor, used for every call to ``fork``
+        or ``fork_unsynchronized``. Workers are created lazily up to this cap; past it, a forked
+        clock falls back to a plain thread and warns that the pool has run out of threads.
+    :param prewarm_pool:
+        How many pool workers to spin up eagerly at construction, front-loading the (sub-millisecond)
+        thread-creation cost of the first that-many forks. Clamped to ``pool_size``; 0 disables, leaving
+        an idle clock with no threads at all.
+    """
+    timing_policy: float = 0.98
+    precise_timing: bool = False
+    spin_guard_duration: float = 0.0005
+    pool_size: int = 200
+    prewarm_pool: int = 10
+
+    def __post_init__(self):
+        if not 0.0 <= self.timing_policy <= 1.0:
+            raise ValueError("timing_policy must be between 0 (absolute) and 1 (relative).")
+        if self.spin_guard_duration < 0:
+            raise ValueError("spin_guard_duration must be non-negative.")
+        if self.pool_size < 1:
+            raise ValueError("pool_size must be at least 1.")
+        if self.prewarm_pool < 0:
+            raise ValueError("prewarm_pool must be non-negative.")
 
 
 # ======================================================================================================
@@ -194,26 +244,25 @@ class Clock:
     :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
     :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
     :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
-    :param timing_policy: master-only; sets the family's :attr:`timing_policy` (0.0 = relative, 1.0 =
-        absolute). Leaving it None keeps the scheduler default.
-    :param pool_size: (only meaningful for master clock) the maximum number of worker threads in the
-        family's shared thread pool, used for every ``fork`` and ``fork_unsynchronized``. Workers are
-        created lazily as forks demand them (an idle clock costs no threads), up to this cap. If all
-        threads in the pool are simultaneously in use, we use a plain thread (with a warning).
-    :param prewarm_pool: (only meaningful for master clock) how many pool worker threads to spin up
-        eagerly at construction, so the first that many forks skip the (admittedly sub-millisecond)
-        thread-creation latency (a warm fork is ~3x cheaper). Clamped to ``pool_size``; 0 disables.
-        It is genuinely unclear this is worth it — the lazy pool already amortizes creation to ~zero
-        after the first few forks — so it's kept small by default; set it to 0 if you'd rather an
-        idle clock cost no threads at all.
+    :param clock_family_options: (master-only) a :class:`ClockFamilyOptions` bundling the family-level
+        timing/threading knobs (``timing_policy``, ``precise_timing``, ``spin_guard_duration``,
+        ``pool_size``, ``prewarm_pool``). The live knobs are also adjustable afterwards via
+        :attr:`timing_policy`, :attr:`precise_timing`, and :attr:`spin_guard_duration`. Passing it
+        to a forked child raises an error, since a child shares its master's scheduler and pool.
     :ivar name: the name of this clock (string)
     :ivar parent: the parent Clock to which this clock belongs (Clock, or None if master clock)
     :ivar tempo_history: TempoHistory describing how this clock has changed or will change tempo
     """
 
-    def __init__(self, name: str = None, parent: 'Clock' = None, initial_rate: float = None,
-                 initial_tempo: float = None, initial_beat_length: float = None,
-                 timing_policy: float = None, pool_size: int = 200, prewarm_pool: int = 10):
+    def __init__(self, name: str | None= None, parent: Clock | None = None, initial_rate: float | None = None,
+                 initial_tempo: float | None = None, initial_beat_length: float | None = None,
+                 clock_family_options: ClockFamilyOptions | None = None):
+        if clock_family_options is not None and parent is not None:
+            raise NotMasterClockError(
+                "clock_family_options is master-only: a forked child shares its master's scheduler and pool. "
+                "Set these on the master, or adjust the live knobs via the timing_policy / precise_timing / "
+                "spin_guard_duration properties.")
+        options = clock_family_options if clock_family_options is not None else ClockFamilyOptions()
         self.name = name
         self.parent = parent
         self._children = []
@@ -243,14 +292,10 @@ class Clock:
         if self.parent is not None:
             self.scheduler = self.parent.scheduler
         else:
-            self.scheduler = Scheduler(daemon=True)
+            self.scheduler = Scheduler(timing_policy=options.timing_policy,
+                                       precise_timing=options.precise_timing,
+                                       spin_guard_duration=options.spin_guard_duration, daemon=True)
             self.scheduler.start()
-
-        # `timing_policy` is a master-only convenience: it forwards to the family's scheduler. Passing it
-        # to a forked child is an error (the setter raises NotMasterClockError); leaving it None keeps the
-        # scheduler's default.
-        if timing_policy is not None:
-            self.timing_policy = timing_policy
 
         self._scheduler_park_condition = threading.Condition()
         self._wait_event = threading.Event()
@@ -276,10 +321,10 @@ class Clock:
             # _pool_semaphore tracks how many active threads we are using, since if we go over max_workers
             # new _run_in_pool would block until one is free. By tracking we can switch to a raw thread
             # when we reach the capacity of the ThreadPoolExecutor
-            self._pool = ThreadPoolExecutor(max_workers=pool_size,
+            self._pool = ThreadPoolExecutor(max_workers=options.pool_size,
                                             thread_name_prefix=f"clock-pool-{self.name or id(self)}")
-            self._pool_semaphore = threading.BoundedSemaphore(pool_size)
-            self._prewarm_pool(min(prewarm_pool, pool_size))
+            self._pool_semaphore = threading.BoundedSemaphore(options.pool_size)
+            self._prewarm_pool(min(options.prewarm_pool, options.pool_size))
 
             # The whole family shares one structural lock, owned by the master. fork / kill / external
             # tempo changes acquire it (via _tree_lock) so the clock tree (_children, _state) and any
@@ -1408,16 +1453,13 @@ class Clock:
         """
         How the family trades off relative vs. absolute timing, as a float from 0 to 1.
 
-        At 0.0 (relative) each wait call is kept as faithful as possible to its requested duration. This
-        can let the clock fall behind real time: if heavy processing makes one note late, that lateness is
-        never made up. At 1.0 (absolute) the clock instead stays faithful to the time elapsed since it
+        At 1.0 (relative) each wait call is kept as faithful as possible to its requested duration. This
+        can let the clock fall behind real time, since if heavy processing makes one note late, that lateness is
+        never made up. At 0.0 (absolute) the clock instead stays faithful to the time elapsed since it
         began — a wait that ran long is followed by shorter waits to catch up, at the cost of some
-        relative-timing accuracy. A value in between is a hybrid: when the clock gets behind it is allowed
-        to catch up, but only partway for each wait call, preserving some of the relative timing.
-
-        Timing lives on the family's scheduler; this property forwards to ``self.scheduler.timing_policy``
-        so callers never need to touch the scheduler directly. It applies to the whole clock family (each
-        master has its own scheduler). Readable from any clock; settable only on the master.
+        relative-timing accuracy. A value in between is a hybrid: when the clock gets behind, it is allowed
+        to catch up, but only for a fraction of each wait call, preserving some of the relative timing.
+        (Forwards to the scheduler, settable only on the master clock)
         """
         return self.scheduler.timing_policy
 
@@ -1428,20 +1470,53 @@ class Clock:
                 "timing_policy applies to the whole clock family; set it on the master clock."
             )
         if not 0.0 <= value <= 1.0:
-            raise ValueError("timing_policy must be between 0 (relative) and 1 (absolute).")
+            raise ValueError("timing_policy must be between 0 (absolute) and 1 (relative).")
         self.scheduler.timing_policy = value
 
     def use_absolute_timing_policy(self) -> None:
-        """Shorthand for ``timing_policy = 1.0`` (always catch up to absolute schedule)."""
-        self.timing_policy = 1.0
-
-    def use_relative_timing_policy(self) -> None:
-        """Shorthand for ``timing_policy = 0.0`` (always wait the full requested delay)."""
+        """Shorthand for ``timing_policy = 0.0`` (always catch up to absolute schedule)."""
         self.timing_policy = 0.0
 
+    def use_relative_timing_policy(self) -> None:
+        """Shorthand for ``timing_policy = 1.0`` (always wait the full requested delay)."""
+        self.timing_policy = 1.0
+
     def use_mixed_timing_policy(self, absolute_relative_mix: float) -> None:
-        """Shorthand for ``timing_policy = absolute_relative_mix`` (a blend, 0=relative .. 1=absolute)."""
+        """Shorthand for ``timing_policy = absolute_relative_mix`` (a blend between 0=absolute and 1=relative)."""
         self.timing_policy = absolute_relative_mix
+
+    @property
+    def precise_timing(self) -> bool:
+        """
+        Whether to use a busy wait in the final moments leading up to a scheduled event. The busy wait fully
+        occupies a CPU core and lasts at most :attr:`spin_guard_duration` seconds per event. (Forwards to
+        the scheduler, settable only on the master clock)
+        """
+        return self.scheduler.precise_timing
+
+    @precise_timing.setter
+    def precise_timing(self, value: bool) -> None:
+        if not self.is_master():
+            raise NotMasterClockError(
+                "precise_timing applies to the whole clock family; set it on the master clock.")
+        self.scheduler.precise_timing = value
+
+    @property
+    def spin_guard_duration(self) -> float:
+        """
+        Width (seconds) of the busy-wait guard band used when :attr:`precise_timing` is on. (Forwards to
+        the scheduler, settable only on the master clock)
+        """
+        return self.scheduler.spin_guard_duration
+
+    @spin_guard_duration.setter
+    def spin_guard_duration(self, value: float) -> None:
+        if not self.is_master():
+            raise NotMasterClockError(
+                "spin_guard_duration applies to the whole clock family; set it on the master clock.")
+        if value < 0:
+            raise ValueError("spin_guard_duration must be non-negative.")
+        self.scheduler.spin_guard_duration = value
 
     def kill(self) -> None:
         """

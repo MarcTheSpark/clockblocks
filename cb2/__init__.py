@@ -17,7 +17,7 @@
 from importlib.metadata import version, PackageNotFoundError
 
 from cb2.clock import Clock, ClockKilledError, DeadClockError, ClockblocksError, WrongThreadError, \
-    NoActiveClockError, NotMasterClockError, ClockState
+    NoActiveClockError, NotMasterClockError, ClockState, ClockFamilyOptions
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.moment import Moment, ResolvableMoment
