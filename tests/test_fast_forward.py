@@ -2,7 +2,8 @@ import threading
 import time
 import unittest
 
-from cb2.clock import Clock, NotMasterClockError
+from cb2.clock import Clock
+from cb2.exceptions import NotMasterClockError
 from cb2.utilities import current_clock
 
 

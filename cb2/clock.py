@@ -38,48 +38,12 @@ from copy import deepcopy
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory
 from cb2.scheduler import Scheduler
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
+from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
 from cb2.utilities import _PrintColors, current_clock, _UNSYNCHRONIZED
+from cb2.exceptions import (ClockKilledError, DeadClockError, WrongThreadError,
+                            NotMasterClockError)
 import textwrap
-
-
-class ClockblocksError(Exception):
-    """Base class for clockblocks errors."""
-    pass
-
-
-class ClockKilledError(ClockblocksError):
-    """Raised inside a forked clock's own thread when its wait is woken by kill(),
-    so the fork wrapper can unwind the user function cleanly."""
-    pass
-
-
-class DeadClockError(ClockblocksError):
-    """Raised when something tries to wait or fork on a clock that's no longer ALIVE
-    (either killed already, or — for fork — still PENDING in its start_delay)."""
-    pass
-
-
-class WrongThreadError(ClockblocksError):
-    """Raised when wait() is called from a thread that doesn't own the clock.
-    Each clock has exactly one owning thread (the one running its forked function,
-    or the main thread for the master); calling wait() from any other thread would
-    block the wrong thread and corrupt the clock's bookkeeping."""
-    pass
-
-
-class NoActiveClockError(ClockblocksError):
-    """Raised when a clock operation (the module-level wait/fork/etc.) is attempted from a thread
-    that has no clock active on it. Establish one with fork() / run_as_server(), or call the method
-    on a Clock object directly. (Threads spawned by fork_unsynchronized are exempt for the
-    sleep-based waits — see fork_unsynchronized.)"""
-    pass
-
-
-class NotMasterClockError(ClockblocksError):
-    """Raised by operations that are only valid on the master (top-level) clock — e.g.
-    run_as_server() — when called on a child clock."""
-    pass
 
 
 class ClockState(Enum):
@@ -632,152 +596,208 @@ class Clock:
     #                                          Tempo Targets / Functions
     ##################################################################################################################
     # Thin Clock-level bridges over TempoHistory's tempo-curve mutation API: they wrap the underlying
-    # call in `@_reschedule_after_tempo_change` (so queued descendant wakeups re-project against the
+    # call in `@_reschedule_after_tempo_change` (so queued descendant wake-ups re-project against the
     # new curve and so the mutation acquires `_tree_lock` / `while_quiescent` as appropriate) and
-    # accept a duration as either a bare number (deprecated) or a ResolvableMoment.
+    # express *when* a target is reached as a ResolvableMoment — a `Moment` (after_beats/after_time/
+    # at_beat/at_time) or a `MetricPhaseTarget` (which lands the target on the next matching metric
+    # phase). The Moment carries its own beats-vs-time axis, so there is no separate `duration_units`,
+    # and a MetricPhaseTarget passed as `when` subsumes the old `metric_phase_target` argument.
     # ------------------------------------------------------------------
 
-    def _duration_from_moment(self, duration, *, legacy_units: str) -> tuple[float, str]:
-        """
-        Coerce a `duration` argument (the per-segment "how long until target" param of the
-        set_*_target methods) into a (value, units) pair to pass through to TempoHistory.
+    def _resolve_align(self, when: 'ResolvableMoment', curve_shape: float | None,
+                       align_to: 'ResolvableMoment | None'):
+        """Resolve a singular target's `when` and `align_to` into the numeric arguments TempoHistory
+        wants. Returns (duration, units, alignment_target, curve_shape):
 
-        Three accepted shapes:
-          * ``ResolvableMoment`` — a Moment or MetricPhaseTarget. Resolved against this clock and
-            converted to a duration relative to the current beat/time on whichever axis the moment
-            expresses; the moment's own units win.
-          * ``int | float`` — legacy form. Emits a DeprecationWarning; interpreted with
-            ``legacy_units`` (the value of the deprecated ``duration_units`` kwarg, defaulting to
-            "beats" — matches the legacy default).
-          * anything else → TypeError.
+          * `duration`/`units` come from `when` (a Moment or MetricPhaseTarget; bare number rejected),
+            measured from the clock's current position — `units` is the *pinned* axis.
+          * `alignment_target` is what TempoHistory's parameter of the same name receives: None, a
+            MetricPhaseTarget on the *free* axis (the one `when` did not pin), or a fixed free-axis
+            coordinate (resolved from a plain Moment). The free axis is always opposite `when`; a plain
+            Moment / explicit-axis phase target on the same axis as `when` is an error.
+          * `curve_shape` is normalized None -> 0. With a *fixed* `align_to` an explicitly-set
+            curve_shape is discarded (the curvature is determined) with a warning.
         """
-        if isinstance(duration, (int, float)):
-            warnings.warn(
-                "Passing a bare number for `duration` is deprecated; pass Moment.after_beats(n) or "
-                "Moment.after_time(t) (or an absolute Moment.at_beat/at_time) instead. "
-                "`duration_units` is going away with it.",
-                DeprecationWarning, stacklevel=3,
-            )
-            return float(duration), legacy_units
-        if not isinstance(duration, (Moment, ResolvableMoment)) and not hasattr(duration, "resolve"):
-            raise TypeError(
-                f"`duration` must be a number or a ResolvableMoment, got {type(duration).__name__}."
-            )
-        abs_moment = duration.resolve(self) if not isinstance(duration, Moment) or duration.relative \
-            else duration
-        units = abs_moment.units
-        now = self.beat() if units == DurationUnits.BEATS else self.time()
-        return abs_moment.value - now, units.value
+        abs_when = to_absolute_moment(when, self, allow_number=False)
+        pinned_axis = abs_when.units
+        now = self.beat() if pinned_axis == DurationUnits.BEATS else self.time()
+        duration, units = abs_when.value - now, pinned_axis.value
 
-    def _durations_from_moments(self, durations, *, legacy_units: str) -> tuple[Sequence[float], str]:
-        """Plural form of _duration_from_moment: collapse a list of mixed numbers / Moments into a
-        list of float durations plus a single shared duration_units. All non-number entries must
-        agree on units."""
-        values = []
-        unit_seen = None
-        for d in durations:
-            v, u = self._duration_from_moment(d, legacy_units=legacy_units)
-            values.append(v)
-            if unit_seen is None:
-                unit_seen = u
-            elif u != unit_seen:
+        if align_to is None:
+            return duration, units, None, (curve_shape or 0)
+
+        free_axis = DurationUnits.TIME if pinned_axis == DurationUnits.BEATS else DurationUnits.BEATS
+
+        if isinstance(align_to, MetricPhaseTarget):
+            if align_to.units is not None and align_to.units != free_axis:
                 raise ValueError(
-                    f"All durations must share the same units; got both {unit_seen!r} and {u!r}."
-                )
-        return values, unit_seen if unit_seen is not None else legacy_units
+                    f"align_to is fixed to the {align_to.units.value} axis, but `when` already pins that "
+                    f"axis; align_to must be on the free ({free_axis.value}) axis (leave its units as None "
+                    f"to infer it).")
+            # pass the MetricPhaseTarget through as-is; TempoHistory will treat it as operating on the other
+            # axes than specified by `units`, ignoring any internal units to the MetricPhaseTarget
+            return duration, units, align_to, (curve_shape or 0)
+
+        # a plain Moment represents a fixed coordinate on the free axis; curvature is then fully determined
+        abs_moment_to_align_to = to_absolute_moment(align_to, self, allow_number=False)
+        if abs_moment_to_align_to.units != free_axis:
+            raise ValueError(
+                f"align_to is on the {abs_moment_to_align_to.units.value} axis, but `when` pins that axis; align_to "
+                f"must be on the free ({free_axis.value}) axis.")
+        if curve_shape is not None:
+            warnings.warn("curve_shape is ignored when align_to is a fixed point, as this fully determines "
+                          "the required curvature.")
+        return duration, units, abs_moment_to_align_to.value, 0
+
+    def _apply_targets(self, history_target_setter: Callable, targets: Sequence[float],
+                       whens: 'Sequence[ResolvableMoment]', curve_shapes: Sequence[float],
+                       truncate: bool) -> None:
+        """Build a multi-segment tempo curve using the given tempo history target setter (`set_beat_length_target`/
+        `set_rate_target`/`set_tempo_target`). The levels are given by `targets`, and the moments where those levels
+        are reached are given by `whens`.
+
+        Note that these when's are resolved relative to the current clock position, *not* the end of the previous
+        segment. Any ambiguity resulting from the fact that multiple targets are set at once (possibly mixing beat
+        and time axes), is resolved by building the tempo curve incrementally, left-to-right.
+
+        The whens must come out strictly increasing in clock-time; the underlying setter's own
+        backwards-guard raises if one lands at or before the previous segment's end, and we re-raise
+        with the offending index.
+        """
+        # normalize length of multi-arguments
+        num_targets = len(targets)
+        if len(whens) != num_targets:
+            raise ValueError("Inconsistent number of targets and whens.")
+        curve_shapes = [0] * num_targets if curve_shapes is None else curve_shapes
+        if len(curve_shapes) != num_targets:
+            raise ValueError("Inconsistent number of targets and curve_shapes.")
+
+        # loop through targets left-to-right
+        now_beat, now_time = self.beat(), self.time()
+        for i, (target, when, curve_shape) in enumerate(zip(targets, whens, curve_shapes)):
+            moment = to_absolute_moment(when, self, allow_number=False)
+            if moment.units == DurationUnits.BEATS:
+                duration, units = moment.value - now_beat, DurationUnits.BEATS
+            else:
+                duration, units = moment.value - now_time, DurationUnits.TIME
+            try:
+                history_target_setter(target, duration, curve_shape=curve_shape, duration_units=units,
+                                      truncate=(truncate and i == 0))
+            except ValueError as e:
+                raise ValueError(
+                    f"`when` #{i} ({when!r}) resolves to {units} {moment.value:g}, which does not "
+                    f"extend beyond the previous segment; `when`s must be strictly increasing in "
+                    f"clock-time."
+                ) from e
 
     @_reschedule_after_tempo_change
-    def set_beat_length_target(self, beat_length_target: float,
-                               duration: 'float | ResolvableMoment',
-                               curve_shape: float = 0,
-                               metric_phase_target=None,
-                               duration_units: str = "beats",
-                               truncate: bool = True) -> None:
-        """Reach `beat_length_target` by `duration` from now. `duration` is a ResolvableMoment
-        (``Moment.after_beats(n)``, ``after_time(t)``, or absolute) — a bare number is accepted but
-        deprecated, and `duration_units` survives only as the legacy interpretation of that number.
-        See :meth:`TempoHistory.set_beat_length_target` for the other parameters."""
-        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+    def set_beat_length_target(self, beat_length_target: float, when: 'ResolvableMoment',
+                               curve_shape: float = None, truncate: bool = True,
+                               align_to: 'ResolvableMoment' = None) -> None:
+        """Smoothly change this clock's beat length (seconds per beat) to ``beat_length_target``,
+        arriving at the moment given by ``when``. This is the underlying representation behind
+        :meth:`set_tempo_target` and :meth:`set_rate_target`; a longer beat length means a slower tempo.
+
+        :param beat_length_target: the beat length to arrive at, in seconds per beat.
+        :param when: when the target should be reached, as a :class:`Moment` (e.g. ``Moment.after_beats(4)``,
+            ``Moment.at_time(10)``) or a :class:`MetricPhaseTarget` (the next point matching a particular
+            phase within the beat cycle). ``after_*`` moments count from the clock's *current* position.
+            A plain number is rejected; wrap it in a Moment to clarify beat/time and relative/absolute.
+        :param curve_shape: the bend of the transition. ``0`` (the default) is a straight line; ``> 0``
+            keeps the old tempo longer and changes late; ``< 0`` changes early then eases in. When
+            ``align_to`` solves for the curvature (see below) this acts only as a starting hint, and
+            with a fixed ``align_to``, it is ignored entirely (and a warning is issued if set).
+        :param truncate: if ``True`` (the default), any tempo curve already scheduled past the current
+            beat is discarded first, so the change starts from where the clock is right now. If ``False``,
+            this target is appended after whatever is already scheduled.
+        :param align_to: optional. If `when` is an arrival beat, this specifies the desired arrival time.
+            If `when` is an arrival time, this specifies the desired arrival beat. A MetricPhaseTarget can
+            be given instead of a singular time/beat, to express when we should arrive within a time/beat
+            cycle. Note that the coordination of beat and time is done via mutating the curve shape, so
+            an explicit curve shape is only a hint (ignored completely if align_to is a fixed point rather
+            than a metric phase target).
+        :raises ValueError: if ``when``/``align_to`` share an axis, or if no curvature can reach the
+            requested ``align_to`` (in which case the tempo curve is left unchanged)."""
+        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
         self.tempo_history.set_beat_length_target(
-            beat_length_target, d, curve_shape=curve_shape,
-            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+            beat_length_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            duration_units=duration_units, truncate=truncate,
         )
 
     @_reschedule_after_tempo_change
-    def set_rate_target(self, rate_target: float,
-                        duration: 'float | ResolvableMoment',
-                        curve_shape: float = 0,
-                        metric_phase_target=None,
-                        duration_units: str = "beats",
-                        truncate: bool = True) -> None:
-        """Reach `rate_target` (beats/second) by `duration` from now. See
-        :meth:`set_beat_length_target` for the duration convention."""
-        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+    def set_rate_target(self, rate_target: float, when: 'ResolvableMoment',
+                        curve_shape: float = None, truncate: bool = True,
+                        align_to: 'ResolvableMoment' = None) -> None:
+        """Smoothly change this clock's rate (beats per second) to ``rate_target``, arriving at ``when``.
+        Rate is the reciprocal of beat length: a higher rate is a faster tempo.
+
+        :param rate_target: the rate to arrive at, in beats per second.
+        :param when: when the target is reached. See :meth:`set_beat_length_target`.
+        :param curve_shape: the bend of the transition. See :meth:`set_beat_length_target`.
+        :param truncate: whether to discard already-scheduled tempo changes first. See
+            :meth:`set_beat_length_target`.
+        :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate.
+            See :meth:`set_beat_length_target`.
+        :raises ValueError: see :meth:`set_beat_length_target`."""
+        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
         self.tempo_history.set_rate_target(
-            rate_target, d, curve_shape=curve_shape,
-            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+            rate_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            duration_units=duration_units, truncate=truncate,
         )
 
     @_reschedule_after_tempo_change
-    def set_tempo_target(self, tempo_target: float,
-                         duration: 'float | ResolvableMoment',
-                         curve_shape: float = 0,
-                         metric_phase_target=None,
-                         duration_units: str = "beats",
-                         truncate: bool = True) -> None:
-        """Reach `tempo_target` (BPM) by `duration` from now. See :meth:`set_beat_length_target` for
-        the duration convention."""
-        d, u = self._duration_from_moment(duration, legacy_units=duration_units)
+    def set_tempo_target(self, tempo_target: float, when: 'ResolvableMoment',
+                         curve_shape: float = None, truncate: bool = True,
+                         align_to: 'ResolvableMoment' = None) -> None:
+        """Smoothly change this clock's tempo to ``tempo_target``, arriving at ``when``. Tempo is measured
+        in beats per minute; this is usually the most natural of the three equivalent ways to set a target
+        (see also :meth:`set_rate_target` and :meth:`set_beat_length_target`).
+
+        :param tempo_target: the tempo to arrive at, in beats per minute (quarter-notes per minute by
+            convention).
+        :param when: when the target is reached. See :meth:`set_beat_length_target`.
+        :param curve_shape: the bend of the transition. See :meth:`set_beat_length_target`.
+        :param truncate: whether to discard already-scheduled tempo changes first. See
+            :meth:`set_beat_length_target`.
+        :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate.
+            See :meth:`set_beat_length_target`.
+        :raises ValueError: see :meth:`set_beat_length_target`."""
+        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
         self.tempo_history.set_tempo_target(
-            tempo_target, d, curve_shape=curve_shape,
-            metric_phase_target=metric_phase_target, duration_units=u, truncate=truncate,
+            tempo_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            duration_units=duration_units, truncate=truncate,
         )
 
     @_reschedule_after_tempo_change
     def set_beat_length_targets(self, beat_length_targets: Sequence[float],
-                                durations: 'Sequence[float | ResolvableMoment]',
+                                whens: 'Sequence[ResolvableMoment]',
                                 curve_shapes: Sequence[float] = None,
-                                metric_phase_targets=None,
-                                duration_units: str = "beats",
-                                truncate: bool = True, loop: bool = False) -> None:
-        """Multi-segment form of :meth:`set_beat_length_target`. All durations must share the same
-        units (no mixing of beat- and time-based Moments in one call)."""
-        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
-        self.tempo_history.set_beat_length_targets(
-            beat_length_targets, ds, curve_shapes=curve_shapes,
-            metric_phase_targets=metric_phase_targets, duration_units=u,
-            truncate=truncate, loop=loop,
-        )
+                                truncate: bool = True) -> None:
+        """Multi-segment form of :meth:`set_beat_length_target`. Each entry of `whens` is the arrival
+        point of the corresponding target, resolved against the current beat/time (so an `after_*`
+        `when` counts from now, not from the previous segment's end). Beats and time may be mixed
+        across the list, and the whens must be strictly increasing in clock-time. This is one-shot;
+        to loop a tempo shape, build a :class:`TempoEnvelope` and use :meth:`apply_tempo_envelope`."""
+        self._apply_targets(self.tempo_history.set_beat_length_target,
+                            beat_length_targets, whens, curve_shapes, truncate)
 
     @_reschedule_after_tempo_change
     def set_rate_targets(self, rate_targets: Sequence[float],
-                         durations: 'Sequence[float | ResolvableMoment]',
+                         whens: 'Sequence[ResolvableMoment]',
                          curve_shapes: Sequence[float] = None,
-                         metric_phase_targets=None,
-                         duration_units: str = "beats",
-                         truncate: bool = True, loop: bool = False) -> None:
-        """Multi-segment form of :meth:`set_rate_target`."""
-        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
-        self.tempo_history.set_rate_targets(
-            rate_targets, ds, curve_shapes=curve_shapes,
-            metric_phase_targets=metric_phase_targets, duration_units=u,
-            truncate=truncate, loop=loop,
-        )
+                         truncate: bool = True) -> None:
+        """Multi-segment form of :meth:`set_rate_target`. See :meth:`set_beat_length_targets`."""
+        self._apply_targets(self.tempo_history.set_rate_target,
+                            rate_targets, whens, curve_shapes, truncate)
 
     @_reschedule_after_tempo_change
     def set_tempo_targets(self, tempo_targets: Sequence[float],
-                          durations: 'Sequence[float | ResolvableMoment]',
+                          whens: 'Sequence[ResolvableMoment]',
                           curve_shapes: Sequence[float] = None,
-                          metric_phase_targets=None,
-                          duration_units: str = "beats",
-                          truncate: bool = True, loop: bool = False) -> None:
-        """Multi-segment form of :meth:`set_tempo_target`."""
-        ds, u = self._durations_from_moments(durations, legacy_units=duration_units)
-        self.tempo_history.set_tempo_targets(
-            tempo_targets, ds, curve_shapes=curve_shapes,
-            metric_phase_targets=metric_phase_targets, duration_units=u,
-            truncate=truncate, loop=loop,
-        )
+                          truncate: bool = True) -> None:
+        """Multi-segment form of :meth:`set_tempo_target`. See :meth:`set_beat_length_targets`."""
+        self._apply_targets(self.tempo_history.set_tempo_target,
+                            tempo_targets, whens, curve_shapes, truncate)
 
     @_reschedule_after_tempo_change
     def apply_beat_length_function(self, function: Callable, domain_start: float = 0,
@@ -815,6 +835,15 @@ class Clock:
             duration_units=duration_units, truncate=truncate, loop=loop,
             extension_increment=extension_increment, **kwargs,
         )
+
+    @_reschedule_after_tempo_change
+    def apply_tempo_envelope(self, envelope: TempoEnvelope, truncate: bool = True,
+                             loop: bool = False) -> None:
+        """Append the given :class:`TempoEnvelope` onto this clock's internal tempo envelope, starting from
+        the current beat. With `loop=True` the envelope repeats indefinitely until
+        :meth:`stop_tempo_loop_or_function`. `truncate` first discards any tempo curve already
+        projected past the current beat so the envelope begins cleanly from now."""
+        self.tempo_history.append_envelope(envelope, truncate=truncate, loop=loop)
 
     def stop_tempo_loop_or_function(self) -> None:
         """Stop following any function or looping envelope previously applied to this clock's tempo."""

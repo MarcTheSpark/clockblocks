@@ -34,19 +34,29 @@ class MetricPhaseTarget:
     :param divisor: Length of the cycle (defaults to one beat, meaning that this specifies where we are in the beat)
     :param relative: Whether or not the start of the cycle is measured relative to the current beat/time or to the
         start of the clock.
-    :param units: "beats" (default) or "time" — whether the phase and divisor are measured in the clock's beats or
-        in its time. (Note: `units` governs resolve() only. Consumers that already choose an axis from their own
-        context (e.g. certain methods of TempoEnvelope) ignore this attribute.
+    :param units: "beats", "time", or None — whether the phase and divisor are measured in the clock's beats or
+        in its time. Defaults to None, meaning "infer the axis from context": when passed to a `when` argument,
+        beats will be inferred as the natural musical default. When passed as an `align_to` argument the axis is
+        inferred to be the one not specified by `when`. Pass an explicit "beats"/"time" only to force the axis.
+        (If `when` and `align_to` share the same axis, this will raise an error.)
+    :param min_duration: minimum distance into the future (measured in `units`) before a match counts. resolve()
+        returns the nearest matching beat/time that is at least this far ahead of now. Defaults to 0, meaning the
+        very next match (which may be essentially now if you are already on the phase). Expresses musical concepts
+        like "the next downbeat, but at least 4 beats from now."
     """
 
     def __init__(self, phase_or_phases: Union[float, Sequence[float]], divisor: float = 1, relative: bool = False,
-                 units: str | DurationUnits = "beats"):
+                 units: str | DurationUnits | None = None, min_duration: float = 0):
         self.phases = (phase_or_phases, ) if not hasattr(phase_or_phases, "__len__") else phase_or_phases
         if not all(0 <= x < divisor for x in self.phases):
             raise ValueError("One or more phases out of range for divisor.")
+        if min_duration < 0:
+            raise ValueError("min_duration cannot be negative.")
         self.divisor = divisor
         self.relative = relative
-        self.units = DurationUnits(units)
+        # units is optional: None means "infer the axis from context" (see docstring)
+        self.units = DurationUnits(units) if units is not None else None
+        self.min_duration = min_duration
 
     @classmethod
     def interpret(cls, value: float| Sequence) -> 'MetricPhaseTarget':
@@ -112,18 +122,20 @@ class MetricPhaseTarget:
         """
         Resolve this phase target to an absolute Moment on `clock`: the nearest *future* moment in the clock
         (either a beat or time, depending on self.units) whose metric phase matches. Satisfies the ResolvableMoment
-        protocol.
+        protocol. `self.units` of None resolves to BEATS in this context.
         """
-        # get_nearest_matching_* returns the nearest match below and above, in order of nearness;
-        # we want the match above, since it's in the future, so we use max.
-        if self.units == DurationUnits.BEATS:
-            return Moment.at_beat(max(*self.get_nearest_matching_beats(clock.beat())))
-        return Moment.at_time(max(*self.get_nearest_matching_times(clock.time())))
+        # get_nearest_matching_* returns the nearest match below and above the search point, in order of
+        # nearness. Since we want to be at or past the search point we use max to filter for the nearest
+        # time in the Moment at or after the indicated min_duration.
+        if self.units != DurationUnits.TIME:   # None or BEATS -> beats
+            return Moment.at_beat(max(*self.get_nearest_matching_beats(clock.beat() + self.min_duration)))
+        return Moment.at_time(max(*self.get_nearest_matching_times(clock.time() + self.min_duration)))
 
     def __repr__(self):
-        return "MetricPhaseTarget({}{}{}{})".format(
+        return "MetricPhaseTarget({}{}{}{}{})".format(
             str(self.phases[0]) if hasattr(self.phases, "__len__") else self.phases,
             (", " + str(self.divisor)) if self.divisor != 1 else "",
             ", True" if self.relative else "",
-            f", units='{self.units.value}'" if self.units != DurationUnits.BEATS else "",
+            f", units='{self.units.value}'" if self.units is not None else "",
+            f", min_duration={self.min_duration}" if self.min_duration else "",
         )

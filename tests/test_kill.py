@@ -1,7 +1,8 @@
 import threading
 import unittest
 
-from cb2.clock import Clock, ClockKilledError, DeadClockError, ClockState, WrongThreadError
+from cb2.clock import Clock, ClockState
+from cb2.exceptions import ClockKilledError, DeadClockError, WrongThreadError
 from cb2.moment import Moment
 from cb2.utilities import current_clock
 

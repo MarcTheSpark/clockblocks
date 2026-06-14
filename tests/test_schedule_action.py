@@ -2,7 +2,8 @@ import time
 import threading
 import unittest
 
-from cb2.clock import Clock, DeadClockError
+from cb2.clock import Clock
+from cb2.exceptions import DeadClockError
 from cb2.moment import Moment
 from cb2.utilities import current_clock
 

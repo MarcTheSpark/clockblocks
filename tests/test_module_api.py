@@ -1,8 +1,13 @@
 import time
 import threading
 import unittest
+import warnings
 
-from cb2.clock import Clock, ClockblocksError, NoActiveClockError, NotMasterClockError, ClockState
+from cb2.clock import Clock, ClockState
+from cb2.exceptions import ClockblocksError, NoActiveClockError, NotMasterClockError
+from cb2.moment import Moment
+from cb2.metric_phase import MetricPhaseTarget
+from cb2.tempo_envelope import TempoEnvelope
 from cb2 import utilities
 from cb2.utilities import current_clock
 
@@ -230,6 +235,159 @@ class ModuleApiTestCase(unittest.TestCase):
         self.master.fork_unsynchronized(proc)
         self.assertTrue(err.wait(timeout=3))
         self.assertIn("err", captured)
+
+    # ---- tempo helpers (Step 13): act on the CURRENT clock, raise off-thread ----
+
+    def test_set_get_tempo_rate_beat_length_on_current_clock(self):
+        # On the test thread, current_clock() is the master (bound in its __init__).
+        utilities.set_tempo(90)
+        self.assertEqual(self.master.tempo, 90)
+        self.assertEqual(utilities.get_tempo(), 90)
+        utilities.set_rate(3)
+        self.assertEqual(self.master.rate, 3)
+        self.assertEqual(utilities.get_rate(), 3)
+        utilities.set_beat_length(0.5)
+        self.assertAlmostEqual(self.master.beat_length, 0.5)
+        self.assertAlmostEqual(utilities.get_beat_length(), 0.5)
+
+    def test_tempo_helpers_act_on_fork_not_master(self):
+        # set_tempo() inside a fork changes *that fork's* tempo, leaving the master untouched.
+        self.master.tempo = 60
+        seen = {}
+
+        def child():
+            utilities.set_tempo(180)
+            utilities.set_tempo_target(200, Moment.after_beats(1))  # exercise a curve forwarder too
+            seen["child_tempo"] = utilities.get_tempo()
+            seen["master_tempo"] = self.master.tempo
+
+        self.master.fork(child)
+        self.master.wait_for_children_to_finish()
+        self.assertEqual(seen["child_tempo"], 180)
+        self.assertEqual(seen["master_tempo"], 60)
+
+    def test_tempo_target_when_is_moment_not_bare_number(self):
+        # `when` is a ResolvableMoment; a bare number is rejected (no back-compat duration path).
+        self.master.tempo = 60
+        # reaching tempo 120 after 2 beats: the curve is now projected to land at beat 2.
+        self.master.set_tempo_target(120, Moment.after_beats(2))
+        self.assertAlmostEqual(self.master.tempo_history.length(), 2, delta=1e-9)
+        self.assertAlmostEqual(self.master.tempo_history.tempo_at(2), 120, delta=1e-9)
+        with self.assertRaises(TypeError):
+            self.master.set_tempo_target(120, 2)   # bare number no longer accepted
+
+    def test_set_tempo_targets_mixes_beats_and_time_axes(self):
+        # One call mixing beats- and time-axis whens: the curve is built left-to-right, with the
+        # time-axis middle segment converted to a beat endpoint using the curve built so far.
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [90, 120, 80],
+            [Moment.after_beats(2), Moment.after_time(5), Moment.after_beats(10)],
+        )
+        th = self.master.tempo_history
+        self.assertAlmostEqual(th.length(), 10, delta=1e-9)          # last (beats) endpoint
+        self.assertAlmostEqual(th.tempo_at(0), 60, delta=1e-9)
+        self.assertAlmostEqual(th.tempo_at(2), 90, delta=1e-9)
+        self.assertAlmostEqual(th.tempo_at(10), 80, delta=1e-9)
+        # the time-axis (middle) target really landed where exactly 5 seconds elapse from now:
+        # its endpoint is the boundary between segment 2 and 3, reaching tempo 120.
+        mid_beat = th.segments[1].end_time
+        self.assertAlmostEqual(th.tempo_at(mid_beat), 120, delta=1e-9)
+        self.assertAlmostEqual(th.integrate_interval(0, mid_beat), 5, delta=1e-9)
+
+    def test_set_tempo_targets_backwards_when_raises_with_index(self):
+        self.master.tempo = 60
+        with self.assertRaises(ValueError) as cm:
+            self.master.set_tempo_targets([90, 120], [Moment.after_beats(5), Moment.after_beats(3)])
+        self.assertIn("#1", str(cm.exception))   # the offending index is named
+
+    def test_set_tempo_targets_with_metric_phase_and_min_duration(self):
+        # A MetricPhaseTarget resolves against *now*; min_duration keeps it past the prior segment.
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [100, 140],
+            [Moment.after_beats(3), MetricPhaseTarget(0, divisor=4, min_duration=3)],
+        )
+        self.assertAlmostEqual(self.master.tempo_history.length(), 4, delta=1e-9)
+
+    def test_set_tempo_target_align_to_phase_lands_on_downbeat(self):
+        # "accelerate to 130 over 20 seconds, curvature solved so it lands on a downbeat (divisor 4)"
+        self.master.tempo = 60
+        self.master.set_tempo_target(130, Moment.after_time(20), align_to=MetricPhaseTarget(0, divisor=4))
+        th = self.master.tempo_history
+        end_beat = th.length()
+        self.assertAlmostEqual(end_beat % 4, 0, delta=1e-9, msg="did not land on a downbeat")
+        self.assertAlmostEqual(th.integrate_interval(0, end_beat), 20, delta=1e-6)   # time axis still pinned
+        self.assertAlmostEqual(th.tempo_at(end_beat), 130, delta=1e-9)
+
+    def test_set_tempo_target_align_to_fixed_coordinate_and_warns_on_curve_shape(self):
+        self.master.tempo = 60
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            # when pins time (20s); align_to pins the free (beat) axis to exactly 26; curvature solved
+            self.master.set_tempo_target(130, Moment.after_time(20), curve_shape=2, align_to=Moment.at_beat(26))
+            self.assertTrue(any("curve_shape" in str(w.message) for w in caught),
+                            "expected a warning that curve_shape is discarded for a fixed align_to")
+        th = self.master.tempo_history
+        self.assertAlmostEqual(th.length(), 26, delta=1e-9)
+        self.assertAlmostEqual(th.integrate_interval(0, 26), 20, delta=1e-6)
+
+    def test_set_tempo_target_align_to_same_axis_raises(self):
+        self.master.tempo = 60
+        with self.assertRaises(ValueError):
+            # `when` pins time; align_to on the time axis too -> not the free axis
+            self.master.set_tempo_target(130, Moment.after_time(20), align_to=Moment.at_time(25))
+
+    def test_set_tempo_target_align_to_unreachable_raises_and_rolls_back(self):
+        self.master.tempo = 60
+        with self.assertRaises(ValueError):
+            self.master.set_tempo_target(130, Moment.after_time(20), align_to=Moment.at_beat(1000))
+        self.assertEqual(self.master.tempo_history.length(), 0)   # curve untouched
+
+    def test_metric_phase_target_align_infers_free_axis_ignoring_its_units(self):
+        # A MetricPhaseTarget with units=None infers the free axis; an explicit conflicting axis raises.
+        self.master.tempo = 60
+        self.master.set_tempo_target(130, Moment.after_time(20),
+                                     align_to=MetricPhaseTarget(0, divisor=4, units="beats"))  # beats == free
+        self.assertAlmostEqual(self.master.tempo_history.length() % 4, 0, delta=1e-9)
+        m2 = Clock(name="m2"); m2.tempo = 60
+        try:
+            with self.assertRaises(ValueError):
+                m2.set_tempo_target(130, Moment.after_time(20),
+                                    align_to=MetricPhaseTarget(0, divisor=4, units="time"))  # time == pinned
+        finally:
+            m2.kill()
+
+    def test_apply_tempo_envelope_loops_until_stopped(self):
+        self.master.tempo = 60
+        env = TempoEnvelope([60, 120, 60], [1, 1])
+        self.master.apply_tempo_envelope(env, loop=True)
+        self.assertIsNotNone(self.master.tempo_history.follow_func_or_envelope_loop)
+        self.master.stop_tempo_loop_or_function()
+        self.assertIsNone(self.master.tempo_history.follow_func_or_envelope_loop)
+
+    def test_tempo_helpers_without_clock_raise(self):
+        for call in (
+            lambda: utilities.set_tempo(120),
+            lambda: utilities.set_rate(2),
+            lambda: utilities.set_beat_length(0.5),
+            utilities.get_tempo,
+            utilities.get_rate,
+            utilities.get_beat_length,
+            lambda: utilities.set_tempo_target(120, Moment.after_beats(1)),
+            lambda: utilities.set_rate_target(2, Moment.after_beats(1)),
+            lambda: utilities.set_beat_length_target(0.5, Moment.after_beats(1)),
+            lambda: utilities.set_tempo_targets([120], [Moment.after_beats(1)]),
+            lambda: utilities.set_rate_targets([2], [Moment.after_beats(1)]),
+            lambda: utilities.set_beat_length_targets([0.5], [Moment.after_beats(1)]),
+            lambda: utilities.apply_tempo_function(lambda b: 60),
+            lambda: utilities.apply_rate_function(lambda b: 1),
+            lambda: utilities.apply_beat_length_function(lambda b: 1),
+            lambda: utilities.apply_tempo_envelope(TempoEnvelope([60, 120], [1])),
+            utilities.stop_tempo_loop_or_function,
+        ):
+            err = self._capture_on_fresh_thread(call)
+            self.assertIsInstance(err, NoActiveClockError)
 
 
 if __name__ == "__main__":

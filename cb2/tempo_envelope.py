@@ -570,7 +570,7 @@ class TempoHistory(TempoEnvelope):
 
     @tempo_modification
     def set_beat_length_target(self, beat_length_target: float, duration: float, curve_shape: float = 0,
-                               metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                               alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                                duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat length for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
@@ -578,58 +578,100 @@ class TempoHistory(TempoEnvelope):
 
         :param beat_length_target: The beat length we want to reach
         :param duration: How long until we reach that beat length
-        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
-        :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
-            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
-            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
-            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored.)
+        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner. When `alignment_target` is
+            given, this acts only as a *seed* for solving the curvature, a suggestion rather than a guaranteed
+            value. (And even then it only makes sense if alignment target is a MetricPhaseTarget; if it's a fixed
+            time/beat, there's only one curvature solution, if it exists.)
+        :param alignment_target: optional constraint on the endpoint's *free* axis (the one `duration` does not pin:
+            time when duration_units is beats, beats when it is time). Either a number (land the free axis exactly on
+            that coordinate, which fully determines the curvature) or a :class:`MetricPhaseTarget` (snap to the nearest
+            matching phase on the free axis). See :meth:`_add_segment`. Raises ValueError if unreachable due to
+            the limited flexibility of curvature adjustment.
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
         """
-        duration_units = DurationUnits(duration_units)
-
-        if metric_phase_target is not None:
-            metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
-
-        # truncate removes any segments that extend into the future
-        if truncate:
-            self.remove_segments_after(self.beat())
-        # add a flat segment up to the current beat if needed
-        self.extend_to(self.beat())
-
-        self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target, duration_units)
+        # snapshot so a failed alignment (raising ValueError) leaves the curve untouched
+        backup = deepcopy(self.segments)
+        try:
+            # truncate removes any segments that extend into the future
+            if truncate:
+                self.remove_segments_after(self.beat())
+            # add a flat segment up to the current beat if needed
+            self.extend_to(self.beat())
+            self._add_segment(beat_length_target, duration, curve_shape, alignment_target, duration_units)
+        except Exception:
+            self.segments = backup
+            raise
 
     def _add_segment(self, beat_length_target: float, duration: float, curve_shape: float = 0,
-                     metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                     alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                      duration_units: str = "beats") -> None:
         """
         The guts of adding a new segment, minus argument checking and truncating/bringing up to date.
+
+        We set a desired beat length target for `duration` `duration_units` (beats/seconds)  in the future.
+        We can optionally also give a desired curve shape, and/or `alignment_target`, which constrains the
+        endpoint's *free* axis (time when duration_units is beats, beats when it is time). `alignment_target`
+        is either a number (land the free axis exactly on that coordinate) or a :class:`MetricPhaseTarget`
+        (snap to the nearest matching phase on the free axis; its own `units`, if given, is ignored — the axis
+        is already determined from context). Curvature is solved to satisfy it; raises ValueError if no
+        candidate is reachable.
         """
         duration_units = DurationUnits(duration_units)
         if duration_units == DurationUnits.BEATS:
+            # how far the TempoEnvelope has planned things out already past the current beat
             extension_into_future = self.length() - self.beat()
             if duration < extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
-            if metric_phase_target is not None:
-                if not self._adjust_segment_end_time_to_metric_phase_target(self.segments[-1], metric_phase_target):
-                    logging.warning("Metric phase target {} was not reachable".format(metric_phase_target))
+            if alignment_target is not None:
+                # since duration_units == BEATS we are setting end beat directly. The free axis is therefore TIME.
+                # Bend curvature to land one of the end times indicated by alignment_target
+                segment = self.segments[-1]
+                if isinstance(alignment_target, MetricPhaseTarget):
+                    # A phase target offers a set of matching times; pick the candidates nearest to the segment's
+                    # current end time (so any curve_shape given acts as a seed for which phase we aim at).
+                    provisional_end_time = self.time() + self.integrate_interval(self.beat(), segment.end_time)
+                    candidates = alignment_target.get_nearest_matching_times(provisional_end_time)
+                else:
+                    # A fixed target is the single exact end time to hit
+                    candidates = (alignment_target,)
+                # _solve_segment_end_time either adjusts the end time in place or raises
+                if not self._solve_segment_end_time(segment, candidates):
+                    raise ValueError(f"Could not bend the curve to align the segment end (in time) to "
+                                     f"{alignment_target}.")
         else:
-            # units == "time", so we need to figure out how many beats are necessary
+            # duration_units == TIME, so first figure out how far this TempoEnvelope is *already* extended
+            # into the future in TIME, and make sure that end time of our desired segment is at least
+            # that far in the future
             time_extension_into_future = self.integrate_interval(self.beat(), self.length())
             if duration < time_extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
 
-            # normalized_time = how long the curve would take if it were one beat long
+            # figure out how long the segment should be (how far it goes past the current TempoCurve end time)
+            desired_segment_dur_in_time = duration - time_extension_into_future
+            # figure out how long the curve would take if it were only one beat long
             normalized_time = EnvelopeSegment(
                 0, 1, self.value_at(self.length()), beat_length_target, curve_shape
             ).integrate_segment(0, 1)
-            desired_curve_length = duration - time_extension_into_future
-            self.append_segment(beat_length_target, desired_curve_length / normalized_time, curve_shape)
-            if metric_phase_target is not None:
-                if not self._adjust_segment_end_beat_to_metric_phase_target(self.segments[-1], metric_phase_target):
-                    logging.warning("Metric phase target {} was not reachable".format(metric_phase_target))
+            # Then append the new segment scaling by a factor of desired_segment_dur_in_time / normalized_time
+            self.append_segment(beat_length_target, desired_segment_dur_in_time / normalized_time, curve_shape)
+            if alignment_target is not None:
+                # since duration_units == TIME, the free axis is therefore BEATS.
+                # so if an alignment_target is set, we need to bend curvature to land the end *beat*
+                segment = self.segments[-1]
+                if isinstance(alignment_target, MetricPhaseTarget):
+                    # A phase target offers a set of matching beats; pick the candidates nearest the segment's
+                    # current end beat (segment.end_time is really the end *beat* in this internal naming).
+                    # Note that here also any curvature given acts as a seed, since it affected normalized_time
+                    # and therefore the beat length of the segment (desired_segment_dur_in_time / normalized_time)
+                    candidates = alignment_target.get_nearest_matching_beats(segment.end_time)
+                else:
+                    # A fixed target is the single exact end beat to hit
+                    candidates = (alignment_target,)
+                if not self._solve_segment_end_beat(segment, candidates):
+                    raise ValueError(f"Could not bend the curve to align the segment end (in beats) to "
+                                     f"{alignment_target}.")
 
     @tempo_modification
     def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
@@ -765,25 +807,13 @@ class TempoHistory(TempoEnvelope):
 
     @tempo_modification
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
-                        metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                        alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                         duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target beat rate for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
-        duration_units).
-
-        :param rate_target: The beat rate we want to reach
-        :param duration: How long until we reach that beat rate
-        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
-        :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
-            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
-            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
-            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase
-            constrains is fixed here by ``duration_units``, as described above.)
-        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
-        :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
+        duration_units). See :meth:`set_beat_length_target`.
         """
-        self.set_beat_length_target(1 / rate_target, duration, curve_shape, metric_phase_target,
+        self.set_beat_length_target(1 / rate_target, duration, curve_shape, alignment_target,
                                     duration_units, truncate)
 
     @tempo_modification
@@ -811,25 +841,13 @@ class TempoHistory(TempoEnvelope):
 
     @tempo_modification
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
-                         metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple] = None,
+                         alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                          duration_units: str = "beats", truncate: bool = True) -> None:
         """
         Set a target tempo for this TempoEnvelope to reach in duration beats/seconds (with the unit defined by
-        duration_units).
-
-        :param tempo_target: The tempo we want to reach
-        :param duration: How long until we reach that tempo
-        :param curve_shape: > 0 makes change happen later, < 0 makes change happen sooner
-        :param metric_phase_target: This argument lets us align the arrival at the given beat length with a particular
-            part of the parent beat (time), or, if we specified "time" as our duration units, it allows us to align
-            the arrival at that specified time with a particular part of this clock's beat. This argument takes either
-            a float in [0, 1), a MetricPhaseTarget object, or a tuple of arguments to the MetricPhaseTarget constructor.
-            (Note: if a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase
-            constrains is fixed here by ``duration_units``, as described above.)
-        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
-        :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
+        duration_units). See :meth:`set_beat_length_target`.
         """
-        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, metric_phase_target,
+        self.set_beat_length_target(60 / tempo_target, duration, curve_shape, alignment_target,
                                     duration_units, truncate)
 
     @tempo_modification
@@ -855,16 +873,19 @@ class TempoHistory(TempoEnvelope):
         self.set_beat_length_targets([60 / x for x in tempo_targets], durations, curve_shapes, metric_phase_targets,
                                      duration_units, truncate, loop)
 
-    # ----------------------------------------- Metric Phase adjustments ---------------------------------------------
+    # -------------------------------------- Axis coordination adjustments -------------------------------------------
 
     # These two methods are for just adjusting a single segment's metric phase in beat or time.
     # They are used when adding single segments that we want to adjust the phase of
 
-    def _adjust_segment_end_time_to_metric_phase_target(self, segment, metric_phase_target):
-        # this is confusing; segment.start_time and segment.end_time are really the start and end *beats*
+    def _solve_segment_end_time(self, segment, candidate_end_times) -> bool:
+        """Holding the segment's end *beat* fixed, bend its curvature so the segment ends at one of
+        `candidate_end_times` (tried in order). Returns True on the first reachable candidate (segment
+        mutated); else leaves the segment unchanged and returns False. (``set_curvature_to_desired_integral``
+        range-checks before mutating, so a failure leaves the segment clean.)"""
+        # NB segment.start_time / end_time are really the start and end *beats*.
         segment_start_time = self.time() + self.integrate_interval(self.beat(), segment.start_time)
-        segment_end_time = segment_start_time + segment.integrate_segment(segment.start_time, segment.end_time)
-        for new_end_time in metric_phase_target.get_nearest_matching_times(segment_end_time):
+        for new_end_time in candidate_end_times:
             try:
                 segment.set_curvature_to_desired_integral(new_end_time - segment_start_time)
                 return True
@@ -873,18 +894,21 @@ class TempoHistory(TempoEnvelope):
         return False
 
     @staticmethod
-    def _adjust_segment_end_beat_to_metric_phase_target(segment, metric_phase_target):
-        # this is how long the segment currently takes; we want to end up with this being the same
+    def _solve_segment_end_beat(segment, candidate_end_beats) -> bool:
+        """Holding the segment's *time* (integral) fixed, move its end *beat* onto one of
+        `candidate_end_beats` (tried in order) and then re-solve curvature to preserve that time. Returns True
+        on the first reachable candidate (segment mutated); else restores the segment and returns False.
+        (We have to actively restore the segment here, as opposed to in _solve_segment_end_time, because
+        each attempt fixes the end beat, mutating the segment, *before* trying to solve the integral.)"""
+        original_end_beat = segment.end_time   # 'end_time' is really the end beat
         original_integral = segment.integrate_segment(segment.start_time, segment.end_time)
-        for new_end_beat in metric_phase_target.get_nearest_matching_beats(segment.end_time):
+        for new_end_beat in candidate_end_beats:
             try:
-                # shrink the segment
                 segment.end_time = new_end_beat
-                # and then try to change the curvature to return to the original time duration
                 segment.set_curvature_to_desired_integral(original_integral)
                 return True
             except ValueError:
-                pass
+                segment.end_time = original_end_beat   # set_curvature failed after we moved the beat
         return False
 
     # These methods are used when we want to adjust the metric phase at the end of a group of segments.

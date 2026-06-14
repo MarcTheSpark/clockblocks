@@ -84,6 +84,22 @@ class MomentTestCase(unittest.TestCase):
         self.assertEqual(repr(MetricPhaseTarget(0, 2, units="time")),
                          "MetricPhaseTarget(0, 2, units='time')")
 
+    def test_metric_phase_target_min_duration_pushes_match_forward(self):
+        # Sitting on a matching phase (beat 0, divisor 4), the next match is now (zero-length).
+        self.assertAlmostEqual(MetricPhaseTarget(0, divisor=4).resolve(self.master).value, 0, delta=0.05)
+        # min_duration moves the search center forward, so we skip to the matching beat >= now + 4.
+        self.assertAlmostEqual(
+            MetricPhaseTarget(0, divisor=4, min_duration=4).resolve(self.master).value, 4, delta=0.05)
+        # min_duration that lands mid-cycle rounds up to the next matching beat (5 -> 8).
+        self.assertAlmostEqual(
+            MetricPhaseTarget(0, divisor=4, min_duration=5).resolve(self.master).value, 8, delta=0.05)
+
+    def test_metric_phase_target_min_duration_repr_and_validation(self):
+        self.assertEqual(repr(MetricPhaseTarget(0, 4, min_duration=4)),
+                         "MetricPhaseTarget(0, 4, min_duration=4)")
+        with self.assertRaises(ValueError):
+            MetricPhaseTarget(0, 4, min_duration=-1)
+
     # ---- wait_until / wait behavioral ----
 
     def test_wait_until_absolute_beat(self):

@@ -19,8 +19,11 @@ import math
 import threading
 import time
 from typing import TYPE_CHECKING, Callable, Sequence, Union
+from cb2.exceptions import NoActiveClockError
 if TYPE_CHECKING:
-    from cb2 import clock, metric_phase, moment
+    from cb2 import clock, moment
+    from cb2.moment import ResolvableMoment
+    from cb2.tempo_envelope import TempoEnvelope
 
 
 # Default tolerances for near-equality comparisons of beats / times.
@@ -136,16 +139,29 @@ def _spawn_unsynchronized(forked_function: Callable, args: Sequence, kwargs: dic
     threading.Thread(target=runner, daemon=True).start()
 
 
-def wait(dt: float, units="beats") -> None:
+##################################################################################################################
+#                                  Context-inferring wait and fork methods
+##################################################################################################################
+# Module-level forwarders that grab the clock active on the calling thread via current_clock() and
+# forward to the corresponding Clock method.
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def wait(dt: 'float | ResolvableMoment', units="beats") -> None:
     """
-    Call :meth:`Clock.wait` on the clock currently active on this thread.
+    Block the clock currently active on this thread for ``dt`` beats (or seconds, if ``units="time"``),
+    yielding to the scheduler. Forwards to :meth:`Clock.wait`.
+
+    ``dt`` may also be a :class:`Moment` or :class:`MetricPhaseTarget`, in which case it is resolved
+    directly and ``units`` is ignored — e.g. ``wait(Moment.at_beat(8))``.
 
     On an unsynchronized thread (one spawned by :func:`fork_unsynchronized`) there is no clock, so this
-    falls back to a plain real-time :func:`time.sleep` and ``units`` is ignored (``dt`` is in seconds).
-    On an ordinary thread that never entered the clock system, raises NoActiveClockError.
+    falls back to a plain real-time :func:`time.sleep`; ``units`` is ignored and ``dt`` must be a number
+    of real seconds. On an ordinary thread that never entered the clock system, raises NoActiveClockError.
 
-    :param dt: duration to wait
-    :param units: either "beats" or "time" (see :meth:`Clock.wait`)
+    :param dt: how long to wait — a number (in beats, or seconds if ``units="time"``), or a Moment /
+        MetricPhaseTarget to wait until.
+    :param units: either ``"beats"`` or ``"time"`` (ignored when ``dt`` is a Moment).
     """
     c = _thread_clock_attr()
     if c is _UNSYNCHRONIZED:
@@ -153,7 +169,6 @@ def wait(dt: float, units="beats") -> None:
     elif c is not None:
         c.wait(dt, units=units)
     else:
-        from cb2.clock import NoActiveClockError
         raise NoActiveClockError("wait() called on a thread with no active clock.")
 
 
@@ -171,7 +186,6 @@ def wait_forever() -> None:
     elif c is not None:
         c.wait_forever()
     else:
-        from cb2.clock import NoActiveClockError
         raise NoActiveClockError("wait_forever() called on a thread with no active clock.")
 
 
@@ -183,16 +197,20 @@ def wait_for_children_to_finish() -> None:
     """
     c = current_clock()
     if c is None:
-        from cb2.clock import NoActiveClockError
         raise NoActiveClockError("wait_for_children_to_finish() called on a thread with no active clock.")
     c.wait_for_children_to_finish()
 
 
 def fork_unsynchronized(forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
     """
-    Spawn `forked_function` as an asynchronous thread, not on a child clock (see
-    :meth:`Clock.fork_unsynchronized`). If there is no active clock on this thread, falls back to a
-    plain ``threading.Thread``.
+    Run ``forked_function`` on a separate, asynchronous thread that is *not* a child clock — essentially
+    the same as spinning up a new thread, except that (when there is an active clock) it makes use of the
+    clock system's thread pool. If there is no active clock on this thread, falls back to a plain
+    ``threading.Thread``.
+
+    :param forked_function: the function to run on the new thread.
+    :param args: positional arguments passed to ``forked_function``.
+    :param kwargs: keyword arguments passed to ``forked_function``.
     """
     c = current_clock()
     if c is None:
@@ -206,13 +224,268 @@ def fork(forked_function: Callable, args: Sequence = (), kwargs: dict = None, na
          when: Union[float, 'moment.ResolvableMoment'] = None,
          done_callback: Callable = None) -> 'clock.Clock':
     """
-    Fork `forked_function` as a child of the currently active clock (see :meth:`Clock.fork`).
-    Requires a real clock to fork from — raises NoActiveClockError otherwise.
+    Run ``forked_function`` on a new child clock of the currently active clock, so it proceeds in
+    parallel while staying coordinated under the same musical time. See :meth:`Clock.fork`;
+    raises NoActiveClockError if there is no active clock.
+
+    :param forked_function: the function to run on the child clock. Note that, unlike the original clockblocks,
+        the child clock is *not* injected as an argument — call :func:`current_clock` from inside the function
+        if you need a reference to it.
+    :param args: positional arguments passed to ``forked_function``.
+    :param kwargs: keyword arguments passed to ``forked_function``.
+    :param name: optional name for the child clock, useful for debugging.
+    :param initial_rate: the child's starting rate in beats per second. Give at most one of
+        ``initial_rate``/``initial_tempo``/``initial_beat_length``; if none is given the child starts at
+        rate 1.
+    :param initial_tempo: the child's starting tempo in beats per minute.
+    :param initial_beat_length: the child's starting beat length in seconds per beat.
+    :param when: when to start the fork. ``None`` (the default) starts it immediately; otherwise pass a
+        :class:`Moment` (e.g. ``Moment.after_beats(4)`` or ``Moment.at_time(10)``) or a
+        :class:`MetricPhaseTarget`. Unlike :func:`wait`, a bare number is rejected here, since
+        we don't know from context whether it's beats/time, relative/absolute.
+    :param done_callback: an optional function called when the forked function finishes.
+    :return: the newly created child :class:`Clock`.
     """
     c = current_clock()
     if c is None:
-        from cb2.clock import NoActiveClockError
         raise NoActiveClockError("Cannot fork: there is no active clock on this thread.")
     return c.fork(forked_function, args=args, kwargs=kwargs, name=name, initial_rate=initial_rate,
                   initial_tempo=initial_tempo, initial_beat_length=initial_beat_length,
                   when=when, done_callback=done_callback)
+
+
+##################################################################################################################
+#                                      Context-inferring tempo methods
+##################################################################################################################
+# Module-level forwarders that grab the clock active on the calling thread via current_clock() and
+# forward to the corresponding Clock tempo modifier. Note that these act on the current clock and *not*
+# on the master clock. set_tempo(120) inside a forked clock changes *that fork's* tempo; to change the
+# master's tempo, call the method on the master Clock object directly.
+# ---------------------------------------------------------------------------------------------------------------
+
+def _current_clock_or_raise(caller: str) -> 'clock.Clock':
+    """
+    Returns the clock active on this thread, or raises NoActiveClockError naming `caller`.
+    (Unlike wait(), there is no unsynchronized fallback: an unsynchronized thread has no tempo to change.)
+    """
+    c = current_clock()
+    if c is None:
+        raise NoActiveClockError(f"{caller}() called on a thread with no active clock.")
+    return c
+
+
+def set_tempo(tempo: float) -> None:
+    """Immediately set the tempo of the current clock (see :attr:`Clock.tempo`). Raises NoActiveClockError
+    if there is no active clock.
+
+    :param tempo: the new tempo, in beats per minute."""
+    _current_clock_or_raise("set_tempo").tempo = tempo
+
+
+def set_rate(rate: float) -> None:
+    """Immediately set the rate of the current clock (see :attr:`Clock.rate`). Raises NoActiveClockError
+    if there is no active clock.
+
+    :param rate: the new rate, in beats per second."""
+    _current_clock_or_raise("set_rate").rate = rate
+
+
+def set_beat_length(beat_length: float) -> None:
+    """Immediately set the beat length of the current clock (see :attr:`Clock.beat_length`). Raises
+    NoActiveClockError if there is no active clock.
+
+    :param beat_length: the new beat length, in seconds per beat."""
+    _current_clock_or_raise("set_beat_length").beat_length = beat_length
+
+
+def get_tempo() -> float:
+    """Return the current tempo (in beats per minute) of the currently active clock (see
+    :attr:`Clock.tempo`). Raises NoActiveClockError if there is no active clock.
+
+    :return: the current tempo, in beats per minute."""
+    return _current_clock_or_raise("get_tempo").tempo
+
+
+def get_rate() -> float:
+    """Return the current rate (in beats per second) of the currently active clock (see
+    :attr:`Clock.rate`). Raises NoActiveClockError if there is no active clock.
+
+    :return: the current rate, in beats per second."""
+    return _current_clock_or_raise("get_rate").rate
+
+
+def get_beat_length() -> float:
+    """Return the current beat length (in seconds per beat) of the currently active clock (see
+    :attr:`Clock.beat_length`). Raises NoActiveClockError if there is no active clock.
+
+    :return: the current beat length, in seconds per beat."""
+    return _current_clock_or_raise("get_beat_length").beat_length
+
+
+def set_tempo_target(tempo_target: float, when: 'ResolvableMoment', curve_shape: float = None,
+                     truncate: bool = True, align_to: 'ResolvableMoment' = None) -> None:
+    """Smoothly change the current clock's tempo to ``tempo_target`` (in beats per minute), arriving at
+    ``when``. Forwards to :meth:`Clock.set_tempo_target` on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param tempo_target: the tempo to arrive at, in beats per minute.
+    :param when: when the target is reached, as a :class:`Moment` (e.g. ``Moment.after_beats(4)``,
+        ``Moment.at_time(10)``) or a :class:`MetricPhaseTarget`.
+    :param curve_shape: the bend of the transition: ``0`` is linear, ``> 0`` changes late, ``< 0`` early.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; solve the curvature to land the free axis (the one ``when`` did not pin)
+        on a phase or coordinate — e.g. accelerate over a fixed time, landing on a downbeat. See
+        :meth:`Clock.set_tempo_target`."""
+    _current_clock_or_raise("set_tempo_target").set_tempo_target(
+        tempo_target, when, curve_shape=curve_shape, truncate=truncate, align_to=align_to)
+
+
+def set_rate_target(rate_target: float, when: 'ResolvableMoment', curve_shape: float = None,
+                    truncate: bool = True, align_to: 'ResolvableMoment' = None) -> None:
+    """Smoothly change the current clock's rate to ``rate_target`` (in beats per second), arriving at
+    ``when``. Forwards to :meth:`Clock.set_rate_target` on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param rate_target: the rate to arrive at, in beats per second.
+    :param when: when the target is reached, as a :class:`Moment` or :class:`MetricPhaseTarget`.
+    :param curve_shape: the bend of the transition: ``0`` is linear, ``> 0`` changes late, ``< 0`` early.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate. See
+        :meth:`Clock.set_rate_target`."""
+    _current_clock_or_raise("set_rate_target").set_rate_target(
+        rate_target, when, curve_shape=curve_shape, truncate=truncate, align_to=align_to)
+
+
+def set_beat_length_target(beat_length_target: float, when: 'ResolvableMoment', curve_shape: float = None,
+                           truncate: bool = True, align_to: 'ResolvableMoment' = None) -> None:
+    """Smoothly change the current clock's beat length to ``beat_length_target`` (in seconds per beat),
+    arriving at ``when``. Forwards to :meth:`Clock.set_beat_length_target` on the currently active clock.
+    Raises NoActiveClockError if there is no active clock.
+
+    :param beat_length_target: the beat length to arrive at, in seconds per beat.
+    :param when: when the target is reached, as a :class:`Moment` or :class:`MetricPhaseTarget`.
+    :param curve_shape: the bend of the transition: ``0`` is linear, ``> 0`` changes late, ``< 0`` early.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate. See
+        :meth:`Clock.set_beat_length_target`."""
+    _current_clock_or_raise("set_beat_length_target").set_beat_length_target(
+        beat_length_target, when, curve_shape=curve_shape, truncate=truncate, align_to=align_to)
+
+
+def set_tempo_targets(tempo_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
+                      curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+    """Set several tempo targets at once, building a multi-segment tempo curve on the current clock.
+    Forwards to :meth:`Clock.set_tempo_targets`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param tempo_targets: the tempo to arrive at for each segment, in beats per minute.
+    :param whens: the arrival moment for each target (same length as ``tempo_targets``). Each is resolved
+        against the clock's *current* position (so an ``after_*`` moment counts from now, not from the
+        previous segment's end), beats and time may be mixed, and the moments must come out strictly
+        increasing in clock-time.
+    :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+
+    This is one-shot. To loop a tempo shape, build a :class:`TempoEnvelope` and pass it to
+    :func:`apply_tempo_envelope` with ``loop=True``."""
+    _current_clock_or_raise("set_tempo_targets").set_tempo_targets(
+        tempo_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+
+
+def set_rate_targets(rate_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
+                     curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+    """Set several rate targets at once, building a multi-segment tempo curve on the current clock.
+    Forwards to :meth:`Clock.set_rate_targets`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param rate_targets: the rate to arrive at for each segment, in beats per second.
+    :param whens: the arrival moment for each target (same length as ``rate_targets``).
+    :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first."""
+    _current_clock_or_raise("set_rate_targets").set_rate_targets(
+        rate_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+
+
+def set_beat_length_targets(beat_length_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
+                            curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+    """Set several beat-length targets at once, building a multi-segment tempo curve on the current clock.
+    Forwards to :meth:`Clock.set_beat_length_targets`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param beat_length_targets: the beat length to arrive at for each segment, in seconds per beat.
+    :param whens: the arrival moment for each target (same length as ``beat_length_targets``).
+    :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first."""
+    _current_clock_or_raise("set_beat_length_targets").set_beat_length_targets(
+        beat_length_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+
+
+def apply_tempo_function(function: Callable, domain_start: float = 0, domain_end: float = None,
+                         duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                         extension_increment: float = 2.0, **kwargs) -> None:
+    """Drive the current clock's tempo (in beats per minute) by following a function of beats/time.
+    Forwards to :meth:`Clock.apply_tempo_function`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param function: a callable mapping a position (in the units given by ``duration_units``) to a tempo.
+    :param domain_start: the input value at which to start reading ``function``.
+    :param domain_end: the input value at which to stop, or ``None`` to follow the function open-endedly.
+    :param duration_units: ``"beats"`` or ``"time"`` — whether the function's input is measured in beats
+        or in seconds.
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param loop: only relevant when ``domain_end`` is set: if ``True``, repeat that finite domain
+        indefinitely (until :func:`stop_tempo_loop_or_function`).
+    :param extension_increment: only relevant when ``domain_end`` is ``None``: how far ahead (in the
+        function's domain) to project at a time, extending again as the clock reaches the projected end.
+    :param kwargs: forwarded to the underlying envelope-from-function sampling
+        (``scanning_step_size``, ``iterations``, etc. — see :meth:`TempoHistory.apply_function`)."""
+    _current_clock_or_raise("apply_tempo_function").apply_tempo_function(
+        function, domain_start=domain_start, domain_end=domain_end, duration_units=duration_units,
+        truncate=truncate, loop=loop, extension_increment=extension_increment, **kwargs)
+
+
+def apply_rate_function(function: Callable, domain_start: float = 0, domain_end: float = None,
+                        duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                        extension_increment: float = 2.0, **kwargs) -> None:
+    """Drive the current clock's rate (in beats per second) by following a function of beats/time.
+    Forwards to :meth:`Clock.apply_rate_function`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock. See :func:`apply_tempo_function` for the meaning
+    of every argument (the only difference is that ``function`` returns a rate in beats per second)."""
+    _current_clock_or_raise("apply_rate_function").apply_rate_function(
+        function, domain_start=domain_start, domain_end=domain_end, duration_units=duration_units,
+        truncate=truncate, loop=loop, extension_increment=extension_increment, **kwargs)
+
+
+def apply_beat_length_function(function: Callable, domain_start: float = 0, domain_end: float = None,
+                               duration_units: str = "beats", truncate: bool = True, loop: bool = False,
+                               extension_increment: float = 2.0, **kwargs) -> None:
+    """Drive the current clock's beat length (in seconds per beat) by following a function of beats/time.
+    Forwards to :meth:`Clock.apply_beat_length_function`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock. See :func:`apply_tempo_function` for the meaning
+    of every argument (the only difference is that ``function`` returns a beat length in seconds per beat)."""
+    _current_clock_or_raise("apply_beat_length_function").apply_beat_length_function(
+        function, domain_start=domain_start, domain_end=domain_end, duration_units=duration_units,
+        truncate=truncate, loop=loop, extension_increment=extension_increment, **kwargs)
+
+
+def apply_tempo_envelope(envelope: 'TempoEnvelope', truncate: bool = True, loop: bool = False) -> None:
+    """Append a ready-made :class:`TempoEnvelope` onto the current clock's tempo curve. This is the way to
+    *loop* a tempo shape (a :class:`TempoEnvelope` is defined over beats, so it loops unambiguously).
+    Forwards to :meth:`Clock.apply_tempo_envelope`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock.
+
+    :param envelope: the tempo envelope to apply (under the hood a beat-length-over-beats curve).
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param loop: if ``True``, repeat the envelope indefinitely until stopped with
+        :func:`stop_tempo_loop_or_function`."""
+    _current_clock_or_raise("apply_tempo_envelope").apply_tempo_envelope(
+        envelope, truncate=truncate, loop=loop)
+
+
+def stop_tempo_loop_or_function() -> None:
+    """Stop following any function or looping envelope previously started on the current clock's tempo
+    (via :func:`apply_tempo_function`/:func:`apply_rate_function`/:func:`apply_beat_length_function` or a
+    looping :func:`apply_tempo_envelope`). The tempo holds at its current value. Forwards to
+    :meth:`Clock.stop_tempo_loop_or_function`; acts on the currently active clock. Raises
+    NoActiveClockError if there is no active clock."""
+    _current_clock_or_raise("stop_tempo_loop_or_function").stop_tempo_loop_or_function()
