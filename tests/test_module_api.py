@@ -310,6 +310,14 @@ class ModuleApiTestCase(unittest.TestCase):
         )
         self.assertAlmostEqual(self.master.tempo_history.length(), 4, delta=1e-9)
 
+    def test_set_tempo_targets_per_element_none_curve_shape_is_linear(self):
+        # A per-element None in curve_shapes means linear (0), like the singular setters' curve_shape=None
+        # default. Must work on the time axis too (an un-normalized None used to raise abs(None) there).
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [90, 120], [Moment.after_time(2), Moment.after_time(4)], curve_shapes=[None, None])
+        self.assertEqual([s.curve_shape for s in self.master.tempo_history.segments], [0, 0])
+
     def test_set_tempo_target_align_to_phase_lands_on_downbeat(self):
         # "accelerate to 130 over 20 seconds, curvature solved so it lands on a downbeat (divisor 4)"
         self.master.tempo = 60
@@ -357,6 +365,70 @@ class ModuleApiTestCase(unittest.TestCase):
                                     align_to=MetricPhaseTarget(0, divisor=4, units="time"))  # time == pinned
         finally:
             m2.kill()
+
+    def test_set_tempo_targets_group_align_to_phase_time_free(self):
+        # Whole-run align: a beats-pinned 3-segment run is bent collectively so the run's *time* (the free
+        # axis) lands on a multiple of 3, while every segment's end *beat* is left untouched.
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [90, 120, 80],
+            [Moment.after_beats(2), Moment.after_beats(5), Moment.after_beats(9)],
+            align_to=MetricPhaseTarget(0, divisor=3),   # free axis (time); units inferred
+        )
+        th = self.master.tempo_history
+        self.assertAlmostEqual(th.length(), 9, delta=1e-9)                       # end beat unchanged
+        self.assertEqual([s.end_time for s in th.segments], [2, 5, 9])           # per-segment beats unchanged
+        self.assertAlmostEqual(th.integrate_interval(0, 9) % 3, 0, delta=1e-6)   # run lands on a time phase
+
+    def test_set_tempo_targets_group_align_to_phase_beats_free(self):
+        # A time-pinned 2-segment run aligned to a beat phase (free axis = beats): the run's end *beat* lands
+        # on a multiple of 2, while the run's end *time* (pinned) is preserved.
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [90, 120],
+            [Moment.after_time(3), Moment.after_time(6)],
+            align_to=MetricPhaseTarget(0, divisor=2),
+        )
+        th = self.master.tempo_history
+        end_beat = th.length()
+        self.assertAlmostEqual(end_beat - round(end_beat / 2) * 2, 0, delta=1e-6)   # end beat on a phase of 2
+        self.assertAlmostEqual(th.integrate_interval(0, end_beat), 6, delta=1e-6)   # end time pinned
+
+    def test_set_tempo_targets_per_segment_list_two_runs(self):
+        # A per-segment align_to list defines two independent aligned runs: segments 0-1 (phase target) and
+        # segments 2-3 (fixed coordinate). Each lands its free (time) axis; the final end beat is unchanged.
+        self.master.tempo = 60
+        self.master.set_tempo_targets(
+            [90, 120, 100, 80],
+            [Moment.after_beats(2), Moment.after_beats(5), Moment.after_beats(8), Moment.after_beats(12)],
+            align_to=[None, MetricPhaseTarget(0, divisor=3), None, Moment.at_time(7)],
+        )
+        th = self.master.tempo_history
+        self.assertAlmostEqual(th.length(), 12, delta=1e-9)
+        self.assertAlmostEqual(th.integrate_interval(0, 5), 3, delta=1e-6)    # first run on its phase (3)
+        self.assertAlmostEqual(th.integrate_interval(0, 12), 7, delta=1e-6)   # second run on its fixed time
+
+    def test_set_tempo_targets_single_align_over_mixed_axes_raises(self):
+        # A single align_to value forms one run over the whole (mixed-axis) call -> must be single-axis.
+        self.master.tempo = 60
+        with self.assertRaises(ValueError):
+            self.master.set_tempo_targets(
+                [90, 120],
+                [Moment.after_beats(2), Moment.after_time(5)],
+                align_to=MetricPhaseTarget(0, divisor=4),
+            )
+        self.assertEqual(self.master.tempo_history.length(), 0)   # curve untouched
+
+    def test_set_tempo_targets_group_align_unreachable_rolls_back(self):
+        # An unreachable group align rolls the *whole* call back, leaving the curve untouched.
+        self.master.tempo = 60
+        with self.assertRaises(ValueError):
+            self.master.set_tempo_targets(
+                [90, 120],
+                [Moment.after_beats(2), Moment.after_beats(5)],
+                align_to=Moment.at_time(1000),   # free (time) axis, but far out of curvature range
+            )
+        self.assertEqual(self.master.tempo_history.length(), 0)
 
     def test_apply_tempo_envelope_loops_until_stopped(self):
         self.master.tempo = 60

@@ -24,9 +24,7 @@ from functools import lru_cache, wraps
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
 from cb2.utilities import snap_float_to_nice_decimal
-import cb2.metric_phase
-import logging
-from typing import Union, Sequence, Tuple, Callable
+from typing import Union, Sequence, Callable
 from cb2.enums import DurationUnits, TempoUnits
 from cb2.metric_phase import MetricPhaseTarget
 
@@ -674,138 +672,6 @@ class TempoHistory(TempoEnvelope):
                                      f"{alignment_target}.")
 
     @tempo_modification
-    def set_beat_length_targets(self, beat_length_targets: Sequence[float], durations: Sequence[float],
-                                curve_shapes: Sequence[float] = None,
-                                metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                                duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
-        """
-        Same as set_beat_length_target, except that you can set multiple targets at once by providing lists to each
-        of the arguments.
-
-        :param beat_length_targets: list of the target beat_lengths
-        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
-        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
-            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored.)
-        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
-            seconds/parent beats.
-        :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
-        :param loop: if true, loop these targets
-        """
-        num_targets = len(beat_length_targets)
-        duration_units = DurationUnits(duration_units)
-        curve_shapes = [0] * num_targets if curve_shapes is None else curve_shapes
-        if len(durations) != num_targets:
-            raise ValueError("Inconsistent number of targets and durations.")
-        if len(curve_shapes) != num_targets:
-            raise ValueError("Inconsistent number of targets and curve_shapes.")
-        if metric_phase_targets is not None and len(metric_phase_targets) != num_targets:
-            raise ValueError("Inconsistent number of metric phase targets and curve_shapes.")
-
-        # truncate removes any segments that extend into the future
-        if truncate:
-            self.remove_segments_after(self.beat())
-        # add a flat segment up to the current beat if needed
-        self.extend_to(self.beat())
-
-        if metric_phase_targets is None:
-            # no segments have phase targets, so it's simple
-            for beat_length_target, duration, curve_shape in zip(beat_length_targets, durations, curve_shapes):
-                self._add_segment(beat_length_target, duration, curve_shape, None, duration_units)
-        else:
-            metric_phase_targets = [(MetricPhaseTarget.interpret(x) if x is not None else None)
-                                    for x in metric_phase_targets]
-            # This is used to adjust metric phase, if desired. We keep track of all the segments
-            # we've added since we last adjusted the metric phase.
-            segments_to_adjust = []
-            # We also keep track of the start and end beat/time of the current group of segments so that
-            # we don't have to recalculate it all the time
-            current_group_start_beat = current_group_end_beat = self.end_time()
-            current_group_start_time = current_group_end_time = \
-                self.time() + self.integrate_interval(self.beat(), self.end_time())
-
-            for beat_length_target, duration, curve_shape, metric_phase_target in \
-                    zip(beat_length_targets, durations, curve_shapes, metric_phase_targets):
-                if metric_phase_target is None:
-                    # no metric phase target for this segment, but some segments do have metric phase targets,
-                    # so we add it to our list of segments to adjust when we next have to adjust to a target
-                    self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target, duration_units)
-                    added_segment = self.segments[-1]
-                    segments_to_adjust.append(added_segment)
-                    current_group_end_beat += added_segment.duration
-                    current_group_end_time += added_segment.integrate_segment(added_segment.start_time,
-                                                                              added_segment.end_time)
-                else:
-                    # if we're here then there is a metric phase target for the end of this segment
-                    if len(segments_to_adjust) == 0:
-                        # if we haven't built up any segments to adjust, then just add this one segment,
-                        # adjusting it in the process
-                        self._add_segment(beat_length_target, duration, curve_shape, metric_phase_target,
-                                          duration_units)
-                        added_segment = self.segments[-1]
-                        current_group_end_beat += added_segment.duration
-                        current_group_end_time += added_segment.integrate_segment(added_segment.start_time,
-                                                                                  added_segment.end_time)
-                        current_group_start_beat = current_group_end_beat
-                        current_group_start_time = current_group_end_time
-                        continue
-                    # Otherwise, we add the segment without adjusting it in the process...
-                    self._add_segment(beat_length_target, duration, curve_shape, None, duration_units)
-                    added_segment = self.segments[-1]
-                    segments_to_adjust.append(added_segment)
-                    current_group_end_beat += added_segment.duration
-                    current_group_end_time += added_segment.integrate_segment(added_segment.start_time,
-                                                                              added_segment.end_time)
-
-                    # ...and then we try to reach the target by adjusting all the segments since the last adjustment
-                    success = False  # did we successfully adjust?
-                    if duration_units == DurationUnits.BEATS:
-                        for goal_end_time in metric_phase_target.get_nearest_matching_times(current_group_end_time):
-                            # try both the nearest matching time before and after
-                            goal_time_duration = goal_end_time - current_group_start_time
-                            if self._adjust_segments_time_duration(segments_to_adjust, goal_time_duration):
-                                # if one of them works, declare success and break
-                                current_group_end_time = goal_end_time  # reset the end time based on the adjustment
-                                success = True
-                                break
-                    else:
-                        for goal_end_beat in metric_phase_target.get_nearest_matching_beats(current_group_end_beat):
-                            # try both the nearest matching beat before and after
-                            # first, squeeze/stretch all the segments to take up an appropriate number of beats
-                            proportional_adjustment = (goal_end_beat - current_group_start_beat) / \
-                                                      (current_group_end_beat - current_group_start_beat)
-                            b = current_group_start_beat
-                            for segment in segments_to_adjust:
-                                old_dur = segment.duration
-                                segment.start_time = b
-                                segment.end_time = b = b + proportional_adjustment * old_dur
-                            # then try to re-adjust to get back to the original end time
-                            if self._adjust_segments_time_duration(segments_to_adjust,
-                                                                   current_group_end_time - current_group_start_time):
-                                # if it works, declare success and break
-                                current_group_end_beat = goal_end_beat  # reset the end beat based on the adjustment
-                                success = True
-                                break
-                    if not success:
-                        logging.warning("Metric phase target {} was not reachable.".format(metric_phase_target))
-                    else:
-                        # If it did succeed, clear the segments_to_adjust. We don't want to be adjusting any of the
-                        # segments that we just adjusted, since they would get messed up.
-                        segments_to_adjust.clear()
-                        # also reset the group start and end beat/time
-                        current_group_start_beat = current_group_end_beat
-                        current_group_start_time = current_group_end_time
-        if loop:
-            envelope_to_loop = TempoEnvelope.from_segments(self.segments[-num_targets:])
-            self.follow_func_or_envelope_loop = EnvelopeLoopInfo(
-                envelope_to_loop,
-                envelope_to_loop.length(),
-                envelope_to_loop.integrate_interval(envelope_to_loop.start_time(), envelope_to_loop.end_time()),
-                self.end_time(),
-                self.beat() + self.integrate_interval(self.beat(), self.end_time())
-            )
-
-    @tempo_modification
     def set_rate_target(self, rate_target: float, duration: float, curve_shape: float = 0,
                         alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                         duration_units: str = "beats", truncate: bool = True) -> None:
@@ -817,29 +683,6 @@ class TempoHistory(TempoEnvelope):
                                     duration_units, truncate)
 
     @tempo_modification
-    def set_rate_targets(self, rate_targets: Sequence[float], durations: Sequence[float],
-                         curve_shapes: Sequence[float] = None,
-                         metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                         duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
-        """
-        Same as set_rate_target, except that you can set multiple targets at once by providing lists to each
-        of the arguments.
-
-        :param rate_targets: list of the target beat rates
-        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
-        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
-            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase constrains is
-            fixed here by ``duration_units``.)
-        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
-            seconds/parent beats.
-        :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
-        :param loop: if true, loop these targets
-        """
-        self.set_beat_length_targets([1 / x for x in rate_targets], durations, curve_shapes, metric_phase_targets,
-                                     duration_units, truncate, loop)
-
-    @tempo_modification
     def set_tempo_target(self, tempo_target: float, duration: float, curve_shape: float = 0,
                          alignment_target: Union[float, 'MetricPhaseTarget', None] = None,
                          duration_units: str = "beats", truncate: bool = True) -> None:
@@ -849,29 +692,6 @@ class TempoHistory(TempoEnvelope):
         """
         self.set_beat_length_target(60 / tempo_target, duration, curve_shape, alignment_target,
                                     duration_units, truncate)
-
-    @tempo_modification
-    def set_tempo_targets(self, tempo_targets: Sequence[float], durations: Sequence[float],
-                          curve_shapes: Sequence[float] = None,
-                          metric_phase_targets: Sequence[Union[float, 'MetricPhaseTarget', Tuple]] = None,
-                          duration_units: str = "beats", truncate: bool = True, loop: bool = False) -> None:
-        """
-        Same as set_tempo_target, except that you can set multiple targets at once by providing lists to each
-        of the arguments.
-
-        :param tempo_targets: list of the target tempos
-        :param durations: list of segment durations (in beats or seconds, as defined by duration_units)
-        :param curve_shapes: list of segment curve_shapes (or none to not set curve shape)
-        :param metric_phase_targets: list of metric phase targets for each segment (or None to ignore metric phase).
-            (If a MetricPhaseTarget object is passed, its own ``units`` is ignored — the axis the phase constrains is
-            fixed here by ``duration_units``.)
-        :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in
-            seconds/parent beats.
-        :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting these targets.
-        :param loop: if true, loop these targets
-        """
-        self.set_beat_length_targets([60 / x for x in tempo_targets], durations, curve_shapes, metric_phase_targets,
-                                     duration_units, truncate, loop)
 
     # -------------------------------------- Axis coordination adjustments -------------------------------------------
 
@@ -911,82 +731,14 @@ class TempoHistory(TempoEnvelope):
                 segment.end_time = original_end_beat   # set_curvature failed after we moved the beat
         return False
 
-    # These methods are used when we want to adjust the metric phase at the end of a group of segments.
-
-    @tempo_modification
-    def adjust_metric_phase_at_beat(self, beat: float,
-                                    metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
-        """
-        Sets the goal (time) metric phase at the given beat. So, for instance, if we called
-        ``adjust_metric_phase_at_beat(5, 0.5)``, this would mean that we want to be at time 1.5, 2.5, 3.5 etc. at
-        beat 5. If we called ``adjust_metric_phase_at_beat(7, 1.25, 3)``, this would mean that at beat 7, we would
-        want to be at time 1.25, 4.25, 7.25, etc.
-
-        :param beat: The beat at which to have the given phase in time
-        :param metric_phase_target: either a :class:`MetricPhaseTarget`, or the argument to construct one. (If a
-            MetricPhaseTarget object is passed, its own ``units`` is ignored: here the phase is always in time.)
-        :return: True, if the adjustment is possible, False if not
-        """
-        if beat > self.length() or beat <= self.beat():
-            raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
-
-        metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
-
-        # what's the current time at the beat?
-        time_at_beat = self.time() + self.integrate_interval(self.beat(), beat)
-
-        # try to adjust that to one of the nearby target phases
-        for good_phase_time in metric_phase_target.get_nearest_matching_times(time_at_beat):
-            if self.adjust_time_at_beat(beat, good_phase_time):
-                # the adjustment worked (returned true), so return True to say that we succeeded
-                return True
-
-        # if we get here, neither adjustment was possible, so we failed. Return false.
-        return False
-
-    @tempo_modification
-    def adjust_time_at_beat(self, beat_to_adjust: float, desired_time: float) -> bool:
-        """
-        Adjusts the curvature of segments from now until beat so that we reach it at desired_time, if possible. If not
-        possible, leaves the TempoCurve unchanged and returns False
-
-        :param beat_to_adjust: the beat at which we want to be at a particular time
-        :param desired_time: the time we want to be at
-        :return: True if the adjustment worked, False if it's impossible
-        """
-        assert self.beat() < beat_to_adjust <= self.length()
-
-        # make a copy of the original segments lists to fall back on in case we fail
-        back_up = deepcopy(self.segments)
-        self.insert_interpolated(self.beat())
-        self.insert_interpolated(beat_to_adjust)
-        adjustable_segments = self.segments[self._get_index_of_segment_at(self.beat(), right_most=True):
-                                            self._get_index_of_segment_at(beat_to_adjust, left_most=True) + 1]
-        goal_total_time = desired_time - self.time()
-        result = TempoHistory._adjust_segments_time_duration(adjustable_segments, goal_total_time)
-
-        if result == "no change":
-            # it worked, but we didn't have to change anything
-            # no there's no need for the interpolations
-            self.segments = back_up
-            return True
-        elif result:
-            # it worked, return True
-            return True
-        else:
-            # the adjustment failed, so return to the old segments before interpolation
-            # and return False to signal the failure
-            self.segments = back_up
-            return False
-
     @staticmethod
-    def _adjust_segments_time_duration(which_segments: Sequence[EnvelopeSegment], goal_total_time: float):
+    def _adjust_segments_time_duration(which_segments: Sequence[EnvelopeSegment], goal_total_time: float) -> bool:
         """
         Adjusts the total time that the segments take without changing the total beats
 
         :param which_segments: which segments to adjust.
         :param goal_total_time: the total time we want them to take
-        :return: True if it's possible, False if not, and "no change" in the off-chance that no change was needed
+        :return: True if it's possible (segments mutated), False if not (segments untouched)
         """
         # ranges of how long each segment could take by adjusting curvature
         segment_time_ranges = [segment.get_integral_range() for segment in which_segments]
@@ -1004,10 +756,9 @@ class TempoHistory(TempoEnvelope):
         # how long all the segments take
         total_time = sum(segment_times)
 
-        # on the off-chance that it already works perfectly, return "no change" to indicate that it worked,
-        # but that it was totally unnecessary
+        # on the off-chance that it already works perfectly, there's nothing to adjust — still a success
         if goal_total_time == total_time:
-            return "no change"
+            return True
 
         # if we've reached this point, we're ready to make the adjustments
         # delta_time is how much of an adjustment we need total
@@ -1028,85 +779,69 @@ class TempoHistory(TempoEnvelope):
         return True
 
     @tempo_modification
-    def adjust_metric_phase_at_time(self, target_time: float,
-                                    metric_phase_target: Union[float, 'MetricPhaseTarget', Tuple]) -> bool:
+    def _align_run(self, run_segments: Sequence[EnvelopeSegment],
+                   alignment_target: Union[float, 'MetricPhaseTarget'], free_axis: DurationUnits) -> bool:
         """
-        Sets the goal (beat) metric phase at the given time. So, for instance, if we called
-        ``adjust_metric_phase_at_time(5, 0.5)``, this would mean that at time 5 we want to be at beat 1.5, 2.5, 3.5
-        etc. If we called ``adjust_metric_phase_at_time(7, 1.25, 3)``, this would mean that at time 7, we would want
-        to be at beat 1.25, 4.25, 7.25, etc.
+        Collectively bend a run of already-appended, contiguous segments (the tail of ``self.segments``)
+        so that the run's endpoint lands on ``alignment_target``, a fixed coordinate or MetricPhase target on
+        the run's free axis. (The timing of the segments on other, fixed axis will remain unchanged.)
 
-        :param target_time: The time at which to have the given phase in beat
-        :param metric_phase_target: either a MetricPhaseTarget, or the argument to construct one. (If a
-            MetricPhaseTarget object is passed, its own ``units`` is ignored: here the phase is always in beats.)
-        :return: True, if the adjustment is possible, False if not
+        This is a generalization of :meth:`_solve_segment_end_time` / :meth:`_solve_segment_end_beat` for
+        groups of segments: where those methods bend a single segment's curvature, this distributes the bend
+        across the whole run. Note that this is underdetermined for a run of length > 1, so we use the
+        existing curve shapes of each segement tossed the distribution.
+
+        Returns True on success (the run's segments are mutated in place) and False if no candidate is
+        reachable (leaving ``run_segments`` unchanged). Any wider rollback is the caller's responsibility.
+        NB ``EnvelopeSegment.start_time`` / ``end_time`` are really start/end *beats* in this internal naming.
         """
+        run_start_beat = run_segments[0].start_time
+        run_start_time = self.time() + self.integrate_interval(self.beat(), run_start_beat)
 
-        envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
-        if target_time > envelope_end_time or target_time <= self.time():
-            raise ValueError("Cannot adjust metric phase before current beat or beyond the end of the TempoEnvelope")
-
-        metric_phase_target = MetricPhaseTarget.interpret(metric_phase_target)
-
-        # what's the current beat at the time?
-        beat_at_time = self.beat() + self.get_beat_wait_from_time_wait(target_time - self.time())
-
-        # try to adjust that to one of the nearby target phases
-        for good_phase_beat in metric_phase_target.get_nearest_matching_beats(beat_at_time):
-            if self.adjust_beat_at_time(target_time, good_phase_beat):
-                # the adjustment worked (returned true), so return True to say that we succeeded
-                return True
-
-        # if we get here, neither adjustment was possible, so we failed. Return false.
-        return False
-
-    @tempo_modification
-    def adjust_beat_at_time(self, time_to_adjust: float, desired_beat: float) -> bool:
-        """
-        Adjusts the curvature of segments from now until the specified time so that we reach it at desired_beat,
-        if possible. If not possible, leaves the TempoCurve unchanged and returns False.
-
-        :param time_to_adjust: the time at which we want to be at a particular beat
-        :param desired_beat: the beat we want to be at
-        :return: True if the adjustment worked, False if it's impossible
-        """
-        envelope_end_time = self.time() + self.integrate_interval(self.beat(), self.end_time())
-        assert self.time() < time_to_adjust <= envelope_end_time
-
-        # make a copy of the original segments lists to fall back on in case we fail
-        back_up = deepcopy(self.segments)
-        current_beat_at_adjust_point = self.beat() + self.get_beat_wait_from_time_wait(time_to_adjust - self.time())
-
-        start_beat = self.insert_interpolated(self.beat())
-        # if the insertion does nothing because it's too close to an existing point, it will return the existing point
-        current_beat_at_adjust_point = self.insert_interpolated(current_beat_at_adjust_point)
-
-        adjustable_index_start = self._get_index_of_segment_at(self.beat(), right_most=True)
-        adjustable_index_end = self._get_index_of_segment_at(current_beat_at_adjust_point, left_most=True) + 1
-        adjustable_segments = self.segments[adjustable_index_start: adjustable_index_end]
-
-        # first we squeeze or stretch all the segments so that we reach the right beat at the end of the last one
-        delta_beat = desired_beat - current_beat_at_adjust_point
-        proportional_length_adjustment = (desired_beat - start_beat) / (current_beat_at_adjust_point - start_beat)
-
-        b = adjustable_segments[0].start_time
-        for segment in adjustable_segments:
-            old_dur = segment.duration
-            segment.start_time = b
-            segment.end_time = b = b + proportional_length_adjustment * old_dur
-
-        for segment in self.segments[adjustable_index_end:]:
-            segment.start_time += delta_beat
-            segment.end_time += delta_beat
-
-        # now that we squeezed or stretched so as to be at the correct moment in the curve, on the correct beat
-        # see if we can adjust the curvature of the segments so that the time at that moment is unchanged
-        if self.adjust_time_at_beat(desired_beat, time_to_adjust):
-            # if it works, return True
-            return True
+        if free_axis == DurationUnits.TIME:
+            # The run pins beats, so the end beat is fixed; push the run's total *time* onto the target by
+            # redistributing curvature (beats unchanged). _adjust_segments_time_duration range-checks before
+            # mutating, so a failed candidate leaves the run clean and we can try the next.
+            run_end_time = run_start_time + sum(seg.integrate_segment(seg.start_time, seg.end_time)
+                                                for seg in run_segments)
+            if isinstance(alignment_target, MetricPhaseTarget):
+                candidate_end_times = alignment_target.get_nearest_matching_times(run_end_time)
+            else:
+                candidate_end_times = (alignment_target,)
+            for goal_end_time in candidate_end_times:
+                if self._adjust_segments_time_duration(run_segments, goal_end_time - run_start_time):
+                    return True
+            return False
         else:
-            # otherwise, revert and return false
-            self.segments = back_up
+            # The run pins time, so the run's total time is fixed; the free axis is beats. For each candidate
+            # end beat we proportionally stretch/squeeze the run's beats to land on it, then re-solve curvature
+            # to restore the run's original total time. On failure we restore the run and try the next candidate.
+            run_end_beat = run_segments[-1].end_time
+            run_total_time = sum(seg.integrate_segment(seg.start_time, seg.end_time) for seg in run_segments)
+            if isinstance(alignment_target, MetricPhaseTarget):
+                candidate_end_beats = alignment_target.get_nearest_matching_beats(run_end_beat)
+            else:
+                candidate_end_beats = (alignment_target,)
+            # snapshot the run's beats/curvature so we can restore between candidate attempts
+            backup = [(seg.start_time, seg.end_time, seg.curve_shape) for seg in run_segments]
+            for goal_end_beat in candidate_end_beats:
+                # for each candidate end beat, we start by scaling the whole run by the appropriate factor
+                # to hit that end beat. First determine that factor with a simple proportion.
+                proportional_adjustment = (goal_end_beat - run_start_beat) / (run_end_beat - run_start_beat)
+                # then loop through the segments with a running beat counter and rescale them
+                b = run_start_beat
+                for seg in run_segments:
+                    old_dur = seg.duration
+                    seg.start_time = b
+                    seg.end_time = b = b + proportional_adjustment * old_dur
+                # having gotten the beats to where we want them, we then attempt to use curvature to
+                # adjust the total time back to its original value.
+                if self._adjust_segments_time_duration(run_segments, run_total_time):
+                    return True
+                # on failure, restore the segments to their original state and try the next candidate
+                for seg, (start, end, curve_shape) in zip(run_segments, backup):
+                    seg.start_time, seg.end_time, seg.curve_shape = start, end, curve_shape
+            # none of the candidates worked, return False
             return False
 
     ##################################################################################################################

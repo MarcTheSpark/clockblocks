@@ -58,23 +58,6 @@ class MetricPhaseTarget:
         self.units = DurationUnits(units) if units is not None else None
         self.min_duration = min_duration
 
-    @classmethod
-    def interpret(cls, value: float| Sequence) -> 'MetricPhaseTarget':
-        """
-        Interpret a tuple or just a number as a MetricPhaseTarget. E.g. we want the user to be able to hand in a tuple
-        like (0.5, 3) and have it get interpreted as a target of 0.5 with divisor 3.
-
-        :param value: either a tuple (which becomes the constructor arguments), a MetricPhaseTarget (which
-            is passed through unchanged), or a number which is treated as the phase with other args as defaults.
-        :return: A MetricPhaseTarget, interpreted from the argument
-        """
-        if isinstance(value, MetricPhaseTarget):
-            return value
-        elif hasattr(value, "__len__"):
-            return MetricPhaseTarget(*value)
-        else:
-            return MetricPhaseTarget(value)
-
     def _get_nearest_matches(self, t: float, offset: float = 0) -> Tuple[float, float]:
         floored_value = math.floor(t / self.divisor) * self.divisor
         closest_below = None

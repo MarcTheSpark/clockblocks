@@ -485,12 +485,17 @@ class Clock:
 
     def time(self) -> float:
         """
-        How much time has passed since this clock was created.
-        Either in seconds, if this is the master clock, or in beats in the parent clock, if this clock was the result
-        of a call to fork.
+        How much time has passed since this clock was created. Either in seconds, if this is the master
+        clock, or in beats in the parent clock, if this clock was the result of a call to fork.
 
-        Computed lazily from the current scheduler position, so it stays correct when called from any thread —
-        including while the owning thread is mid-wait. Does not mutate `tempo_history` (the committed pointer).
+        Computed on demand from the scheduler's committed position, so it is consistent from any thread
+        without the owning thread having had to advance its `tempo_history` pointer first. Note, however,
+        that the scheduler's position is **event-quantized, not wall-clock-interpolated**: it is bumped to
+        each event's time as that event executes (across the whole family), so a clock reading its own
+        position while its action runs sees the exact current value, but a read taken *between* events
+        (from a non-clock thread) is frozen at the time of the most recent event.
+
+        Does not mutate `tempo_history` (the committed pointer).
         """
         return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="time")
 
@@ -604,91 +609,182 @@ class Clock:
     # and a MetricPhaseTarget passed as `when` subsumes the old `metric_phase_target` argument.
     # ------------------------------------------------------------------
 
-    def _resolve_align(self, when: 'ResolvableMoment', curve_shape: float | None,
-                       align_to: 'ResolvableMoment | None'):
-        """Resolve a singular target's `when` and `align_to` into the numeric arguments TempoHistory
-        wants. Returns (duration, units, alignment_target, curve_shape):
-
-          * `duration`/`units` come from `when` (a Moment or MetricPhaseTarget; bare number rejected),
-            measured from the clock's current position — `units` is the *pinned* axis.
-          * `alignment_target` is what TempoHistory's parameter of the same name receives: None, a
-            MetricPhaseTarget on the *free* axis (the one `when` did not pin), or a fixed free-axis
-            coordinate (resolved from a plain Moment). The free axis is always opposite `when`; a plain
-            Moment / explicit-axis phase target on the same axis as `when` is an error.
-          * `curve_shape` is normalized None -> 0. With a *fixed* `align_to` an explicitly-set
-            curve_shape is discarded (the curvature is determined) with a warning.
+    def _resolve_when(self, when: 'ResolvableMoment') -> 'tuple[float, DurationUnits]':
+        """
+        Resolve a `when` (a Moment or MetricPhaseTarget; bare number rejected) into the
+        ``(duration, axis)`` pair TempoHistory's setters want, where ``duration`` is the offset from the
+        clock's current position and ``axis`` is the ``DurationUnits`` it is measured along
+        (``DurationUnits.BEATS`` or ``.TIME`` — a StrEnum, so it compares equal to "beats"/"time", but
+        callers rely on it being the enum, e.g. ``axis.opposite``).
+        Note that, although a ResolvableMoment often carries the axis information already,
+        it is inferred from context when unset, and therefore needs to be returned here as
+        part of the process of resolving the `when`.
         """
         abs_when = to_absolute_moment(when, self, allow_number=False)
         pinned_axis = abs_when.units
+        # The reference "now" is read live, which is safe even when called repeatedly in a loop (see
+        # :meth:`_apply_targets`): ``beat()``/``time()`` derive from the scheduler's committed ``_ideal_time``,
+        # which only advances when the scheduler executes an event — and the scheduler is parked/quiescent for
+        # the duration of a tempo-setting call, so the reference does not drift between iterations.
         now = self.beat() if pinned_axis == DurationUnits.BEATS else self.time()
-        duration, units = abs_when.value - now, pinned_axis.value
+        return abs_when.value - now, pinned_axis
 
+    def _resolve_align_to(self, align_to: 'ResolvableMoment | None', pinned_axis: DurationUnits,
+                          curve_shape: float | None = None,
+                          warn_on_fixed_curve_shape: bool = True) -> 'float | MetricPhaseTarget | None':
+        """Resolve an `align_to` (a ResolvableMoment, or None) against the axis `when` pinned, into the
+        `alignment_target` TempoHistory / :meth:`_align_run` want — one of:
+
+          * ``None`` — no alignment;
+          * a :class:`MetricPhaseTarget` on the *free* axis (the one opposite `pinned_axis`), passed through
+            unchanged (its own ``units`` is validated against / inferred as the free axis);
+          * a fixed numeric coordinate on the free axis (resolved from a plain Moment).
+
+        A plain Moment or MetricPhaseTarget on the *pinned* axis is an error.
+
+        `curve_shape` is *not* transformed or returned — it is consulted only to warn: with a fixed Moment
+        `align_to` the curvature is fully determined, so an explicitly-set curve_shape is meaningless, and we
+        warn that it's ignored. (Callers handle curve_shape themselves: the singular setters pass it to the
+        segment they build, where the solver overwrites it to hit the target; the group path bakes the
+        per-segment curve_shapes in at build time as seeds for :meth:`_align_run`.) `warn_on_fixed_curve_shape`
+        gates that warning — the group path passes False for multi-segment runs, where the curvature is *not*
+        uniquely determined and per-segment curve_shapes do legitimately seed the distribution."""
         if align_to is None:
-            return duration, units, None, (curve_shape or 0)
+            return None
 
-        free_axis = DurationUnits.TIME if pinned_axis == DurationUnits.BEATS else DurationUnits.BEATS
-
+        free_axis = pinned_axis.opposite
         if isinstance(align_to, MetricPhaseTarget):
             if align_to.units is not None and align_to.units != free_axis:
                 raise ValueError(
                     f"align_to is fixed to the {align_to.units.value} axis, but `when` already pins that "
                     f"axis; align_to must be on the free ({free_axis.value}) axis (leave its units as None "
                     f"to infer it).")
-            # pass the MetricPhaseTarget through as-is; TempoHistory will treat it as operating on the other
-            # axes than specified by `units`, ignoring any internal units to the MetricPhaseTarget
-            return duration, units, align_to, (curve_shape or 0)
+            # pass the MetricPhaseTarget through as-is; the axis is the free axis, so its own units are ignored
+            return align_to
 
-        # a plain Moment represents a fixed coordinate on the free axis; curvature is then fully determined
-        abs_moment_to_align_to = to_absolute_moment(align_to, self, allow_number=False)
-        if abs_moment_to_align_to.units != free_axis:
+        # a plain Moment represents a fixed coordinate on the free axis
+        # we start by resolving it from a possibly relative Moment to an absolute Moment
+        abs_align_to = to_absolute_moment(align_to, self, allow_number=False)
+        if abs_align_to.units != free_axis:
             raise ValueError(
-                f"align_to is on the {abs_moment_to_align_to.units.value} axis, but `when` pins that axis; align_to "
+                f"align_to is on the {abs_align_to.units.value} axis, but `when` pins that axis; align_to "
                 f"must be on the free ({free_axis.value}) axis.")
-        if curve_shape is not None:
+
+        # for a fixed alignment target, curvature is fully determined, so an explicitly given curve shape
+        # will be ignored, and probably represents a misunderstanding. Warn the user (unless this is a
+        # multi-segment group run, where curve_shapes do meaningfully seed the distribution)
+        if warn_on_fixed_curve_shape and curve_shape:
             warnings.warn("curve_shape is ignored when align_to is a fixed point, as this fully determines "
                           "the required curvature.")
-        return duration, units, abs_moment_to_align_to.value, 0
+        return abs_align_to.value
 
     def _apply_targets(self, history_target_setter: Callable, targets: Sequence[float],
                        whens: 'Sequence[ResolvableMoment]', curve_shapes: Sequence[float],
-                       truncate: bool) -> None:
+                       truncate: bool, align_to: 'ResolvableMoment | Sequence | None' = None) -> None:
         """Build a multi-segment tempo curve using the given tempo history target setter (`set_beat_length_target`/
-        `set_rate_target`/`set_tempo_target`). The levels are given by `targets`, and the moments where those levels
-        are reached are given by `whens`.
+        `set_rate_target`/`set_tempo_target`). The levels are given by `targets`, the moments where those levels
+        are reached are given by `whens`, which can target either the beats or time axis. The `align_to` argument,
+        if provided, allows us to target particular `Moment`s or `MetricPhaseTarget`s on the other axis by bending
+        segment curve shapes. It can be any of:
+
+          * ``None``, meaning no alignment. Curve shapes pass through directly.
+          * a per-segment list/tuple (same length as `targets`) of ``None``/``ResolvableMoment``. Each non-``None``
+            entry causes all segments since the last non-``None` entry to bend collectively so the run lands on
+            that target.
+          * a single ResolvableMoment, which aligns the *whole* call as one run, landing its end on the given
+            alignment target. (equivalent to a per-segment list which is all None except for the final value)
 
         Note that these when's are resolved relative to the current clock position, *not* the end of the previous
         segment. Any ambiguity resulting from the fact that multiple targets are set at once (possibly mixing beat
         and time axes), is resolved by building the tempo curve incrementally, left-to-right.
 
-        The whens must come out strictly increasing in clock-time; the underlying setter's own
-        backwards-guard raises if one lands at or before the previous segment's end, and we re-raise
-        with the offending index.
+        Errors are raised if:
+
+        - The whens do not come out strictly increasing in clock-time (re-raised from the underlying setter)
+        - Any of the alignment targets are unreachable
+        - A group-aligned run of length > 1 mixes axes. All whens within a run must be on one axis, with the
+         alignment target on the other axis.
+
+        The whole build is atomic: any failure restores the pre-call tempo curve.
         """
-        # normalize length of multi-arguments
+        # pre-build checks and normalization of targets/curve_shapes/align_to
         num_targets = len(targets)
         if len(whens) != num_targets:
             raise ValueError("Inconsistent number of targets and whens.")
-        curve_shapes = [0] * num_targets if curve_shapes is None else curve_shapes
+        # None for the whole arg means all-linear; a per-element None also means linear (0), matching the
+        # singular setters' curve_shape=None default. Normalizing here is load-bearing, not just tidiness:
+        # an un-normalized None reaches _add_segment's time-axis branch and raises (abs(None)).
+        curve_shapes = ([0] * num_targets if curve_shapes is None
+                        else [0 if cs is None else cs for cs in curve_shapes])
         if len(curve_shapes) != num_targets:
             raise ValueError("Inconsistent number of targets and curve_shapes.")
+        # normalize align_to into a per-segment list; a single ResolvableMoment aligns the whole run at its end
+        if align_to is None:
+            align_to_list = [None] * num_targets
+        elif isinstance(align_to, (list, tuple)):
+            if len(align_to) != num_targets:
+                raise ValueError("Inconsistent number of targets and align_to entries.")
+            align_to_list = list(align_to)
+        else:
+            align_to_list = [None] * (num_targets - 1) + [align_to]
 
-        # loop through targets left-to-right
-        now_beat, now_time = self.beat(), self.time()
-        for i, (target, when, curve_shape) in enumerate(zip(targets, whens, curve_shapes)):
-            moment = to_absolute_moment(when, self, allow_number=False)
-            if moment.units == DurationUnits.BEATS:
-                duration, units = moment.value - now_beat, DurationUnits.BEATS
-            else:
-                duration, units = moment.value - now_time, DurationUnits.TIME
-            try:
-                history_target_setter(target, duration, curve_shape=curve_shape, duration_units=units,
-                                      truncate=(truncate and i == 0))
-            except ValueError as e:
-                raise ValueError(
-                    f"`when` #{i} ({when!r}) resolves to {units} {moment.value:g}, which does not "
-                    f"extend beyond the previous segment; `when`s must be strictly increasing in "
-                    f"clock-time."
-                ) from e
+        # call-level snapshot so any failure (a backwards `when`, an unreachable group align) restores the curve.
+        backup = deepcopy(self.tempo_history.segments)
+        try:
+            # loop through targets left-to-right, accumulating the current run. Each `when` resolves against
+            # the live clock position, which is stable across the loop (see _resolve_when's docstring).
+            run_start = 0          # index of the first segment in the current (not-yet-aligned) run
+            run_axes = set()       # the when-axes (DurationUnits) seen so far in the current run
+            for i, (target, when, curve_shape, seg_align) in enumerate(
+                    zip(targets, whens, curve_shapes, align_to_list)):
+                duration, units = self._resolve_when(when)
+                run_axes.add(units)
+                try:
+                    history_target_setter(target, duration, curve_shape=curve_shape, duration_units=units,
+                                          truncate=(truncate and i == 0))
+                except ValueError as e:
+                    now = self.beat() if units == DurationUnits.BEATS else self.time()
+                    raise ValueError(
+                        f"`when` #{i} ({when!r}) resolves to {units} {duration + now:g}, which does not "
+                        f"extend beyond the previous segment; `when`s must be strictly increasing in "
+                        f"clock-time."
+                    ) from e
+
+                if seg_align is not None:
+                    # close the current run [run_start .. i] and bend it collectively onto seg_align
+                    run_len = i - run_start + 1
+                    if run_len > 1 and len(run_axes) > 1:
+                        raise ValueError(
+                            f"align_to at index {i} closes a multi-segment run of segments (indices {run_start}–{i}) "
+                            f"that mixes beat- and time-axis `when`s; a group-aligned run must operate"
+                            f"on a single axis.")
+                    pinned_axis = next(iter(run_axes))  # get the shared axis from the set
+                    # resolve seg_align onto the free axis.
+                    # Re: curve shape, it has already been baked into the newly added segment in the history_setter
+                    # call above, and it will be adjusted as needed by _align_run below. The only reason we pass it
+                    # to self._resolve_align_to is to warn on a run of length 1 with a fixed target, where an explicit
+                    # curve shape was given. (In that case the curve shape is fully determined, and the user-provided
+                    # value is ignored, suggesting a misunderstanding on the user's part.)
+                    alignment_target = self._resolve_align_to(
+                        seg_align, pinned_axis, curve_shape, warn_on_fixed_curve_shape=(run_len == 1))
+                    free_axis = pinned_axis.opposite
+                    run_segments = self.tempo_history.segments[-run_len:]
+                    if not self.tempo_history._align_run(run_segments, alignment_target, free_axis):
+                        raise ValueError(
+                            f"Could not bend segments {run_start}–{i} to align to {seg_align!r} on the "
+                            f"{free_axis.value} axis.")
+                    # start a fresh run after the alignment point
+                    run_start = i + 1
+                    run_axes = set()
+        except Exception:
+            # restoring the backup reverts the curve without going through a @tempo_modification method, so
+            # clear the conversion caches that may hold entries computed against the discarded curve. (Only
+            # needed here: in-loop mutations all entry-clear via @tempo_modification, and a successful build
+            # leaves the cache consistent with the final curve.)
+            self.tempo_history.segments = backup
+            self.tempo_history.time_at_beat.cache_clear()
+            self.tempo_history.beat_at_time.cache_clear()
+            raise
 
     @_reschedule_after_tempo_change
     def set_beat_length_target(self, beat_length_target: float, when: 'ResolvableMoment',
@@ -718,9 +814,10 @@ class Clock:
             than a metric phase target).
         :raises ValueError: if ``when``/``align_to`` share an axis, or if no curvature can reach the
             requested ``align_to`` (in which case the tempo curve is left unchanged)."""
-        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
+        duration, duration_units = self._resolve_when(when)
+        alignment_target = self._resolve_align_to(align_to, duration_units, curve_shape)
         self.tempo_history.set_beat_length_target(
-            beat_length_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            beat_length_target, duration, curve_shape=(curve_shape or 0), alignment_target=alignment_target,
             duration_units=duration_units, truncate=truncate,
         )
 
@@ -739,9 +836,10 @@ class Clock:
         :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate.
             See :meth:`set_beat_length_target`.
         :raises ValueError: see :meth:`set_beat_length_target`."""
-        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
+        duration, duration_units = self._resolve_when(when)
+        alignment_target = self._resolve_align_to(align_to, duration_units, curve_shape)
         self.tempo_history.set_rate_target(
-            rate_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            rate_target, duration, curve_shape=(curve_shape or 0), alignment_target=alignment_target,
             duration_units=duration_units, truncate=truncate,
         )
 
@@ -762,9 +860,10 @@ class Clock:
         :param align_to: optional; solve the curvature to land the free axis on a phase or coordinate.
             See :meth:`set_beat_length_target`.
         :raises ValueError: see :meth:`set_beat_length_target`."""
-        duration, duration_units, alignment_target, curve_shape = self._resolve_align(when, curve_shape, align_to)
+        duration, duration_units = self._resolve_when(when)
+        alignment_target = self._resolve_align_to(align_to, duration_units, curve_shape)
         self.tempo_history.set_tempo_target(
-            tempo_target, duration, curve_shape=curve_shape, alignment_target=alignment_target,
+            tempo_target, duration, curve_shape=(curve_shape or 0), alignment_target=alignment_target,
             duration_units=duration_units, truncate=truncate,
         )
 
@@ -772,32 +871,86 @@ class Clock:
     def set_beat_length_targets(self, beat_length_targets: Sequence[float],
                                 whens: 'Sequence[ResolvableMoment]',
                                 curve_shapes: Sequence[float] = None,
-                                truncate: bool = True) -> None:
-        """Multi-segment form of :meth:`set_beat_length_target`. Each entry of `whens` is the arrival
-        point of the corresponding target, resolved against the current beat/time (so an `after_*`
-        `when` counts from now, not from the previous segment's end). Beats and time may be mixed
-        across the list, and the whens must be strictly increasing in clock-time. This is one-shot;
-        to loop a tempo shape, build a :class:`TempoEnvelope` and use :meth:`apply_tempo_envelope`."""
+                                truncate: bool = True,
+                                align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
+        """Smoothly change this clock's beat length (seconds per beat) through a series of targets,
+        building a multi-segment tempo curve in one call — the multi-segment form of
+        :meth:`set_beat_length_target`. This is non-looping; to apply a looping tempo shape, build a
+        :class:`TempoEnvelope` and use :meth:`apply_tempo_envelope`.
+
+        :param beat_length_targets: the beat lengths (seconds per beat) to arrive at, one per segment.
+        :param whens: when each target is reached (same length as ``beat_length_targets``), each a
+            :class:`Moment` or :class:`MetricPhaseTarget`. Note that every `when` is resolved against the clock's
+            *current* position, so an ``after_*`` moment counts from now, not from the previous segment's.
+            Beats- and time-axis moments may be freely mixed across the list, so long as the whens come
+            out in strictly increasing clock-time.
+        :param curve_shapes: optional per-segment bends (same length as ``beat_length_targets``), each as in
+            :meth:`set_beat_length_target`. ``None`` for the whole argument (the default), or a per-element
+            ``None``, means linear (``0``) for that segment.
+        :param truncate: if ``True`` (the default), any tempo curve already scheduled past the current beat
+            is discarded first, so the run starts from where the clock is now; if ``False`` the run is
+            appended after whatever is already scheduled.
+        :param align_to: optional curvature-solved alignment, extending :meth:`set_beat_length_target`'s
+            ``align_to`` to runs of segments. Either:
+
+            * a single :class:`Moment`/:class:`MetricPhaseTarget` — align the *whole* call as one run,
+              landing its end on the target; or
+            * a per-segment list/tuple (same length as ``beat_length_targets``) of ``None``/targets — each
+              non-``None`` entry closes a *run* (all segments since the previous alignment, or the start)
+              and bends them collectively so the run lands on that target.
+
+            A group-aligned run of more than one segment must have its ``whens`` on a single axis (all beats
+            or all time), with the alignment target on the opposite (free) axis.
+        :raises ValueError: if ``whens``/``curve_shapes``/``align_to`` lengths are inconsistent with
+            ``beat_length_targets``; if the ``whens`` do not come out strictly increasing in clock-time (the
+            error names the offending index); if a multi-segment aligned run mixes beat- and time-axis
+            ``whens``; or if an alignment target is unreachable by curvature adjustment. On any failure the
+            tempo curve is left unchanged.
+        """
         self._apply_targets(self.tempo_history.set_beat_length_target,
-                            beat_length_targets, whens, curve_shapes, truncate)
+                            beat_length_targets, whens, curve_shapes, truncate, align_to)
 
     @_reschedule_after_tempo_change
     def set_rate_targets(self, rate_targets: Sequence[float],
                          whens: 'Sequence[ResolvableMoment]',
                          curve_shapes: Sequence[float] = None,
-                         truncate: bool = True) -> None:
-        """Multi-segment form of :meth:`set_rate_target`. See :meth:`set_beat_length_targets`."""
+                         truncate: bool = True,
+                         align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
+        """Smoothly change this clock's rate (beats per second; the reciprocal of beat length, so a higher
+        rate is a faster tempo) through a series of targets — the multi-segment form of
+        :meth:`set_rate_target`.
+
+        :param rate_targets: the rates (beats per second) to arrive at, one per segment.
+        :param whens: when each target is reached. See :meth:`set_beat_length_targets`.
+        :param curve_shapes: optional per-segment bends. See :meth:`set_beat_length_targets`.
+        :param truncate: whether to discard already-scheduled tempo changes first. See
+            :meth:`set_beat_length_targets`.
+        :param align_to: optional curvature-solved alignment of segment runs. See
+            :meth:`set_beat_length_targets`.
+        :raises ValueError: see :meth:`set_beat_length_targets`."""
         self._apply_targets(self.tempo_history.set_rate_target,
-                            rate_targets, whens, curve_shapes, truncate)
+                            rate_targets, whens, curve_shapes, truncate, align_to)
 
     @_reschedule_after_tempo_change
     def set_tempo_targets(self, tempo_targets: Sequence[float],
                           whens: 'Sequence[ResolvableMoment]',
                           curve_shapes: Sequence[float] = None,
-                          truncate: bool = True) -> None:
-        """Multi-segment form of :meth:`set_tempo_target`. See :meth:`set_beat_length_targets`."""
+                          truncate: bool = True,
+                          align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
+        """Smoothly change this clock's tempo (beats per minute) through a series of targets — the
+        multi-segment form of :meth:`set_tempo_target`, and usually the most natural of the three
+        equivalent plural setters.
+
+        :param tempo_targets: the tempos (beats per minute) to arrive at, one per segment.
+        :param whens: when each target is reached. See :meth:`set_beat_length_targets`.
+        :param curve_shapes: optional per-segment bends. See :meth:`set_beat_length_targets`.
+        :param truncate: whether to discard already-scheduled tempo changes first. See
+            :meth:`set_beat_length_targets`.
+        :param align_to: optional curvature-solved alignment of segment runs. See
+            :meth:`set_beat_length_targets`.
+        :raises ValueError: see :meth:`set_beat_length_targets`."""
         self._apply_targets(self.tempo_history.set_tempo_target,
-                            tempo_targets, whens, curve_shapes, truncate)
+                            tempo_targets, whens, curve_shapes, truncate, align_to)
 
     @_reschedule_after_tempo_change
     def apply_beat_length_function(self, function: Callable, domain_start: float = 0,

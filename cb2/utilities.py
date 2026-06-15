@@ -373,7 +373,8 @@ def set_beat_length_target(beat_length_target: float, when: 'ResolvableMoment', 
 
 
 def set_tempo_targets(tempo_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
-                      curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+                      curve_shapes: Sequence[float] = None, truncate: bool = True,
+                      align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
     """Set several tempo targets at once, building a multi-segment tempo curve on the current clock.
     Forwards to :meth:`Clock.set_tempo_targets`; acts on the currently active clock. Raises
     NoActiveClockError if there is no active clock.
@@ -385,15 +386,20 @@ def set_tempo_targets(tempo_targets: Sequence[float], whens: 'Sequence[Resolvabl
         increasing in clock-time.
     :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
     :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; bend whole runs of segments to land collectively on a phase/coordinate.
+        Pass a single :class:`Moment`/:class:`MetricPhaseTarget` to align the whole call at its end, or a
+        per-segment list of ``None``/targets where each non-``None`` entry closes and aligns the run since
+        the previous alignment. See :meth:`Clock.set_beat_length_targets`.
 
     This is one-shot. To loop a tempo shape, build a :class:`TempoEnvelope` and pass it to
     :func:`apply_tempo_envelope` with ``loop=True``."""
     _current_clock_or_raise("set_tempo_targets").set_tempo_targets(
-        tempo_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+        tempo_targets, whens, curve_shapes=curve_shapes, truncate=truncate, align_to=align_to)
 
 
 def set_rate_targets(rate_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
-                     curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+                     curve_shapes: Sequence[float] = None, truncate: bool = True,
+                     align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
     """Set several rate targets at once, building a multi-segment tempo curve on the current clock.
     Forwards to :meth:`Clock.set_rate_targets`; acts on the currently active clock. Raises
     NoActiveClockError if there is no active clock.
@@ -401,13 +407,16 @@ def set_rate_targets(rate_targets: Sequence[float], whens: 'Sequence[ResolvableM
     :param rate_targets: the rate to arrive at for each segment, in beats per second.
     :param whens: the arrival moment for each target (same length as ``rate_targets``).
     :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
-    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first."""
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; align whole runs of segments to a phase/coordinate. See
+        :meth:`Clock.set_beat_length_targets`."""
     _current_clock_or_raise("set_rate_targets").set_rate_targets(
-        rate_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+        rate_targets, whens, curve_shapes=curve_shapes, truncate=truncate, align_to=align_to)
 
 
 def set_beat_length_targets(beat_length_targets: Sequence[float], whens: 'Sequence[ResolvableMoment]',
-                            curve_shapes: Sequence[float] = None, truncate: bool = True) -> None:
+                            curve_shapes: Sequence[float] = None, truncate: bool = True,
+                            align_to: 'ResolvableMoment | Sequence[ResolvableMoment | None]' = None) -> None:
     """Set several beat-length targets at once, building a multi-segment tempo curve on the current clock.
     Forwards to :meth:`Clock.set_beat_length_targets`; acts on the currently active clock. Raises
     NoActiveClockError if there is no active clock.
@@ -415,9 +424,11 @@ def set_beat_length_targets(beat_length_targets: Sequence[float], whens: 'Sequen
     :param beat_length_targets: the beat length to arrive at for each segment, in seconds per beat.
     :param whens: the arrival moment for each target (same length as ``beat_length_targets``).
     :param curve_shapes: optional per-segment curve shapes (same length), or ``None`` for all-linear.
-    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first."""
+    :param truncate: if ``True``, discard any tempo curve already scheduled past the current beat first.
+    :param align_to: optional; align whole runs of segments to a phase/coordinate. See
+        :meth:`Clock.set_beat_length_targets`."""
     _current_clock_or_raise("set_beat_length_targets").set_beat_length_targets(
-        beat_length_targets, whens, curve_shapes=curve_shapes, truncate=truncate)
+        beat_length_targets, whens, curve_shapes=curve_shapes, truncate=truncate, align_to=align_to)
 
 
 def apply_tempo_function(function: Callable, domain_start: float = 0, domain_end: float = None,

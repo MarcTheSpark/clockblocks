@@ -30,6 +30,12 @@ class DurationUnits(StrEnum):
     BEATS = "beats"
     TIME = "time"
 
+    @property
+    def opposite(self) -> 'DurationUnits':
+        """The other axis: ``BEATS.opposite`` is ``TIME`` and vice versa. Used to get the *free* axis
+        (the one a `when` did not pin) when solving alignment."""
+        return DurationUnits.TIME if self is DurationUnits.BEATS else DurationUnits.BEATS
+
 
 class TempoUnits(StrEnum):
     """

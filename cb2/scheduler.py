@@ -120,14 +120,13 @@ class Scheduler(threading.Thread):
         # See _fast_forwarding_through (which sets the flag) and _end_fast_forward_if_active (which consumes it).
         self._was_fast_forwarding = False
 
-    def time(self, wake: bool = False) -> float:
-        """Return the scheduler's ideal time (time that should have passed by schedule).
+    def time(self) -> float:
+        """Return the scheduler's ideal time (the time that should have passed by schedule).
 
-        If wake is True, the scheduler is notified to update its state.
-        """
-        if wake:
-            with self._queue_change_condition:
-                self._queue_change_condition.notify_all()
+        This is *event-quantized*, not wall-clock-interpolated: it is bumped to each event's scheduled time
+        as that event executes (see :meth:`_execute_event`), so between events it holds the most recently
+        executed event's time. See :meth:`Clock.time` for what that means for reads taken between events /
+        from other threads."""
         return self._ideal_time
 
     def wall_time(self) -> float:
