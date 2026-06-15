@@ -483,7 +483,7 @@ class Clock:
     #                                        Boilerplate TempoHistory Functionality
     ##################################################################################################################
 
-    def time(self) -> float:
+    def time(self, projected: bool = False) -> float:
         """
         How much time has passed since this clock was created. Either in seconds, if this is the master
         clock, or in beats in the parent clock, if this clock was the result of a call to fork.
@@ -495,15 +495,28 @@ class Clock:
         position while its action runs sees the exact current value, but a read taken *between* events
         (from a non-clock thread) is frozen at the time of the most recent event.
 
+        :param projected: if ``True``, return a wall-clock-interpolated estimate of the current position
+            (via :meth:`Scheduler.projected_time`) instead of the committed, event-quantized value. Useful
+            for a smoothly-advancing read from a non-clock thread between events; the default ``False`` gives
+            the committed value that everything else in the family agrees on.
+        :return: the elapsed time (see units above).
+
         Does not mutate `tempo_history` (the committed pointer).
         """
-        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="time")
+        scheduler_time = self.scheduler.projected_time() if projected else self.scheduler.time()
+        return self.scheduler_to_clock_time(scheduler_time, desired_units="time")
 
-    def beat(self) -> float:
+    def beat(self, projected: bool = False) -> float:
         """
-        How many beats have passed since this clock was created. See `time()` for thread/laziness semantics.
+        How many beats have passed since this clock was created. See :meth:`time` for thread/laziness
+        semantics and for the ``projected`` flag.
+
+        :param projected: if ``True``, return a wall-clock-interpolated estimate of the current beat rather
+            than the committed, event-quantized value. See :meth:`time`.
+        :return: the elapsed beats.
         """
-        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
+        scheduler_time = self.scheduler.projected_time() if projected else self.scheduler.time()
+        return self.scheduler_to_clock_time(scheduler_time, desired_units="beats")
 
     def time_in_master(self) -> float:
         """

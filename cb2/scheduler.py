@@ -126,8 +126,28 @@ class Scheduler(threading.Thread):
         This is *event-quantized*, not wall-clock-interpolated: it is bumped to each event's scheduled time
         as that event executes (see :meth:`_execute_event`), so between events it holds the most recently
         executed event's time. See :meth:`Clock.time` for what that means for reads taken between events /
-        from other threads."""
+        from other threads. For a wall-clock-interpolated estimate of the current position, see
+        :meth:`projected_time`."""
         return self._ideal_time
+
+    def projected_time(self) -> float:
+        """A wall-clock-interpolated estimate of the *current* scheduler position, as opposed to :meth:`time`
+        which returns the time of the last executed event.
+
+        Computed as ``ideal_time + (perf_counter() - last_wake_time)``: the committed time plus how much real
+        time has elapsed since the scheduler last woke. This is the best estimate regardless of timing-policy,
+        since it incorporates any drift that remains uncorrected. It is capped at the next scheduled event's
+        time, since the position can't advance past an event that hasn't fired. While fast-forwarding (wall
+        time is decoupled) or before the scheduler has started, it falls back to the committed :meth:`time`."""
+        if self._last_wake_time is None or self._fast_forward_goal is not None:
+            return self._ideal_time
+        projected = self._ideal_time + (time.perf_counter() - self._last_wake_time)
+        try:
+            # don't claim to have advanced past the next event, which hasn't fired yet
+            return min(projected, self._queue[0].t)
+        except IndexError:
+            # empty queue: nothing scheduled to clamp against
+            return projected
 
     def wall_time(self) -> float:
         """
