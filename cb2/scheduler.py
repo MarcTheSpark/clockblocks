@@ -25,6 +25,62 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+class TimingBackend:
+    """
+    The scheduler's pluggable source of "now" and of the condition it uses for waiting.
+
+    The scheduler (and therefore an entire clock family) has exactly one timed sleep — the run loop's
+    wait on ``_queue_change_condition`` (see :meth:`Scheduler.run` STEP 1c). That condition is sourced from
+    the TimingBackend passed in the constructor, and defaults to a regular condition on a plain lock.
+    Similarly, all timing reads within the scheduler run through timing_backend.now().
+    The backend therefore defines both how time is perceived and how the scheduler waits.
+
+    See :class:`CompressedTime` for a backend used to run fast deterministic tests.
+    """
+
+    def now(self) -> float:
+        return time.perf_counter()
+
+    def get_sleep_condition(self) -> threading.Condition:
+        return threading.Condition(threading.Lock())
+
+
+def _default_time_backend() -> 'TimingBackend':
+    """The backend a :class:`Scheduler` uses when none is passed. The test suite overrides this module
+    attribute to inject a :class:`CompressedTime` family-wide (see ``tests/timing.py``)."""
+    return TimingBackend()
+
+
+class CompressedTime(TimingBackend):
+    """
+    A :class:`TimingBackend` that runs scaled real time: :meth:`now` advances ``factor`` times faster
+    and the sleep condition's ``wait()`` divides its timeout by ``factor``. A clock family on this backend
+    runs deterministically fast while cross-thread handshakes still happen as usual.
+
+    Caveat: handshake / context-switch overhead is *not* compressed, so a T-second wait costs roughly
+    ``T / factor + handshake_overhead``. Very large factors hit that floor and loosen achievable timing
+    tolerances (see ``tests/README.md``). 10x is a good default.
+    """
+
+    def __init__(self, factor: float = 10.0):
+        if factor <= 0:
+            raise ValueError("Compression factor must be positive.")
+        self.factor = factor
+        self._t0 = time.perf_counter()
+
+    def now(self) -> float:
+        return (time.perf_counter() - self._t0) * self.factor + self._t0
+
+    def get_sleep_condition(self) -> threading.Condition:
+        factor = self.factor
+
+        class _CompressedCondition(threading.Condition):
+            def wait(self, timeout=None):
+                return super().wait(None if timeout is None else timeout / factor)
+
+        return _CompressedCondition(threading.Lock())
+
+
 @dataclass(order=True)
 class QueueEvent:
     # Ordering is by t first, then by priority. action/metadata are not orderable.
@@ -51,7 +107,8 @@ class Scheduler(threading.Thread):
     """
 
     def __init__(self, timing_policy: float = 0.98, precise_timing: bool = False,
-                 spin_guard_duration: float = 0.0005, daemon: bool = True):
+                 spin_guard_duration: float = 0.0005, daemon: bool = True,
+                 time_backend: 'TimingBackend | None' = None):
         """
         :param timing_policy:
             0 -> Absolute timing (cut wait time to catch up to the schedule since start),
@@ -66,11 +123,15 @@ class Scheduler(threading.Thread):
             Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. The coarse
             OS wait stops this far short of the deadline and the remainder is spun out. Default 500µs.
         :param daemon: run as a daemon thread (the default) so it can't keep the process alive on its own.
+        :param time_backend:
+            The :class:`TimingBackend` supplying "now" and the sleep condition. Defaults to real
+            ``perf_counter`` time; tests pass :class:`CompressedTime` to run faster.
         """
         super().__init__(daemon=daemon)
         self.timing_policy = timing_policy
         self.precise_timing = precise_timing
         self.spin_guard_duration = spin_guard_duration
+        self._time = time_backend or _default_time_backend()
 
         # Heap-based queue for scheduled events.
         self._queue = []
@@ -85,11 +146,11 @@ class Scheduler(threading.Thread):
         # it did, a running action couldn't modify the queue. For the clock system that's essential:
         # actions routinely schedule wake-ups, fork, and reschedule after tempo changes.
         #
-        # The condition uses a plain (non-reentrant) Lock on purpose: every critical section here is flat,
-        # so accidental reentrancy would signal a bug and should deadlock loudly rather than be hidden by
-        # Condition's default RLock. We don't need to keep a reference to the lock object, since
-        # `with self._queue_change_condition:` acquires it directly.
-        self._queue_change_condition = threading.Condition(threading.Lock())
+        # The default condition (see TimingBackend) uses a plain (non-reentrant) Lock on purpose: every
+        # critical section here is flat, so accidental reentrancy would signal a bug and should deadlock
+        # loudly rather than be hidden by Condition's default RLock. We don't need to keep a reference to
+        # the lock object, since `with self._queue_change_condition:` acquires it directly.
+        self._queue_change_condition = self._time.get_sleep_condition()
         self._execution_lock = threading.Lock()
         self._killed = False
 
@@ -141,7 +202,7 @@ class Scheduler(threading.Thread):
         time is decoupled) or before the scheduler has started, it falls back to the committed :meth:`time`."""
         if self._last_wake_time is None or self._fast_forward_goal is not None:
             return self._ideal_time
-        projected = self._ideal_time + (time.perf_counter() - self._last_wake_time)
+        projected = self._ideal_time + (self._time.now() - self._last_wake_time)
         try:
             # don't claim to have advanced past the next event, which hasn't fired yet
             return min(projected, self._queue[0].t)
@@ -153,10 +214,11 @@ class Scheduler(threading.Thread):
         """
         Return the actual time elapsed since the scheduler started.
 
-        Measured with :func:`time.perf_counter` (a monotonic, high-resolution counter), so this is
-        true elapsed real time — never affected by NTP corrections (slews or steps) to CLOCK_REALTIME.
+        Measured through the :class:`TimingBackend`, which defaults to ``time.perf_counter``. `perf_counter` is
+        monotonic and high-resolution, so this is true elapsed real time, never affected by NTP corrections
+        (slews or steps) to CLOCK_REALTIME. Under a compressed backend it is scaled in step with everything else.
         """
-        return time.perf_counter() - self._start_time if self._start_time else 0.0
+        return self._time.now() - self._start_time if self._start_time else 0.0
 
     def set_fast_forward_goal(self, goal: float | None) -> None:
         """
@@ -249,7 +311,7 @@ class Scheduler(threading.Thread):
         change can't be lost, and why execution is wrapped in `_execution_lock` — are explained inline
         at STEP 1 and STEP 2 below.
         """
-        self._start_time = time.perf_counter()
+        self._start_time = self._time.now()
         self._last_wake_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
@@ -274,7 +336,7 @@ class Scheduler(threading.Thread):
 
                 # ~~~~~~ STEP 1b: Peek at the queue, and calculate wait duration to next scheduled event ~~~~~~
                 next_event = self._queue[0]
-                now = time.perf_counter()
+                now = self._time.now()
 
                 # Fast-forward short-circuits the wait. If we're fast-forwarding *through* this event (it
                 # lies before the goal), fire it with no wall-clock delay. Otherwise we're about to wait in
@@ -323,7 +385,7 @@ class Scheduler(threading.Thread):
             # Having exited the with `self._queue_change_condition` block and released the lock, we now check
             # if spin_deadline is set (i.e. if we're using precise_timing and within the guard band)
             if spin_deadline is not None:
-                while time.perf_counter() < spin_deadline and not self._killed:
+                while self._time.now() < spin_deadline and not self._killed:
                     # We poll _killed while spinning so a kill() during the spin tears the loop down promptly.
                     # Since _queue_change_condition was released, other threads are free to modify the queue here;
                     # however, we won't respond to those changes until after the (very very short) busy wait
@@ -449,4 +511,4 @@ class Scheduler(threading.Thread):
             event.action()
         except Exception as e:
             logger.exception(f"Error executing event '{event.metadata}': {e}")
-        self._last_wake_time = time.perf_counter()
+        self._last_wake_time = self._time.now()

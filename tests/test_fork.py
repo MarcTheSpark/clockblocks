@@ -1,8 +1,8 @@
-import time
 import threading
 import unittest
 
 from cb2.clock import Clock, ClockState
+from tests import timing
 from cb2.moment import Moment
 from cb2.utilities import current_clock
 
@@ -41,6 +41,41 @@ class ForkTestCase(unittest.TestCase):
         self.master.fork(proc)
         self.master.wait(0.05)
         self.assertEqual(ran, ["ok"])
+
+    # ---- nested fork (child, grandchild) timing ----
+
+    def test_nested_fork_grandchild_timing(self):
+        """
+        A grandchild forked under a child (which runs at a different tempo) keeps time relative to its
+        own parent's beat, and its waits land at the expected wall time given the compounded tempos.
+
+        master tempo 60 (beat==sec). child runs at tempo 120 (child beat = 0.5 sec). The child forks a
+        grandchild that waits 2 (child-)beats == 1.0 sec wall, then records the wall time and the parent
+        (child) beat it observed.
+        """
+        t0 = timing.stopwatch()
+        record = {}
+
+        def grandchild():
+            current_clock().wait(2.0)            # 2 grandchild beats; grandchild inherits child's tempo (120)
+            record["wall"] = timing.elapsed(t0)
+            record["parent_beat"] = current_clock().parent.beat()
+
+        def child():
+            c = current_clock()
+            c.tempo = 120
+            c.fork(grandchild)
+            c.wait(4.0)                          # keep the child (and thus the family) alive long enough
+
+        self.master.fork(child)
+        self.master.wait(2.5)                    # 2.5 sec wall — well past the grandchild's 1.0 sec wait
+
+        self.assertIn("wall", record)
+        # 2 beats at tempo 120 == 1.0 sec wall
+        self.assertAlmostEqual(record["wall"], 1.0, delta=0.1,
+                               msg=f"grandchild woke at {record['wall']:.3f}s, expected ~1.0s")
+        # the child advanced 2 beats by the time the grandchild woke
+        self.assertAlmostEqual(record["parent_beat"], 2.0, delta=0.15)
 
     # ---- scheduled fork: relative delay (Moment.after_beats) ----
 
@@ -90,10 +125,10 @@ class ForkTestCase(unittest.TestCase):
         now fire around wall_time = 0.5 sec, not 1.0 sec.
         """
         fire_wall_times = []
-        t0 = time.time()
+        t0 = timing.stopwatch()
 
         def proc():
-            fire_wall_times.append(time.time() - t0)
+            fire_wall_times.append(timing.elapsed(t0))
 
         self.master.fork(proc, when=Moment.after_beats(1.0))
         # change tempo before the scheduled fork fires

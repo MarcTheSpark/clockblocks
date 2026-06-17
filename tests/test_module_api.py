@@ -1,8 +1,8 @@
-import time
 import threading
 import unittest
 import warnings
 
+from tests import timing
 from cb2.clock import Clock, ClockState
 from cb2.exceptions import ClockblocksError, NoActiveClockError, NotMasterClockError
 from cb2.moment import Moment
@@ -63,9 +63,9 @@ class ModuleApiTestCase(unittest.TestCase):
             current_clock().wait(0.3)
 
         self.master.fork(child)
-        t0 = time.time()
+        t0 = timing.stopwatch()
         self.master.wait_for_children_to_finish()
-        elapsed = time.time() - t0
+        elapsed = timing.elapsed(t0)
         self.assertLess(elapsed, 0.7,
                         f"wait_for_children_to_finish over-waited ({elapsed:.3f}s) past the last child's end")
         self.assertGreater(elapsed, 0.2, "returned before the child could possibly have finished")
@@ -77,13 +77,13 @@ class ModuleApiTestCase(unittest.TestCase):
         child = self.master.fork(lambda: current_clock().wait(100))   # would otherwise block ~forever
 
         def killer():
-            time.sleep(0.2)
+            timing.sleep(0.2)
             child.kill()
 
         threading.Thread(target=killer).start()
-        t0 = time.time()
+        t0 = timing.stopwatch()
         self.master.wait_for_children_to_finish()
-        elapsed = time.time() - t0
+        elapsed = timing.elapsed(t0)
         self.assertLess(elapsed, 1.5,
                         f"kill of last child didn't release wait_for_children_to_finish ({elapsed:.3f}s)")
         self.assertEqual(self.master.children(), ())

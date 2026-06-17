@@ -1,4 +1,3 @@
-import time
 import threading
 import unittest
 
@@ -6,6 +5,7 @@ from cb2.clock import Clock
 from cb2.exceptions import DeadClockError
 from cb2.moment import Moment
 from cb2.utilities import current_clock
+from tests import timing
 
 
 class ScheduleActionTestCase(unittest.TestCase):
@@ -68,8 +68,8 @@ class ScheduleActionTestCase(unittest.TestCase):
         """Mirror of test_tempo_change_reschedules_pending_fork: a doubled tempo should make the
         action fire around wall=0.5s instead of 1.0s, since its target beat is preserved."""
         fire_wall_times = []
-        t0 = time.time()
-        self.master.schedule_action(lambda: fire_wall_times.append(time.time() - t0), when=Moment.after_beats(1.0))
+        t0 = timing.stopwatch()
+        self.master.schedule_action(lambda: fire_wall_times.append(timing.elapsed(t0)), when=Moment.after_beats(1.0))
         self.master.wait(0.05)
         self.master.tempo = 120
         self.master.wait(1.0)
@@ -84,8 +84,8 @@ class ScheduleActionTestCase(unittest.TestCase):
         a tempo change (the (value, units) metadata preserves units), so doubling the tempo does NOT
         make it fire early — it still lands near wall=1.0s."""
         fire_wall_times = []
-        t0 = time.time()
-        self.master.schedule_action(lambda: fire_wall_times.append(time.time() - t0),
+        t0 = timing.stopwatch()
+        self.master.schedule_action(lambda: fire_wall_times.append(timing.elapsed(t0)),
                                     when=Moment.after_time(1.0))
         self.master.wait(0.05)
         self.master.tempo = 120

@@ -1,10 +1,10 @@
 import threading
-import time
 import unittest
 
 from cb2.clock import Clock
 from cb2.exceptions import NotMasterClockError
 from cb2.utilities import current_clock
+from tests import timing
 
 
 class FastForwardTestCase(unittest.TestCase):
@@ -32,9 +32,9 @@ class FastForwardTestCase(unittest.TestCase):
     def test_full_fast_forward_makes_waits_instant(self):
         self.master.fast_forward()
         self.assertTrue(self.master.is_fast_forwarding())
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(10)  # 10 beats == 10 real seconds at the default rate
-        elapsed = time.time() - start
+        elapsed = timing.elapsed(start)
         self.assertLess(elapsed, 0.5, f"fast-forwarded wait took {elapsed:.3f}s, expected ~instant")
         self.assertAlmostEqual(self.master.beat(), 10, delta=0.05)
 
@@ -46,9 +46,9 @@ class FastForwardTestCase(unittest.TestCase):
         self.master.fast_forward(False)
         self.assertFalse(self.master.is_fast_forwarding())
 
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(1)  # 1 beat == 1 real second
-        elapsed = time.time() - start
+        elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 1.0, delta=0.3, msg=f"post-FF wait took {elapsed:.3f}s, expected ~1s")
         self.assertAlmostEqual(self.master.beat(), 6, delta=0.05)
 
@@ -58,15 +58,15 @@ class FastForwardTestCase(unittest.TestCase):
         self.master.fast_forward_to_beat(5)
         self.assertTrue(self.master.is_fast_forwarding())
 
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(3)  # entirely within the FF region -> instant
-        self.assertLess(time.time() - start, 0.5)
+        self.assertLess(timing.elapsed(start), 0.5)
         self.assertAlmostEqual(self.master.beat(), 3, delta=0.05)
         self.assertTrue(self.master.is_fast_forwarding())  # goal (beat 5) not yet reached
 
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(4)  # beat 3 -> 7, crossing the goal at 5: 2 beats FF, then 2 beats real time
-        elapsed = time.time() - start
+        elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 2.0, delta=0.3, msg=f"crossing wait took {elapsed:.3f}s, expected ~2s")
         self.assertFalse(self.master.is_fast_forwarding())
         self.assertAlmostEqual(self.master.beat(), 7, delta=0.05)
@@ -78,14 +78,14 @@ class FastForwardTestCase(unittest.TestCase):
         # scheduler-level case.)
         self.master.fast_forward_to_beat(15)
 
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(10)
-        self.assertLess(time.time() - start, 0.5, "wait fully before the goal should be instant")
+        self.assertLess(timing.elapsed(start), 0.5, "wait fully before the goal should be instant")
         self.assertTrue(self.master.is_fast_forwarding())
 
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(10)  # beat 10 -> 20, crossing the goal at 15
-        elapsed = time.time() - start
+        elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 5.0, delta=0.3, msg=f"crossing wait took {elapsed:.3f}s, expected ~5s")
         self.assertFalse(self.master.is_fast_forwarding())
         self.assertAlmostEqual(self.master.beat(), 20, delta=0.05)
@@ -108,7 +108,7 @@ class FastForwardTestCase(unittest.TestCase):
                 c.wait(1)        # events at beats 1,2,3,4 — before the goal, fast-forwarded (sets the flag)
             c.wait(6)            # next event at beat 10 — beyond the goal, waited out in real time
             fired["beat"] = c.beat()
-            fired["elapsed"] = time.time() - start
+            fired["elapsed"] = timing.elapsed(start)
 
         self.master.fast_forward_to_beat(5)  # goal at beat 5
         self.master.fork(proc)
@@ -117,9 +117,11 @@ class FastForwardTestCase(unittest.TestCase):
         # wakeup. The poked action is scheduled far in the future so it only notifies the condition — it
         # never competes to become the next event, so the early wakeup itself is the only thing under test.
         sched = self.master.scheduler
-        poke = threading.Timer(2.0, lambda: sched.schedule_action(1000.0, lambda: None, metadata="poke"))
+        # poke ~2 scheduler-seconds into the post-goal real-time tail (so /FACTOR in real terms)
+        poke = threading.Timer(2.0 / timing.FACTOR,
+                               lambda: sched.schedule_action(1000.0, lambda: None, metadata="poke"))
 
-        start = time.time()
+        start = timing.stopwatch()
         poke.start()
         self.master.wait(11)  # outlive the child
         poke.join()
@@ -131,9 +133,9 @@ class FastForwardTestCase(unittest.TestCase):
 
     def test_fast_forward_to_time_then_resume(self):
         self.master.fast_forward_to_time(4)  # master time is seconds
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(4, units="time")  # right up to the goal -> instant
-        self.assertLess(time.time() - start, 0.5)
+        self.assertLess(timing.elapsed(start), 0.5)
         self.assertAlmostEqual(self.master.time(), 4, delta=0.05)
         self.assertFalse(self.master.is_fast_forwarding())
 
@@ -160,9 +162,9 @@ class FastForwardTestCase(unittest.TestCase):
 
         self.master.fork(proc)
         self.master.fast_forward()
-        start = time.time()
+        start = timing.stopwatch()
         self.master.wait(5)
-        elapsed = time.time() - start
+        elapsed = timing.elapsed(start)
         self.assertLess(elapsed, 1.0, f"fast-forwarded family run took {elapsed:.3f}s")
         self.assertEqual(log, [0, 1, 2, 3, 4])
 

@@ -17,6 +17,7 @@
 from importlib.metadata import version, PackageNotFoundError
 
 from cb2.clock import Clock, ClockState, ClockFamilyOptions
+from cb2.scheduler import TimingBackend, CompressedTime
 from cb2.exceptions import ClockblocksError, ClockKilledError, DeadClockError, WrongThreadError, \
     NoActiveClockError, NotMasterClockError
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory

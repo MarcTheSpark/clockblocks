@@ -1,12 +1,14 @@
 """
-Real-time tests for cb2.scheduler.Scheduler. These use wall-clock `time.sleep` so they take a few
-seconds and are mildly jitter-sensitive. They should eventually be ported to `mock_time.py`'s
-compressed-time mocks for determinism — see PLAN.md Step 11.
+Tests for cb2.scheduler.Scheduler. Wall-clock paced, but compression-aware: the timing-measuring tests
+reason in the scheduler domain via tests/timing (so they honor CB2_TEST_COMPRESSION), while the
+lock/ordering tests (while_quiescent, priority) keep real sleeps since they gate on behavior, not measured
+time. The timing-policy tolerance scales with the factor (handshake jitter isn't compressed).
 """
 import unittest
 import time
 import threading
 from cb2.scheduler import Scheduler
+from tests import timing
 
 
 class TestScheduler(unittest.TestCase):
@@ -46,14 +48,14 @@ class TestScheduler(unittest.TestCase):
 
         self.sched = Scheduler(timing_policy=1.0)
         self.sched.start()
-        start = time.time()
+        start = timing.stopwatch()
 
         def action():
-            fired_at["t"] = time.time() - start
+            fired_at["t"] = timing.elapsed(start)
             fired.set()
 
         self.sched.schedule_action(5.0, action, metadata="far")
-        time.sleep(0.2)  # let the scheduler peek the far event and enter its timed wait
+        timing.sleep(0.2)  # let the scheduler peek the far event and enter its timed wait (scheduler-seconds)
         self.sched.reschedule(lambda e: e.metadata == "far", lambda e: 0.3)
 
         self.assertTrue(fired.wait(timeout=2), "event did not fire promptly after reschedule")
@@ -103,24 +105,26 @@ class TestScheduler(unittest.TestCase):
         tested_times = {}
 
         def action(label, duration=0):
-            tested_times[label] = time.time() - start
+            tested_times[label] = timing.elapsed(start)
             if duration:
-                time.sleep(duration)
+                timing.sleep(duration)   # off-clock work, in scheduler-seconds
 
         self.sched = Scheduler(timing_policy=timing_policy)
         self.sched.start()
-        start = time.time()
+        start = timing.stopwatch()
 
         for i, (sched_time, duration) in enumerate(zip(scheduled_times, action_durations)):
             self.sched.schedule_action(sched_time, lambda i=i, d=duration: action(f"event_{i}", d))
 
-        time.sleep(max(scheduled_times) + 1)
+        timing.sleep(max(scheduled_times) + 1)
         self.sched.kill()
         self.sched.join()
 
+        # Achievable precision loosens with the compression factor (handshake jitter isn't compressed),
+        # so the tolerance scales: an unchanged 0.01 s at the default factor of 1.
         for i, expected in enumerate(expected_times):
             actual = tested_times[f"event_{i}"]
-            self.assertAlmostEqual(actual, expected, delta=0.01, msg=f"Mismatch for event_{i}")
+            self.assertAlmostEqual(actual, expected, delta=0.01 * timing.FACTOR, msg=f"Mismatch for event_{i}")
 
     def test_timing_policy_relative(self):
         self._test_timing_policy(1.0)

@@ -36,7 +36,7 @@ from itertools import count
 from typing import Callable, Sequence, Iterator
 from copy import deepcopy
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory
-from cb2.scheduler import Scheduler
+from cb2.scheduler import Scheduler, TimingBackend
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
@@ -87,6 +87,7 @@ class ClockFamilyOptions:
     spin_guard_duration: float = 0.0005
     pool_size: int = 200
     prewarm_pool: int = 10
+    time_backend: 'TimingBackend | None' = None  # None -> real perf_counter time; tests pass CompressedTime
 
     def __post_init__(self):
         if not 0.0 <= self.timing_policy <= 1.0:
@@ -258,7 +259,8 @@ class Clock:
         else:
             self.scheduler = Scheduler(timing_policy=options.timing_policy,
                                        precise_timing=options.precise_timing,
-                                       spin_guard_duration=options.spin_guard_duration, daemon=True)
+                                       spin_guard_duration=options.spin_guard_duration, daemon=True,
+                                       time_backend=options.time_backend)
             self.scheduler.start()
 
         self._scheduler_park_condition = threading.Condition()

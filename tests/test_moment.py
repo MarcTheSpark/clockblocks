@@ -1,8 +1,8 @@
-import time
 import unittest
 
 from cb2.clock import Clock
 from cb2.moment import Moment, to_absolute_moment
+from tests import timing
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
 
@@ -109,9 +109,9 @@ class MomentTestCase(unittest.TestCase):
 
     def test_wait_until_past_returns_immediately(self):
         self.master.wait(0.1)
-        t0 = time.time()
+        t0 = timing.stopwatch()
         self.master.wait_until(0.05)          # already in the past
-        self.assertLess(time.time() - t0, 0.05, "wait_until(past) should return ~immediately")
+        self.assertLess(timing.elapsed(t0), 0.05, "wait_until(past) should return ~immediately")
         self.assertGreaterEqual(self.master.beat(), 0.1, "must not rewind the clock")
 
     def test_wait_accepts_moment(self):
