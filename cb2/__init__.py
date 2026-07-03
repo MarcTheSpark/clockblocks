@@ -23,7 +23,7 @@ from cb2.exceptions import ClockblocksError, ClockKilledError, DeadClockError, W
 from cb2.tempo_envelope import TempoEnvelope, TempoHistory
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.moment import Moment, ResolvableMoment
-from cb2.time_stamp import TimeStamp
+from cb2.time_stamp import TimeStamp, TimeStampInterval
 from cb2.utilities import current_clock, wait, wait_forever, wait_for_children_to_finish, fork, fork_unsynchronized, \
     set_tempo, set_rate, set_beat_length, get_tempo, get_rate, get_beat_length, \
     set_tempo_target, set_rate_target, set_beat_length_target, \
