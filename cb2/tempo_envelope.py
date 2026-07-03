@@ -367,6 +367,15 @@ class TempoEnvelope(Envelope):
             return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
                                                  curve_shapes)
 
+    def is_default(self) -> bool:
+        """
+        True if this is the trivial default tempo — a constant 60 bpm (rate 1.0) with no duration, i.e.
+        structurally identical to a freshly-constructed ``TempoEnvelope()``. (Note this is stricter than
+        "functionally constant at 60": a flat-60 envelope that carries a real duration or extra segments is
+        *not* default (and worth surfacing for debugging)
+        """
+        return self._to_dict() == {'levels': (1.0, 1.0), 'length': 0}
+
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(
             TempoEnvelope.convert_units(self.levels, TempoUnits.BEATLENGTH, TempoUnits.TEMPO),
