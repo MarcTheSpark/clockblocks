@@ -1072,8 +1072,8 @@ class Clock:
         For master, this is just the tempo_history as-is. Otherwise we walk the inheritance chain:
         deepcopy each clock's tempo_history, position each at the beat it has when the child is at
         `start_beat`, then step the child forward `step_size` at a time and cascade the resulting
-        time-deltas up through each parent. Final delta in master seconds / step_size = the
-        effective beat_length sample, which we feed into an output curve.
+        time-deltas up through each parent. Final delta in master (seconds) / step_size (beats in this clock)
+        gives us a sample of absolute beat length, which we use to build up an absolute tempo envelope.
         """
         if self.is_master():
             return self.tempo_history.as_tempo_envelope()

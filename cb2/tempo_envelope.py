@@ -508,7 +508,6 @@ class TempoHistory(TempoEnvelope):
         if self.follow_func_or_envelope_loop is not None:
             while self.follow_func_or_envelope_loop.current_end_beat < beat:
                 self._extend_function_or_envelope_loop()
-        self.extend_to(beat)
         if beat >= self._beat:
             time_at_beat = self._t + self.integrate_interval(self._beat, beat)
         else:
@@ -530,7 +529,6 @@ class TempoHistory(TempoEnvelope):
             beat_at_time = self.get_upper_integration_bound(self._beat, t - self._t, max_error=1e-14)
         else:
             beat_at_time = self.get_upper_integration_bound(0, t, max_error=1e-14)
-        self.extend_to(beat_at_time)
         return snap_float_to_nice_decimal(beat_at_time)
 
     ##################################################################################################################
