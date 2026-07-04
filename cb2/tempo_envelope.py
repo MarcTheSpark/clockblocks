@@ -379,7 +379,7 @@ class TempoEnvelope(Envelope):
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(
             TempoEnvelope.convert_units(self.levels, TempoUnits.BEATLENGTH, TempoUnits.TEMPO),
-            self.durations, self.curve_shapes)
+            self.get_durations(rounded=True), self.curve_shapes)
 
 
 @dataclasses.dataclass
