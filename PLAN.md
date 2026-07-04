@@ -103,7 +103,7 @@ A `tests/README.md` frames these as a low-effort regression aid *secondary* to S
 ## Other Features to consider
 
 - Drive the scheduler's "now" from an external thread rather than wall-clock sleep — e.g. follow Logic / a DAW transport instead of free-running. Scheduler-side change only: replace `sleep_until(t)` with "wait until the external source signals scheduler-time `t`" via an injectable time source (default = monotonic clock). Open questions: startup offset/rate mapping; host tempo changes as continuous mapping vs discrete tick stream. Worth prototyping against MIDI clock / MTC first.
-
+- Allow the clock system/scheduler to pause and restart?
 
 ## Done criteria
 
