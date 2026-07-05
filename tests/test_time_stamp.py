@@ -16,12 +16,12 @@ class TimeStampTestCase(unittest.TestCase):
 
     def test_implicit_clock_from_thread(self):
         # master's __init__ binds itself as __clock__ on the test thread, so TimeStamp() picks it up
-        ts = TimeStamp()
+        ts = TimeStamp.now()
         self.assertIs(ts._master, self.master)
 
     def test_master_only_round_trip(self):
         self.master.wait(2.0)
-        ts = TimeStamp(self.master)
+        ts = TimeStamp.now(self.master)
         self.assertAlmostEqual(ts.beat_in_clock(self.master), 2.0, places=6)
         self.assertAlmostEqual(ts.time_in_clock(self.master), 2.0, places=6)
         self.assertAlmostEqual(ts.time_in_master, 2.0, places=6)
@@ -33,7 +33,7 @@ class TimeStampTestCase(unittest.TestCase):
             from cb2.utilities import current_clock
             c = current_clock()
             c.wait(0.1)
-            events.append(TimeStamp(c))
+            events.append(TimeStamp.now(c))
 
         self.master.fork(child_proc)
         self.master.wait(0.2)
@@ -53,7 +53,7 @@ class TimeStampTestCase(unittest.TestCase):
             c = current_clock()
             c.tempo = 120
             c.wait(0.4)  # 0.2s scheduler time
-            events.append((c, TimeStamp(c)))
+            events.append((c, TimeStamp.now(c)))
 
         self.master.fork(child_proc)
         self.master.wait(0.3)
@@ -64,7 +64,7 @@ class TimeStampTestCase(unittest.TestCase):
         self.assertAlmostEqual(ts.time_in_master, 0.2, places=4)
 
     def test_foreign_family_rejected(self):
-        ts = TimeStamp(self.master)
+        ts = TimeStamp.now(self.master)
         # A second master is a separate family on its own scheduler — foreign by construction.
         other = Clock(name="other")
         self.addCleanup(other.kill)
@@ -74,9 +74,9 @@ class TimeStampTestCase(unittest.TestCase):
             ts.time_in_clock(other)
 
     def test_ordering_and_equality(self):
-        ts1 = TimeStamp(self.master)
+        ts1 = TimeStamp.now(self.master)
         self.master.wait(0.5)
-        ts2 = TimeStamp(self.master)
+        ts2 = TimeStamp.now(self.master)
         self.assertLess(ts1, ts2)
         self.assertNotEqual(ts1, ts2)
         ts1_again = TimeStamp.__new__(TimeStamp)

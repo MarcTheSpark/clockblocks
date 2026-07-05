@@ -13,8 +13,8 @@ from cb2.utilities import current_clock
 class ThreadPoolTestCase(unittest.TestCase):
     """
     Tests for the Step-9 fork thread pool: the master owns a shared ThreadPool that backs every
-    fork() and fork_unsynchronized() in the family, with a bounded semaphore that falls back to a
-    raw Thread (with a warning) when the pool is exhausted.
+    fork() in the family, with a bounded semaphore that falls back to a raw Thread (with a warning)
+    when the pool is exhausted.
 
     Fresh master + scheduler per test (see test_fork.py / test_kill.py for the isolation pattern).
     """
@@ -119,23 +119,6 @@ class ThreadPoolTestCase(unittest.TestCase):
         release.set()
         self.master.wait(0.05)
 
-    # ---- fork_unsynchronized via the pool ----
-
-    def test_fork_unsynchronized_runs_on_pool_with_no_clock(self):
-        self.master = Clock(name="master")
-        result = {}
-        done = threading.Event()
-
-        def proc():
-            result["clock"] = current_clock()
-            result["ident"] = threading.get_ident()
-            done.set()
-
-        self.master.fork_unsynchronized(proc)
-        self.assertTrue(done.wait(1.0))
-        self.assertIsNone(result["clock"])              # unsynchronized: no active clock
-        self.assertNotEqual(result["ident"], threading.get_ident())
-
     # ---- error handling releases pool capacity ----
 
     def test_pool_task_error_releases_semaphore(self):
@@ -153,7 +136,7 @@ class ThreadPoolTestCase(unittest.TestCase):
             # subsequent submit would warn + fall back. assertNoLogs confirms that never happens.
             with self.assertNoLogs(level="WARNING"):
                 for _ in range(5):
-                    self.master.fork_unsynchronized(boom)
+                    self.master.fork(boom)
                     time.sleep(0.05)  # let the task raise and the error_callback release the slot
 
 

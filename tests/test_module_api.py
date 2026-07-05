@@ -14,9 +14,8 @@ from cb2.utilities import current_clock
 
 class ModuleApiTestCase(unittest.TestCase):
     """
-    Tests for the Step-5 surface: Clock.fork_unsynchronized / wait_forever /
-    wait_for_children_to_finish / run_as_server, and the module-level wrappers in cb2.utilities
-    that delegate to current_clock().
+    Tests for the Step-5 surface: Clock.wait_forever / wait_for_children_to_finish / run_as_server,
+    and the module-level wrappers in cb2.utilities that delegate to current_clock().
 
     Same isolation pattern as test_fork.py / test_kill.py: fresh master + fresh scheduler per test.
     The master's __init__ binds it as current_clock() on this (the test) thread.
@@ -107,22 +106,6 @@ class ModuleApiTestCase(unittest.TestCase):
                          "code after wait_forever() ran; it should have raised ClockKilledError instead")
         self.assertIs(child._state, ClockState.DEAD)
 
-    # ---- fork_unsynchronized ----
-
-    def test_fork_unsynchronized_runs_with_no_clock_bound(self):
-        result = {}
-        done = threading.Event()
-
-        def proc():
-            result["clock"] = current_clock()   # no clock is bound to an unsynchronized thread
-            done.set()
-
-        self.master.fork_unsynchronized(proc)
-        self.assertTrue(done.wait(timeout=3))
-        self.assertIsNone(result["clock"])
-        # it is not a child clock of the master
-        self.assertEqual(self.master.children(), ())
-
     # ---- module-level fork ----
 
     def test_module_fork_uses_current_clock(self):
@@ -202,39 +185,6 @@ class ModuleApiTestCase(unittest.TestCase):
     def test_module_wait_for_children_without_clock_raises(self):
         err = self._capture_on_fresh_thread(utilities.wait_for_children_to_finish)
         self.assertIsInstance(err, NoActiveClockError)
-
-    # ---- unsynchronized threads may use the sleep-based waits ----
-
-    def test_unsynchronized_thread_may_wait(self):
-        seen = {}
-        done = threading.Event()
-
-        def proc():
-            seen["clock"] = current_clock()   # None: not a real clock
-            utilities.wait(0.02)              # allowed on an unsynchronized thread (real sleep)
-            done.set()
-
-        self.master.fork_unsynchronized(proc)
-        self.assertTrue(done.wait(timeout=3),
-                        "unsynchronized thread did not complete its sleep-based wait()")
-        self.assertIsNone(seen["clock"])
-
-    def test_unsynchronized_thread_cannot_fork(self):
-        # a fork_unsynchronized thread has no clock to parent children, so module fork() must raise
-        err = threading.Event()
-        captured = {}
-
-        def proc():
-            try:
-                utilities.fork(lambda: None)
-            except NoActiveClockError as e:
-                captured["err"] = e
-            finally:
-                err.set()
-
-        self.master.fork_unsynchronized(proc)
-        self.assertTrue(err.wait(timeout=3))
-        self.assertIn("err", captured)
 
     # ---- tempo helpers (Step 13): act on the CURRENT clock, raise off-thread ----
 

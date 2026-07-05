@@ -17,7 +17,6 @@
 from __future__ import annotations
 import math
 import threading
-import time
 from typing import TYPE_CHECKING, Callable, Sequence, Union
 from cb2.exceptions import NoActiveClockError
 if TYPE_CHECKING:
@@ -82,49 +81,12 @@ class _PrintColors:
     END = '\033[0m'
 
 
-class _UnsynchronizedSentinel:
-    """Marker bound (as a thread's ``__clock__``) to a thread spawned by fork_unsynchronized. Such a
-    thread has no clock — current_clock() is None and it can't fork child clocks — but it is allowed
-    to use the sleep-based wait()/wait_forever(), which become plain real-time sleeps."""
-    def __repr__(self):
-        return "<unsynchronized>"
-
-
-_UNSYNCHRONIZED = _UnsynchronizedSentinel()
-
-
-def _thread_clock_attr():
-    """The raw ``__clock__`` tag on the current thread: a Clock, the _UNSYNCHRONIZED sentinel, or
-    None (an ordinary thread that never entered the clock system). wait() needs the sentinel/None
-    distinction, which current_clock() flattens away."""
-    return getattr(threading.current_thread(), '__clock__', None)
-
-
 def current_clock() -> clock.Clock | None:
     """
     Get the :class:`Clock` active on the current thread, or None if none is active.
     """
-    # The clock is attached to its thread (as __clock__) when the thread is started. A thread spawned by
-    # fork_unsynchronized carries the _UNSYNCHRONIZED sentinel instead; we report that as None here.
-    c = _thread_clock_attr()
-    return None if c is _UNSYNCHRONIZED else c
-
-
-def _spawn_unsynchronized(forked_function: Callable, args: Sequence, kwargs: dict) -> None:
-    """
-    Start `forked_function` on a new daemon thread tagged as unsynchronized, so it may use the
-    sleep-based waits (current_clock() stays None there). Backs Clock.fork_unsynchronized.
-
-    This is currently used in scamp for parameter curve automation; hopefully we will be able to
-    replace this with scheduled actions and remove this in future.
-    """
-    kwargs = {} if kwargs is None else kwargs
-
-    def runner():
-        threading.current_thread().__clock__ = _UNSYNCHRONIZED
-        forked_function(*args, **kwargs)
-
-    threading.Thread(target=runner, daemon=True).start()
+    # The clock is attached to its thread (as __clock__) when the thread is started.
+    return getattr(threading.current_thread(), '__clock__', None)
 
 
 ##################################################################################################################
@@ -143,18 +105,14 @@ def wait(dt: 'float | ResolvableMoment', units="beats") -> None:
     ``dt`` may also be a :class:`Moment` or :class:`MetricPhaseTarget`, in which case it is resolved
     directly and ``units`` is ignored — e.g. ``wait(Moment.at_beat(8))``.
 
-    On an unsynchronized thread (one spawned by :func:`fork_unsynchronized`) there is no clock, so this
-    falls back to a plain real-time :func:`time.sleep`; ``units`` is ignored and ``dt`` must be a number
-    of real seconds. On an ordinary thread that never entered the clock system, raises NoActiveClockError.
+    On a thread with no active clock, raises NoActiveClockError.
 
     :param dt: how long to wait — a number (in beats, or seconds if ``units="time"``), or a Moment /
         MetricPhaseTarget to wait until.
     :param units: either ``"beats"`` or ``"time"`` (ignored when ``dt`` is a Moment).
     """
-    c = _thread_clock_attr()
-    if c is _UNSYNCHRONIZED:
-        time.sleep(dt)  # no clock => no tempo; units is ignored (dt is real seconds)
-    elif c is not None:
+    c = current_clock()
+    if c is not None:
         c.wait(dt, units=units)
     else:
         raise NoActiveClockError("wait() called on a thread with no active clock.")
@@ -164,14 +122,10 @@ def wait_forever() -> None:
     """
     Block forever on the currently active clock (see :meth:`Clock.wait_forever`) — usually to keep the
     main script alive while child clocks do the work. Unblocks only if the clock is killed, raising
-    :class:`ClockKilledError`. On an unsynchronized thread, sleeps indefinitely; on an ordinary
-    (non-clock) thread, raises NoActiveClockError.
+    :class:`ClockKilledError`. On a thread with no active clock, raises NoActiveClockError.
     """
-    c = _thread_clock_attr()
-    if c is _UNSYNCHRONIZED:
-        while True:
-            time.sleep(1)
-    elif c is not None:
+    c = current_clock()
+    if c is not None:
         c.wait_forever()
     else:
         raise NoActiveClockError("wait_forever() called on a thread with no active clock.")
@@ -187,24 +141,6 @@ def wait_for_children_to_finish() -> None:
     if c is None:
         raise NoActiveClockError("wait_for_children_to_finish() called on a thread with no active clock.")
     c.wait_for_children_to_finish()
-
-
-def fork_unsynchronized(forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
-    """
-    Run ``forked_function`` on a separate, asynchronous thread that is *not* a child clock — essentially
-    the same as spinning up a new thread, except that (when there is an active clock) it makes use of the
-    clock system's thread pool. If there is no active clock on this thread, falls back to a plain
-    ``threading.Thread``.
-
-    :param forked_function: the function to run on the new thread.
-    :param args: positional arguments passed to ``forked_function``.
-    :param kwargs: keyword arguments passed to ``forked_function``.
-    """
-    c = current_clock()
-    if c is None:
-        _spawn_unsynchronized(forked_function, args, kwargs or {})
-    else:
-        c.fork_unsynchronized(forked_function, args=args, kwargs=kwargs)
 
 
 def fork(forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,

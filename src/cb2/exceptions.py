@@ -50,8 +50,7 @@ class WrongThreadError(ClockblocksError):
 class NoActiveClockError(ClockblocksError):
     """Raised when a clock operation (the module-level wait/fork/etc.) is attempted from a thread
     that has no clock active on it. Establish one with fork() / run_as_server(), or call the method
-    on a Clock object directly. (Threads spawned by fork_unsynchronized are exempt for the
-    sleep-based waits — see fork_unsynchronized.)"""
+    on a Clock object directly."""
     pass
 
 

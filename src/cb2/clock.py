@@ -40,7 +40,7 @@ from cb2.scheduler import Scheduler, TimingBackend
 from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
 from cb2.metric_phase import MetricPhaseTarget
 from cb2.enums import DurationUnits
-from cb2.utilities import _PrintColors, current_clock, _UNSYNCHRONIZED
+from cb2.utilities import _PrintColors, current_clock
 from cb2.exceptions import (ClockKilledError, DeadClockError, WrongThreadError,
                             NotMasterClockError)
 import textwrap
@@ -74,9 +74,9 @@ class ClockFamilyOptions:
     :param spin_guard_duration:
         Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. Default 500µs.
     :param pool_size:
-        Max worker threads in the family's shared ThreadPoolExecutor, used for every call to ``fork``
-        or ``fork_unsynchronized``. Workers are created lazily up to this cap; past it, a forked
-        clock falls back to a plain thread and warns that the pool has run out of threads.
+        Max worker threads in the family's shared ThreadPoolExecutor, used for every call to ``fork``.
+        Workers are created lazily up to this cap; past it, a forked clock falls back to a plain thread
+        and warns that the pool has run out of threads.
     :param prewarm_pool:
         How many pool workers to spin up eagerly at construction, front-loading the (sub-millisecond)
         thread-creation cost of the first that-many forks. Clamped to ``pool_size``; 0 disables, leaving
@@ -271,8 +271,8 @@ class Clock:
         self._waiting_for_children = False
 
         if self.is_master():
-            # The whole family shares one thread pool, owned by the master, that carries out every fork and
-            # fork_unsynchronized in the family (see _run_in_pool). Reusing pooled workers is significantly cheaper
+            # The whole family shares one thread pool, owned by the master, that carries out every fork
+            # in the family (see _run_in_pool). Reusing pooled workers is significantly cheaper
             # than spawning a fresh Thread per fork (which is important for rapid note playback in SCAMP, since
             # each note playback is done with a fork). That said, benchmarking suggests the actual time-cost of
             # raw thread creation is pretty small; it's not clear if this is worth it.
@@ -1279,9 +1279,9 @@ class Clock:
 
     def _run_in_pool(self, target: Callable, args: Sequence | None, kwargs: dict | None) -> None:
         """
-        Run `target` on the family's shared thread pool (owned by the master). Backs fork() and
-        fork_unsynchronized(). If the pool is fully occupied, fall back to a plain daemon Thread
-        and warn, rather than blocking the caller.
+        Run `target` on the family's shared thread pool (owned by the master). Backs fork().
+        If the pool is fully occupied, fall back to a plain daemon Thread and warn, rather than
+        blocking the caller.
         """
         master = self.master
         kwargs = {} if kwargs is None else kwargs
@@ -1473,28 +1473,6 @@ class Clock:
             moment = to_absolute_moment(when, self, allow_number=False)
             self._schedule_at(moment, lambda: action(*args, **kwargs), self._priority,
                               description=f"Scheduled action on {self}")
-
-    def fork_unsynchronized(self, forked_function: Callable, args: Sequence = (), kwargs: dict = None) -> None:
-        """
-        Run `forked_function` on a plain background thread — *not* a child clock, and not synchronized
-        to musical time. Use this for side work (I/O, GUI callbacks, etc.) that shouldn't participate
-        in the scheduler. `current_clock()` is None inside it and it cannot fork child clocks, but its
-        thread is tagged "unsynchronized" so it *may* still call the sleep-based wait()/wait_forever()
-        — those become plain real-time sleeps (no tempo, so `units` is ignored).
-
-        Runs on the family's shared thread pool (see :meth:`_run_in_pool`), so spawning is cheap. (The
-        module-level :func:`fork_unsynchronized`, by contrast, has no clock and so no pool to draw on,
-        and falls back to a plain daemon Thread via :func:`_spawn_unsynchronized`.)
-        """
-        kwargs = {} if kwargs is None else kwargs
-
-        def _unsynchronized_runner(*a, **kw):
-            # Tag this (possibly reused) pool worker as unsynchronized so current_clock() is None and the
-            # sleep-based waits are permitted. A later _fork_wrapper / runner on the same worker re-tags it.
-            threading.current_thread().__clock__ = _UNSYNCHRONIZED
-            forked_function(*a, **kw)
-
-        self._run_in_pool(_unsynchronized_runner, args, kwargs)
 
     def wait_forever(self) -> None:
         """
