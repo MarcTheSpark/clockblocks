@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "clockblocks"
-version = "0.6.10"
-description = "A python library for controlling the flow of musical time."
+name = "cb2"
+version = "0.1.0"
+description = "Reimplementation of clockblocks library"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-only"
@@ -17,9 +17,6 @@ authors = [
 dependencies = [
     "expenvelope>=0.7.3"
 ]
-
-[project.urls]
-"Source Code" = "https://github.com/MarcTheSpark/clockblocks"
 
 [tool.setuptools]
 zip-safe = false

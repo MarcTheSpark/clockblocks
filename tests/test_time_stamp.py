@@ -1,0 +1,89 @@
+import unittest
+
+from cb2.clock import Clock
+from cb2.time_stamp import TimeStamp
+
+
+class TimeStampTestCase(unittest.TestCase):
+    """Unit tests for TimeStamp: capture-now then resolve into any clock's frame."""
+
+    def setUp(self):
+        self.master = Clock(name="master")
+
+    def tearDown(self):
+        # master.kill() ends the family and (master being 1:1 with its scheduler) stops that thread.
+        self.master.kill()
+
+    def test_implicit_clock_from_thread(self):
+        # master's __init__ binds itself as __clock__ on the test thread, so TimeStamp() picks it up
+        ts = TimeStamp.now()
+        self.assertIs(ts._master, self.master)
+
+    def test_master_only_round_trip(self):
+        self.master.wait(2.0)
+        ts = TimeStamp.now(self.master)
+        self.assertAlmostEqual(ts.beat_in_clock(self.master), 2.0, places=6)
+        self.assertAlmostEqual(ts.time_in_clock(self.master), 2.0, places=6)
+        self.assertAlmostEqual(ts.time_in_master, 2.0, places=6)
+
+    def test_child_clock_resolution(self):
+        events = []
+
+        def child_proc():
+            from cb2.utilities import current_clock
+            c = current_clock()
+            c.wait(0.1)
+            events.append(TimeStamp.now(c))
+
+        self.master.fork(child_proc)
+        self.master.wait(0.2)
+        self.assertEqual(len(events), 1)
+        ts = events[0]
+        # at child beat 0.1 (default tempo), scheduler_time ~ 0.1
+        self.assertAlmostEqual(ts.beat_in_clock(self.master), 0.1, places=4)
+        self.assertAlmostEqual(ts.time_in_master, 0.1, places=4)
+
+    def test_resolution_across_clocks_with_tempo(self):
+        # child at tempo 120 (2 beats/sec); master at default tempo 60 (1 beat/sec).
+        # After 0.2s of scheduler time, master is at beat 0.2, child is at beat 0.4.
+        events = []
+
+        def child_proc():
+            from cb2.utilities import current_clock
+            c = current_clock()
+            c.tempo = 120
+            c.wait(0.4)  # 0.2s scheduler time
+            events.append((c, TimeStamp.now(c)))
+
+        self.master.fork(child_proc)
+        self.master.wait(0.3)
+        child, ts = events[0]
+        self.assertAlmostEqual(ts.beat_in_clock(child), 0.4, places=4)
+        self.assertAlmostEqual(ts.time_in_clock(child), 0.2, places=4)
+        self.assertAlmostEqual(ts.beat_in_clock(self.master), 0.2, places=4)
+        self.assertAlmostEqual(ts.time_in_master, 0.2, places=4)
+
+    def test_foreign_family_rejected(self):
+        ts = TimeStamp.now(self.master)
+        # A second master is a separate family on its own scheduler — foreign by construction.
+        other = Clock(name="other")
+        self.addCleanup(other.kill)
+        with self.assertRaises(ValueError):
+            ts.beat_in_clock(other)
+        with self.assertRaises(ValueError):
+            ts.time_in_clock(other)
+
+    def test_ordering_and_equality(self):
+        ts1 = TimeStamp.now(self.master)
+        self.master.wait(0.5)
+        ts2 = TimeStamp.now(self.master)
+        self.assertLess(ts1, ts2)
+        self.assertNotEqual(ts1, ts2)
+        ts1_again = TimeStamp.__new__(TimeStamp)
+        ts1_again.scheduler_time = ts1.scheduler_time
+        ts1_again._master = ts1._master
+        self.assertEqual(ts1, ts1_again)
+
+
+if __name__ == "__main__":
+    unittest.main()

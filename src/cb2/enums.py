@@ -1,13 +1,3 @@
-"""
-Clockblocks is a Python library for controlling the flow of musical time, designed with musical applications in mind.
-Contents of this package include the `clock` module, which defines the central :class:`~clockblocks.Clock`
-class; the `tempo_envelope` module, which defines the :class:`~tempo_envelope.TempoEnvelope` class for mapping
-out how a clock's tempo changes with time, as well as the :class:`~tempo_envelope.MetricPhaseTarget` class
-for specifying desired metric phases; the `debug` module, which provides utilities for logging in a way that
-clarifies which clock logging messages are occurring under; and the `utilities` module, which contains a few
-utility functions.
-"""
-
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 #  This file is part of SCAMP (Suite for Computer-Assisted Music in Python)                      #
 #  Copyright © 2020 Marc Evanstein <marc@marcevanstein.com>.                                     #
@@ -24,11 +14,39 @@ utility functions.
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
-from .clock import Clock, TimeStamp, DeadClockError, ClockKilledError
-from .tempo_envelope import TempoEnvelope, TempoHistory, MetricPhaseTarget
-from .utilities import sleep_precisely, sleep_precisely_until, current_clock, wait, fork, fork_unsynchronized, \
-    wait_forever, wait_for_children_to_finish
-import importlib.metadata
+from enum import StrEnum
 
-__version__ = importlib.metadata.version('clockblocks')
-__author__ = importlib.metadata.metadata('clockblocks')['Author']
+
+class DurationUnits(StrEnum):
+    """
+    Units with which we measure duration or Moment positioning. Either musical BEATS, or the integrated
+    TIME taken by those beats at the clock's tempo.
+
+    Note that time is only true seconds on the master clock.
+    Within a clock tree, a child's TIME is the same as its parent's BEATS, and is affected by the rates of
+    all clocks above it in the tree. Use :meth:`~cb2.clock.Clock.time_in_master` for true seconds.
+
+    A ``StrEnum``, so the bare strings "beats" / "time" are accepted interchangeably."""
+    BEATS = "beats"
+    TIME = "time"
+
+    @property
+    def opposite(self) -> 'DurationUnits':
+        """The other axis: ``BEATS.opposite`` is ``TIME`` and vice versa. Used to get the *free* axis
+        (the one a `when` did not pin) when solving alignment."""
+        return DurationUnits.TIME if self is DurationUnits.BEATS else DurationUnits.BEATS
+
+
+class TempoUnits(StrEnum):
+    """
+    The three different, and mutually determined, ways of expressing tempo.
+
+    - TEMPO is the standard BPM understood by musicians
+    - RATE is in beats per second, and useful for reasoning about tempo relationships in a clock tree
+    - BEATLENGTH is the duration of one beat; mostly useful internally as the unit we're integrating over
+
+    A ``StrEnum``, so the bare strings are accepted.
+    """
+    TEMPO = "tempo"
+    RATE = "rate"
+    BEATLENGTH = "beatlength"
