@@ -196,10 +196,11 @@ class Scheduler(threading.Thread):
         which returns the time of the last executed event.
 
         Computed as ``ideal_time + (perf_counter() - last_wake_time)``: the committed time plus how much real
-        time has elapsed since the scheduler last woke. This is the best estimate regardless of timing-policy,
-        since it incorporates any drift that remains uncorrected. It is capped at the next scheduled event's
-        time, since the position can't advance past an event that hasn't fired. While fast-forwarding (wall
-        time is decoupled) or before the scheduler has started, it falls back to the committed :meth:`time`."""
+        time has elapsed since the scheduler last fired an event. This is the best estimate regardless of
+        timing-policy, since it incorporates any drift that remains uncorrected. It is capped at the next
+        scheduled event's time, since the position can't advance past an event that hasn't fired. While
+        fast-forwarding (wall time is decoupled) or before the scheduler has started, it falls back to the
+        committed :meth:`time`."""
         if self._last_wake_time is None or self._fast_forward_goal is not None:
             return self._ideal_time
         projected = self._ideal_time + (self._time.now() - self._last_wake_time)
@@ -506,9 +507,12 @@ class Scheduler(threading.Thread):
         # past (a t that has already elapsed), which fires immediately but must not drag the scheduler's
         # clock backward — that would throw off the timing of everything reading _ideal_time.
         self._ideal_time = max(self._ideal_time, event.t)
+        # Record the wake time *now*, before running the action, so it marks when this event actually fired.
+        # Relative timing measures the next wait from here (see _compute_wait_duration), so event spacing
+        # tracks the requested durations regardless of how long each action's callback runs.
+        self._last_wake_time = self._time.now()
         logger.debug("Executing event %r scheduled at %s", event.metadata, event.t)
         try:
             event.action()
         except Exception as e:
             logger.exception(f"Error executing event '{event.metadata}': {e}")
-        self._last_wake_time = self._time.now()

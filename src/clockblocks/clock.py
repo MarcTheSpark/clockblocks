@@ -1629,13 +1629,14 @@ class Clock:
         """
         How the family trades off relative vs. absolute timing, as a float from 0 to 1.
 
-        At 1.0 (relative) each wait call is kept as faithful as possible to its requested duration. This
-        can let the clock fall behind real time, since if heavy processing makes one note late, that lateness is
-        never made up. At 0.0 (absolute) the clock instead stays faithful to the time elapsed since it
-        began — a wait that ran long is followed by shorter waits to catch up, at the cost of some
-        relative-timing accuracy. A value in between is a hybrid: when the clock gets behind, it is allowed
-        to catch up, but only for a fraction of each wait call, preserving some of the relative timing.
-        (Forwards to the scheduler, settable only on the master clock)
+        At 1.0 (relative) each wait is kept as faithful as possible to its requested duration, timed from
+        when the previous event fired (callback runtime does not count against the wait). This can still let
+        the clock fall behind real time: if a wait overruns (e.g. through a callback that runs longer than its
+        own wait or the OS waking late) that lateness is never made up. At 0.0 (absolute) the clock instead stays
+        faithful to the time elapsed since it began — a wait that ran long is followed by shorter waits to
+        catch up, at the cost of some relative-timing accuracy. A value in between is a hybrid: when the
+        clock gets behind, it is allowed to catch up, but only for a fraction of each wait call, preserving
+        some of the relative timing.
         """
         return self.scheduler.timing_policy
 
