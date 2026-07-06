@@ -65,8 +65,9 @@ class ClockFamilyOptions:
     :param timing_policy:
         0.0 = absolute timing (measure from clock start and catch up as much as possible),
         1.0 = relative timing (wait the full delay each time, even when behind),
-        floats between 0 and 1 blend the two. Default value is 0.98 (near-relative,
-        but with a little absolute mixed in so we can catch up on long waits).
+        floats in between clamp how far a wait may be compressed/stretched from its nominal length to
+        stay on the absolute schedule. Default value is 0.98 (near-relative: a wait may shave up to 2%
+        of its length per event to catch up).
     :param precise_timing:
         When true, use a busy-wait in the immediate run-up to a scheduled action to arrive as precisely
         as possible. (OS wait is by nature jittery.) Costs one core for at most ``spin_guard_duration``
@@ -1634,9 +1635,10 @@ class Clock:
         the clock fall behind real time: if a wait overruns (e.g. through a callback that runs longer than its
         own wait or the OS waking late) that lateness is never made up. At 0.0 (absolute) the clock instead stays
         faithful to the time elapsed since it began — a wait that ran long is followed by shorter waits to
-        catch up, at the cost of some relative-timing accuracy. A value in between is a hybrid: when the
-        clock gets behind, it is allowed to catch up, but only for a fraction of each wait call, preserving
-        some of the relative timing.
+        catch up, at the cost of some relative-timing accuracy. A value in between clamps the catch-up: the
+        clock attempts to stay on the absolute schedule but can only compress a wait to `wait_dur * timing_policy`
+        (or stretch it to `wait_dur / timing_policy` if trying to compensate for being ahead).
+        (Forwards to the scheduler, settable only on the master clock)
         """
         return self.scheduler.timing_policy
 

@@ -111,10 +111,11 @@ class Scheduler(threading.Thread):
                  time_backend: 'TimingBackend | None' = None):
         """
         :param timing_policy:
-            0 -> Absolute timing (cut wait time to catch up to the schedule since start),
-            1 -> Relative timing (wait the full scheduled delay; errors accumulate),
-            0.5 -> A blend of the two.
-            (Matches the original clockblocks convention; the default 0.98 is nearly fully relative.)
+            Bounds how far each wait may deviate from its nominal length in order to track the absolute
+            schedule. 0 -> Absolute timing (cut/extend the wait as needed to match ideal time since start).
+            1 -> Relative timing (wait exactly the nominal delay, drift never corrected). 0.98 (default) ->
+            a wait may be compressed to 98% (or stretched to 102%) of its nominal length to correct any
+            accumulated drift.
         :param precise_timing:
             When True, close the final approach to each event with a busy-spin instead of resting on
             the (jittery) OS wait timeout, hitting the event time to within microseconds. Costs one core
@@ -468,10 +469,36 @@ class Scheduler(threading.Thread):
         self._start_time = now - self._ideal_time
 
     def _compute_wait_duration(self, next_event: 'QueueEvent', now: float) -> float:
-        """Blend the relative- and absolute-timing wait durations per the timing policy (see __init__)."""
+        """Calculate the correct wait duration based on the time of the next event and the
+        current timing policy."""
+        # relative = how long we would wait to make the time between event firings exactly right
+        # Could also be written (next_event.t - self._ideal_time) - (now - self._last_wake_time) which shows
+        # that it's scheduled delta t minus the time that has already elapsed since the last event fired
         relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
+        # absolute = how long we would wait to land exactly on the absolute schedule, measured from start time
         absolute_wait_dur = self._start_time + next_event.t - now
-        wait_duration = self.timing_policy * relative_wait_dur + (1 - self.timing_policy) * absolute_wait_dur
+        if relative_wait_dur <= 0:
+            # The nominal wait time has already elapsed (e.g. a callback ran longer than its own wait)
+            # So fall back to absolute_wait_dur (which is probably also negative unless we somehow got
+            # way ahead).
+            wait_duration = absolute_wait_dur
+        else:
+            # The timing policy sets an allowable deviation from the ideal relative wait time.
+            # We take the absolute_wait (tracking absolute time since start) and clamp it
+            # on the low side by self.timing_policy * relative_wait_dur, and on the high side by
+            # (1 / self.timing_policy) * relative_wait_dur (or inf if self.timing_policy is 0).
+            #
+            # A few examples make this clear:
+            #
+            # - if timing policy is 0, the clamp is (0, ∞) i.e. no clamp, just take the absolute wait
+            # - if timing policy is 1, the clamp is (relative_wait_dur, relative_wait_dur), which simply
+            # insists upon the relative wait.
+            # - if timing policy is 0.5, the clamp is (0.5 * relative_wait_dur, 2 * relative_wait_dur)
+            # meaning that we can wait up to twice as long or as low as half as long as scheduled to
+            # get back on track.
+            lo = self.timing_policy * relative_wait_dur           # most we may compress toward the schedule
+            hi = (1 / self.timing_policy) * relative_wait_dur if self.timing_policy > 0 else float("inf")
+            wait_duration = min(hi, max(lo, absolute_wait_dur))
         self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
         return wait_duration
 
@@ -480,7 +507,7 @@ class Scheduler(threading.Thread):
         if not logger.isEnabledFor(logging.DEBUG):
             return
         logger.debug(
-            "event=%r ideal=%.6f rel_wait=%.6f abs_wait=%.6f blended_wait=%.6f",
+            "event=%r ideal=%.6f rel_wait=%.6f abs_wait=%.6f clamped_wait=%.6f",
             event.metadata, self._ideal_time, rel_wait, abs_wait, actual_wait,
         )
 
