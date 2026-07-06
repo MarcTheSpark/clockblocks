@@ -12,9 +12,9 @@ import time
 import threading
 import unittest
 
-from cb2.scheduler import Scheduler
-from cb2.clock import Clock
-from cb2.exceptions import NotMasterClockError
+from clockblocks.scheduler import Scheduler
+from clockblocks.clock import Clock
+from clockblocks.exceptions import NotMasterClockError
 from tests import timing
 
 

@@ -1,10 +1,10 @@
 import threading
 import unittest
 
-from cb2.clock import Clock, ClockState
-from cb2.exceptions import ClockKilledError, DeadClockError, WrongThreadError
-from cb2.moment import Moment
-from cb2.utilities import current_clock
+from clockblocks.clock import Clock, ClockState
+from clockblocks.exceptions import ClockKilledError, DeadClockError, WrongThreadError
+from clockblocks.moment import Moment
+from clockblocks.utilities import current_clock
 
 
 class KillTestCase(unittest.TestCase):

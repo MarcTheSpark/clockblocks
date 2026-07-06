@@ -16,9 +16,9 @@
 
 from __future__ import annotations
 from typing import Protocol, runtime_checkable, TYPE_CHECKING
-from cb2.enums import DurationUnits
+from clockblocks.enums import DurationUnits
 if TYPE_CHECKING:
-    from cb2.clock import Clock
+    from clockblocks.clock import Clock
 
 
 @runtime_checkable

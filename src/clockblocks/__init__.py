@@ -16,21 +16,21 @@
 
 from importlib.metadata import version, PackageNotFoundError
 
-from cb2.clock import Clock, ClockState, ClockFamilyOptions
-from cb2.scheduler import TimingBackend, CompressedTime
-from cb2.exceptions import ClockblocksError, ClockKilledError, DeadClockError, WrongThreadError, \
+from clockblocks.clock import Clock, ClockState, ClockFamilyOptions
+from clockblocks.scheduler import TimingBackend, CompressedTime
+from clockblocks.exceptions import ClockblocksError, ClockKilledError, DeadClockError, WrongThreadError, \
     NoActiveClockError, NotMasterClockError
-from cb2.tempo_envelope import TempoEnvelope, TempoHistory
-from cb2.metric_phase import MetricPhaseTarget
-from cb2.moment import Moment, ResolvableMoment
-from cb2.time_stamp import TimeStamp, TimeStampInterval
-from cb2.utilities import current_clock, wait, wait_forever, wait_for_children_to_finish, fork, \
+from clockblocks.tempo_envelope import TempoEnvelope, TempoHistory
+from clockblocks.metric_phase import MetricPhaseTarget
+from clockblocks.moment import Moment, ResolvableMoment
+from clockblocks.time_stamp import TimeStamp, TimeStampInterval
+from clockblocks.utilities import current_clock, wait, wait_forever, wait_for_children_to_finish, fork, \
     set_tempo, set_rate, set_beat_length, get_tempo, get_rate, get_beat_length, \
     set_tempo_target, set_rate_target, set_beat_length_target, \
     set_tempo_targets, set_rate_targets, set_beat_length_targets, \
     apply_tempo_function, apply_rate_function, apply_beat_length_function, \
     apply_tempo_envelope, stop_tempo_loop_or_function
-from cb2.enums import DurationUnits, TempoUnits
+from clockblocks.enums import DurationUnits, TempoUnits
 
 try:
     __version__ = version(__name__)

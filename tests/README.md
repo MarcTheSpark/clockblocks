@@ -1,7 +1,7 @@
-# cb2 tests
+# clockblocks tests
 
 **These tests were written automatically by Claude Code and have received little human oversight.**
-They were created during the cb2 → clockblocks 1.0 redesign and exist to help *pinpoint regressions*: 
+They were created during the clockblocks 1.0 redesign and exist to help *pinpoint regressions*: 
 when something breaks, a focused failing test here narrows down where.
 
 They are **not** the primary safety net. The first line of defense against regressions is the
@@ -15,21 +15,21 @@ are mildly sensitive to machine load.
 ## Running
 
 ```
-cd cb2
+cd clockblocks
 python -m unittest discover -s tests         # all tests (real time, ~50s)
 python -m unittest tests.test_fork           # one module
 
 # Run the whole suite on a compressed clock — much faster, same assertions:
-CB2_TEST_COMPRESSION=10 python -m unittest discover -s tests   # ~7s
+CLOCKBLOCKS_TEST_COMPRESSION=10 python -m unittest discover -s tests   # ~7s
 ```
 
-## Time compression (`CB2_TEST_COMPRESSION`)
+## Time compression (`CLOCKBLOCKS_TEST_COMPRESSION`)
 
-By default the suite runs in real time (`time.sleep`-paced, ~50s). Set `CB2_TEST_COMPRESSION=<factor>` to
+By default the suite runs in real time (`time.sleep`-paced, ~50s). Set `CLOCKBLOCKS_TEST_COMPRESSION=<factor>` to
 run the *whole* suite on a compressed clock — e.g. `10` runs ~7x faster. How it works:
 
 - The scheduler reads "now" and blocks on its sleep condition entirely through an injectable
-  `TimingBackend` (`cb2/scheduler.py`). `tests/__init__.py` reads the env var and, when set, points the
+  `TimingBackend` (`clockblocks/scheduler.py`). `tests/__init__.py` reads the env var and, when set, points the
   scheduler's default-backend factory at a `CompressedTime(factor)` — so **every** Clock/Scheduler the suite
   builds runs compressed, with no per-test change. Unset (or `1`) = ordinary real time, unchanged behavior.
 - A compressed family runs `factor`x faster in real time while its *perceived* schedule is unchanged. Tests

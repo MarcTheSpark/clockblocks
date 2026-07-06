@@ -23,10 +23,10 @@ import dataclasses
 from functools import lru_cache, wraps
 from expenvelope import Envelope, EnvelopeSegment
 from copy import deepcopy
-from cb2.utilities import snap_float_to_nice_decimal
+from clockblocks.utilities import snap_float_to_nice_decimal
 from typing import Union, Sequence, Callable
-from cb2.enums import DurationUnits, TempoUnits
-from cb2.metric_phase import MetricPhaseTarget
+from clockblocks.enums import DurationUnits, TempoUnits
+from clockblocks.metric_phase import MetricPhaseTarget
 
 
 def tempo_modification(fn):

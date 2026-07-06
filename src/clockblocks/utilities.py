@@ -18,11 +18,11 @@ from __future__ import annotations
 import math
 import threading
 from typing import TYPE_CHECKING, Callable, Sequence, Union
-from cb2.exceptions import NoActiveClockError
+from clockblocks.exceptions import NoActiveClockError
 if TYPE_CHECKING:
-    from cb2 import clock, moment
-    from cb2.moment import ResolvableMoment
-    from cb2.tempo_envelope import TempoEnvelope
+    from clockblocks import clock, moment
+    from clockblocks.moment import ResolvableMoment
+    from clockblocks.tempo_envelope import TempoEnvelope
 
 
 # Default tolerances for near-equality comparisons of beats / times.
@@ -64,7 +64,7 @@ def meaningfully_greater_than(a: float, b: float, *, rel_tol: float = NEAR_EQUAL
 
 
 # snap_float_to_nice_decimal now lives in expenvelope (the base Envelope needs it for durations rounding);
-# re-exported here so existing `from cb2.utilities import snap_float_to_nice_decimal` importers keep working.
+# re-exported here so existing `from clockblocks.utilities import snap_float_to_nice_decimal` importers keep working.
 from expenvelope import snap_float_to_nice_decimal
 
 

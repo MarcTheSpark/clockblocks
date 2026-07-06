@@ -1,7 +1,7 @@
 import time
-from cb2.clock import Clock
-from cb2.moment import Moment
-from cb2.utilities import wait, current_clock
+from clockblocks.clock import Clock
+from clockblocks.moment import Moment
+from clockblocks.utilities import wait, current_clock
 
 
 c = Clock("MASTER", initial_tempo=20)

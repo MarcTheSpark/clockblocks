@@ -1,6 +1,6 @@
 import time
-from cb2.clock import Clock
-from cb2.utilities import current_clock, wait
+from clockblocks.clock import Clock
+from clockblocks.utilities import current_clock, wait
 
 
 c = Clock("MASTER", initial_tempo=30)

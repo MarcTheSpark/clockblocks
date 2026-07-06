@@ -1,10 +1,10 @@
 import threading
 import unittest
 
-from cb2.clock import Clock, ClockState
+from clockblocks.clock import Clock
 from tests import timing
-from cb2.moment import Moment
-from cb2.utilities import current_clock
+from clockblocks.moment import Moment
+from clockblocks.utilities import current_clock
 
 
 class ForkTestCase(unittest.TestCase):

@@ -3,19 +3,19 @@ import unittest
 import warnings
 
 from tests import timing
-from cb2.clock import Clock, ClockState
-from cb2.exceptions import ClockblocksError, NoActiveClockError, NotMasterClockError
-from cb2.moment import Moment
-from cb2.metric_phase import MetricPhaseTarget
-from cb2.tempo_envelope import TempoEnvelope
-from cb2 import utilities
-from cb2.utilities import current_clock
+from clockblocks.clock import Clock, ClockState
+from clockblocks.exceptions import ClockblocksError, NoActiveClockError, NotMasterClockError
+from clockblocks.moment import Moment
+from clockblocks.metric_phase import MetricPhaseTarget
+from clockblocks.tempo_envelope import TempoEnvelope
+from clockblocks import utilities
+from clockblocks.utilities import current_clock
 
 
 class ModuleApiTestCase(unittest.TestCase):
     """
     Tests for the Step-5 surface: Clock.wait_forever / wait_for_children_to_finish / run_as_server,
-    and the module-level wrappers in cb2.utilities that delegate to current_clock().
+    and the module-level wrappers in clockblocks.utilities that delegate to current_clock().
 
     Same isolation pattern as test_fork.py / test_kill.py: fresh master + fresh scheduler per test.
     The master's __init__ binds it as current_clock() on this (the test) thread.

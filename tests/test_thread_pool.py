@@ -5,9 +5,9 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr
 
-from cb2.clock import Clock
-from cb2.clock import ClockFamilyOptions
-from cb2.utilities import current_clock
+from clockblocks.clock import Clock
+from clockblocks.clock import ClockFamilyOptions
+from clockblocks.utilities import current_clock
 
 
 class ThreadPoolTestCase(unittest.TestCase):

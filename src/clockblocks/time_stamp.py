@@ -17,10 +17,10 @@
 from __future__ import annotations
 from functools import total_ordering
 from typing import TYPE_CHECKING
-from cb2.utilities import current_clock, snap_float_to_nice_decimal
+from clockblocks.utilities import current_clock, snap_float_to_nice_decimal
 
 if TYPE_CHECKING:
-    from cb2.clock import Clock
+    from clockblocks.clock import Clock
 
 
 @total_ordering
@@ -50,7 +50,7 @@ class TimeStamp:
         Capture a TimeStamp for the current moment. Any clock in the family may be given (its master is
         used); if omitted, the clock is taken from the current thread.
         """
-        from cb2.clock import Clock
+        from clockblocks.clock import Clock
         clock = current_clock() if master_clock is None else master_clock
         if not isinstance(clock, Clock):
             raise ValueError("No valid clock given or found for TimeStamp")

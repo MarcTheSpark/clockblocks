@@ -13,8 +13,8 @@ other thread speeds the child's tempo up dramatically; the child must wake far s
 import threading
 import unittest
 
-from cb2.clock import Clock
-from cb2.utilities import current_clock
+from clockblocks.clock import Clock
+from clockblocks.utilities import current_clock
 from tests import timing
 
 

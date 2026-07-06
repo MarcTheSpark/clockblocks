@@ -1,7 +1,7 @@
 import unittest
 
-from cb2.clock import Clock
-from cb2.time_stamp import TimeStamp
+from clockblocks.clock import Clock
+from clockblocks.time_stamp import TimeStamp
 
 
 class TimeStampTestCase(unittest.TestCase):
@@ -30,7 +30,7 @@ class TimeStampTestCase(unittest.TestCase):
         events = []
 
         def child_proc():
-            from cb2.utilities import current_clock
+            from clockblocks.utilities import current_clock
             c = current_clock()
             c.wait(0.1)
             events.append(TimeStamp.now(c))
@@ -49,7 +49,7 @@ class TimeStampTestCase(unittest.TestCase):
         events = []
 
         def child_proc():
-            from cb2.utilities import current_clock
+            from clockblocks.utilities import current_clock
             c = current_clock()
             c.tempo = 120
             c.wait(0.4)  # 0.2s scheduler time

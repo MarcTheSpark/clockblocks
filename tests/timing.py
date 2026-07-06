@@ -1,13 +1,13 @@
 """
 Suite-wide time compression.
 
-Set the environment variable ``CB2_TEST_COMPRESSION`` to run the whole suite on a compressed clock, e.g.::
+Set the environment variable ``CLOCKBLOCKS_TEST_COMPRESSION`` to run the whole suite on a compressed clock, e.g.::
 
-    CB2_TEST_COMPRESSION=10 python -m unittest discover -s tests -t .
+    CLOCKBLOCKS_TEST_COMPRESSION=10 python -m unittest discover -s tests -t .
 
 The default (unset, or ``1``) is ordinary real time, so behavior is unchanged. When a factor is set,
-:func:`install` overrides ``cb2.scheduler._default_time_backend`` so *every* Clock/Scheduler the suite
-constructs (that doesn't pass an explicit backend) runs on a :class:`~cb2.scheduler.CompressedTime` of that
+:func:`install` overrides ``clockblocks.scheduler._default_time_backend`` so *every* Clock/Scheduler the suite
+constructs (that doesn't pass an explicit backend) runs on a :class:`~clockblocks.scheduler.CompressedTime` of that
 factor — no per-test construction change needed.
 
 Tests must then reason in the **scheduler's** time domain, since real wall time runs ``factor``x faster:
@@ -21,7 +21,7 @@ so large factors loosen achievable tolerances (see ``README.md``); 10x is a good
 import os
 import time
 
-FACTOR = float(os.environ.get("CB2_TEST_COMPRESSION", "1"))
+FACTOR = float(os.environ.get("CLOCKBLOCKS_TEST_COMPRESSION", "1"))
 
 
 def stopwatch() -> float:
@@ -42,6 +42,6 @@ def sleep(scheduler_seconds: float) -> None:
 def install() -> None:
     """If a compression factor is set, point the scheduler's default-backend factory at a CompressedTime."""
     if FACTOR != 1:
-        from cb2 import scheduler
-        from cb2.scheduler import CompressedTime
+        from clockblocks import scheduler
+        from clockblocks.scheduler import CompressedTime
         scheduler._default_time_backend = lambda: CompressedTime(FACTOR)

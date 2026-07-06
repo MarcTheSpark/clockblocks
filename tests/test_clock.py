@@ -1,7 +1,7 @@
 """
 Single-clock wait timing under each timing_policy.
 
-Like the rest of the suite, this runs real-time by default and compressed when CB2_TEST_COMPRESSION is set
+Like the rest of the suite, this runs real-time by default and compressed when CLOCKBLOCKS_TEST_COMPRESSION is set
 (see tests/timing.py) — the family picks up the compressed backend automatically, and we measure in the
 scheduler's time domain via timing.elapsed / timing.sleep so the assertions hold at any factor.
 
@@ -10,7 +10,7 @@ timing_policy convention: 0 = absolute (cut the wait to land on the absolute tar
 """
 import unittest
 
-from cb2.clock import Clock, ClockFamilyOptions
+from clockblocks.clock import Clock, ClockFamilyOptions
 from tests import timing
 
 

@@ -1,7 +1,7 @@
 import threading
 
-from cb2.clock import Clock
-from cb2.tempo_envelope import TempoEnvelope
+from clockblocks.clock import Clock
+from clockblocks.tempo_envelope import TempoEnvelope
 import math
 
 TempoEnvelope.from_function(lambda b: 120 + math.sin(b) * 80, domain_end=100)

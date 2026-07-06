@@ -1,13 +1,13 @@
 """
-Tests for cb2.scheduler.Scheduler. Wall-clock paced, but compression-aware: the timing-measuring tests
-reason in the scheduler domain via tests/timing (so they honor CB2_TEST_COMPRESSION), while the
+Tests for clockblocks.scheduler.Scheduler. Wall-clock paced, but compression-aware: the timing-measuring tests
+reason in the scheduler domain via tests/timing (so they honor CLOCKBLOCKS_TEST_COMPRESSION), while the
 lock/ordering tests (while_quiescent, priority) keep real sleeps since they gate on behavior, not measured
 time. The timing-policy tolerance scales with the factor (handshake jitter isn't compressed).
 """
 import unittest
 import time
 import threading
-from cb2.scheduler import Scheduler
+from clockblocks.scheduler import Scheduler
 from tests import timing
 
 

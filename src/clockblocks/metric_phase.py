@@ -16,11 +16,11 @@
 
 import math
 from typing import Union, Sequence, Tuple, TYPE_CHECKING
-from cb2.utilities import current_clock
-from cb2.moment import Moment
-from cb2.enums import DurationUnits
+from clockblocks.utilities import current_clock
+from clockblocks.moment import Moment
+from clockblocks.enums import DurationUnits
 if TYPE_CHECKING:
-    from cb2.clock import Clock
+    from clockblocks.clock import Clock
 
 
 class MetricPhaseTarget:

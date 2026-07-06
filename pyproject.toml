@@ -3,9 +3,9 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cb2"
-version = "0.1.0"
-description = "Reimplementation of clockblocks library"
+name = "clockblocks"
+version = "1.0.0"
+description = "A python library for synchronizing parallel and nested strands of musical time."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "GPL-3.0-only"

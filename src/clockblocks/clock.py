@@ -1,6 +1,6 @@
 """
 Module defining the central :class:`Clock` class — recursively nestable clocks that coordinate musical
-time under a master clock and its background :class:`~cb2.scheduler.Scheduler`.
+time under a master clock and its background :class:`~clockblocks.scheduler.Scheduler`.
 """
 
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
@@ -35,13 +35,13 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from typing import Callable, Sequence, Iterator
 from copy import deepcopy
-from cb2.tempo_envelope import TempoEnvelope, TempoHistory
-from cb2.scheduler import Scheduler, TimingBackend
-from cb2.moment import Moment, ResolvableMoment, to_absolute_moment
-from cb2.metric_phase import MetricPhaseTarget
-from cb2.enums import DurationUnits
-from cb2.utilities import _PrintColors, current_clock
-from cb2.exceptions import (ClockKilledError, DeadClockError, WrongThreadError,
+from clockblocks.tempo_envelope import TempoEnvelope, TempoHistory
+from clockblocks.scheduler import Scheduler, TimingBackend
+from clockblocks.moment import Moment, ResolvableMoment, to_absolute_moment
+from clockblocks.metric_phase import MetricPhaseTarget
+from clockblocks.enums import DurationUnits
+from clockblocks.utilities import _PrintColors, current_clock
+from clockblocks.exceptions import (ClockKilledError, DeadClockError, WrongThreadError,
                             NotMasterClockError)
 import textwrap
 
@@ -1316,19 +1316,20 @@ class Clock:
 
         :param forked_function: the function to be run on the new child clock
         :param args: positional arguments to be passed to the forked function. (Unlike legacy clockblocks,
-            cb2 does *not* inject the child clock as an extra first argument when the signature is one short
+            clockblocks does *not* inject the child clock as an extra first argument when the signature is one short
             — call :func:`current_clock` from inside the forked function if you need a reference to it.)
         :param kwargs: keyword arguments to be passed to the forked function
         :param name: name to be given to the spawned child clock
         :param initial_rate: starting rate of this clock (if set, don't set initial tempo or beat length)
         :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
         :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
-        :param when: when the forked function should begin, as a :class:`~cb2.moment.ResolvableMoment`.
+        :param when: when the forked function should begin, as a :class:`~clockblocks.moment.ResolvableMoment`.
             None (default) starts it immediately. Otherwise pass an explicit Moment — :meth:`Moment.at_beat`
             (or :meth:`Moment.at_time`) for an absolute point, or :meth:`Moment.after_beats`
             (or :meth:`Moment.after_time`) for an offset from now. Unlike wait and wait_until, a bare
             number is rejected here, since it's not clear whether it would be relative or absolute. Also possible
-            is a :class:`~cb2.metric_phase.MetricPhaseTarget` which starts it at the next matching point in a cycle.
+            is a :class:`~clockblocks.metric_phase.MetricPhaseTarget` which starts it at the next matching point
+            in a cycle.
         :param done_callback: a callback function to be invoked when the clock has terminated
         :return: the spawned child clock
         """
@@ -1453,7 +1454,7 @@ class Clock:
         have an active clock to wait on, and will hold up the entire scheduler if it sleeps.
 
         :param action: the callable to run (exceptions are caught and logged by the scheduler)
-        :param when: when to run it, as a :class:`~cb2.moment.ResolvableMoment` — same convention as
+        :param when: when to run it, as a :class:`~clockblocks.moment.ResolvableMoment` — same convention as
             fork(): an explicit Moment (Moment.at_beat/at_time for an absolute point, Moment.after_beats/
             after_time for an offset from now) or a MetricPhaseTarget. Unlike wait and wait_until, a bare
             number is rejected here, since it's not clear whether it would be relative or absolute.
@@ -1803,7 +1804,7 @@ class Clock:
     ##################################################################################################################
     #                                            Removed Legacy APIs
     ##################################################################################################################
-    # APIs from the original clockblocks that no longer exist in cb2, kept as raise-on-access stubs so
+    # APIs from clockblocks 0.x that no longer exist in clockblocks 1.x, kept as raise-on-access stubs so
     # users porting old code get an actionable message instead of a bare AttributeError.
     # ------------------------------------------------------------------
 

@@ -11,8 +11,8 @@ which is what would break if extension stopped at the original domain boundary.
 import math
 import unittest
 
-from cb2.clock import Clock
-from cb2.tempo_envelope import TempoEnvelope
+from clockblocks.clock import Clock
+from clockblocks.tempo_envelope import TempoEnvelope
 from tests import timing
 
 

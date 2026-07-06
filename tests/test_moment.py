@@ -1,10 +1,10 @@
 import unittest
 
-from cb2.clock import Clock
-from cb2.moment import Moment, to_absolute_moment
+from clockblocks.clock import Clock
+from clockblocks.moment import Moment, to_absolute_moment
 from tests import timing
-from cb2.metric_phase import MetricPhaseTarget
-from cb2.enums import DurationUnits
+from clockblocks.metric_phase import MetricPhaseTarget
+from clockblocks.enums import DurationUnits
 
 
 class MomentTestCase(unittest.TestCase):

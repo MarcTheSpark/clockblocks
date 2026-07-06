@@ -6,7 +6,7 @@ backend. The seam is also exercised end-to-end by test_clock.py; these pin its c
 import time
 import unittest
 
-from cb2.scheduler import Scheduler, TimingBackend, CompressedTime
+from clockblocks.scheduler import Scheduler, TimingBackend, CompressedTime
 from tests import timing
 
 
