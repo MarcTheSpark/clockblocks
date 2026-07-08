@@ -6,7 +6,9 @@ Like the rest of the suite, this runs real-time by default and compressed when C
 scheduler's time domain via timing.elapsed / timing.sleep so the assertions hold at any factor.
 
 timing_policy convention: 0 = absolute (cut the wait to land on the absolute target time, even if behind),
-1 = relative (wait the exact per-step delta, letting absolute drift accumulate).
+1 = relative (wait the exact per-step delta, measured from the previous wake, letting absolute drift
+accumulate). Values in between clamp the absolute target to a band around the relative one, so a wait may be
+compressed to `policy` of its nominal length (or stretched to `1 / policy` of it) in order to recover drift.
 """
 import unittest
 
@@ -20,21 +22,27 @@ class ClockTimingPolicyTestCase(unittest.TestCase):
         if hasattr(self, "master"):
             self.master.kill()
 
-    def _run_policy(self, timing_policy):
-        wait_durations = [0.3, 0.3, 0.3, 0.3]    # beats (== scheduler-seconds at tempo 60)
-        extra_work = [0.0, 0.25, 0.0, 0.0]       # scheduler-seconds of off-clock work after each wake
+    # Expected wake times (scheduler-seconds) per policy. Steps 0-1 land on the grid. Then 0.9 s of
+    # off-clock work overruns the 0.5 s wait, so step 2 is already overdue and fires immediately at 1.9
+    # under every policy -- 0.4 s behind the grid. The policies differ in how they recover:
+    #   0.0 absolute: step 3 snaps straight back to the grid (2.0) and stays there.
+    #   0.5 blended:  step 3's wait compresses to at most 0.5 * 0.5 = 0.25 s -> 1.9 + 0.25 = 2.15; by
+    #                 step 4 the residual fits inside the allowable compression band and it rejoins the
+    #                 grid at 2.5.
+    #   1.0 relative: every wait is exactly 0.5 s from the previous *firing*, so the 0.4 s of lateness
+    #                 is never recovered -> 2.4, 2.9, permanently 0.4 s behind.
+    # Note the overrun is essential for test differentiation: with off-clock work shorter than the wait
+    # nothing ever falls behind, the policy never engages, and all three would agree.
+    EXPECTED = {
+        0.0: [0.5, 1.0, 1.9, 2.0,  2.5],
+        0.5: [0.5, 1.0, 1.9, 2.15, 2.5],
+        1.0: [0.5, 1.0, 1.9, 2.4,  2.9],
+    }
 
-        # Expected wake times (scheduler-seconds), using the same blend the scheduler computes.
-        expected = []
-        t_ideal, t_actual = 0.0, 0.0
-        for dur, work in zip(wait_durations, extra_work):
-            t_ideal += dur
-            relative = dur                       # delta from the previous ideal target
-            absolute = t_ideal - t_actual        # delta needed to land on the absolute target
-            step = max(0.0, relative * timing_policy + absolute * (1 - timing_policy))
-            t_actual += step
-            expected.append(t_actual)
-            t_actual += work
+    def _run_policy(self, timing_policy):
+        wait_durations = [0.5] * 5               # beats (== scheduler-seconds at tempo 60)
+        extra_work = [0.0, 0.9, 0.0, 0.0, 0.0]   # scheduler-seconds of off-clock work after each wake
+        expected = self.EXPECTED[timing_policy]
 
         self.master = Clock(initial_tempo=60,
                             clock_family_options=ClockFamilyOptions(timing_policy=timing_policy))

@@ -84,23 +84,29 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(results, ["first", "second"])
 
     def _test_timing_policy(self, timing_policy):
-        # a timing policy of 1 is fully relative (wait for the exact delta between events, even if we are behind)
-        # a timing policy of 0 if fully absolute (wait until the exact time when the event should happen, even if we're
-        #     behind, leading to a (possibly egregiously) incorrect delta.
-        # a timing policy between 0 and 1 is a weighted average of those two extremes.
+        # A timing policy of 1 is fully relative: each event fires the exact scheduled delta after the
+        #     previous event *fired*, so lateness is never recovered.
+        # A timing policy of 0 is fully absolute: each event aims at its exact scheduled time measured
+        #     from the scheduler's start, recovering lateness immediately at the cost of a squashed delta.
+        # A policy between the two clamps the absolute target to a band around the relative one: a wait may
+        #     be compressed to `policy` of its nominal length (or stretched to `1 / policy` of it).
         scheduled_times = [0.05, 0.2, 0.35, 0.6, 0.7]
         action_durations = [0, 0.4, 0, 0.1, 0]  # How long each action takes
 
-        expected_times = []
-        t_ideal, t_actual = 0, 0
-        for scheduled_time, action_dur in zip(scheduled_times, action_durations):
-            relative_wait_duration = scheduled_time - t_ideal
-            absolute_wait_duration = scheduled_time - t_actual
-            dt_timing_policy = max(0, relative_wait_duration * timing_policy + absolute_wait_duration * (1 - timing_policy))
-            t_ideal = scheduled_time
-            t_actual += dt_timing_policy
-            expected_times.append(t_actual)
-            t_actual += action_dur
+        # event_1's 0.4 s action overruns its own 0.15 s gap, so event_2 is already overdue when the
+        # scheduler gets to it and fires immediately at 0.6 under every policy. The policies diverge on
+        # event_3 (nominal gap 0.25, measured from event_2's *scheduled* time of 0.35):
+        #   0.0 absolute: aim at the grid (0.6) -- already due, so event_3 fires back-to-back with
+        #                 event_2 at 0.6 as the scheduler catches up, then event_4 lands on grid at 0.7.
+        #   0.5 blended:  the wait may be compressed to at most 0.5 * 0.25 = 0.125 s past event_2's
+        #                 firing -> 0.725, then 0.825.
+        #   1.0 relative: wait the full 0.25 s from event_2's firing -> 0.85, then 0.95. Lateness is
+        #                 never recovered (relative timing measures firing-to-firing).
+        expected_times = {
+            0.0: [0.05, 0.2, 0.6, 0.6,   0.7],
+            0.5: [0.05, 0.2, 0.6, 0.725, 0.825],
+            1.0: [0.05, 0.2, 0.6, 0.85,  0.95],
+        }[timing_policy]
 
         tested_times = {}
 

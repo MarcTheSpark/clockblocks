@@ -157,7 +157,7 @@ class Scheduler(threading.Thread):
 
         # Timing variables.
         self._start_time = None
-        self._last_wake_time = None
+        self._last_event_time = None
         self._ideal_time = 0.0  # Ideal scheduler time (seconds since start)
 
         # _fast_forward_goal should be one of the following:
@@ -202,9 +202,9 @@ class Scheduler(threading.Thread):
         scheduled event's time, since the position can't advance past an event that hasn't fired. While
         fast-forwarding (wall time is decoupled) or before the scheduler has started, it falls back to the
         committed :meth:`time`."""
-        if self._last_wake_time is None or self._fast_forward_goal is not None:
+        if self._last_event_time is None or self._fast_forward_goal is not None:
             return self._ideal_time
-        projected = self._ideal_time + (self._time.now() - self._last_wake_time)
+        projected = self._ideal_time + (self._time.now() - self._last_event_time)
         try:
             # don't claim to have advanced past the next event, which hasn't fired yet
             return min(projected, self._queue[0].t)
@@ -314,7 +314,7 @@ class Scheduler(threading.Thread):
         at STEP 1 and STEP 2 below.
         """
         self._start_time = self._time.now()
-        self._last_wake_time = self._start_time
+        self._last_event_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
             # -------------------------   STEP 1: Wait for the next event -------------------------------
@@ -460,55 +460,71 @@ class Scheduler(threading.Thread):
     def _reanchor_timing(self, now: float) -> None:
         """
         Reanchor the timing reference points after fast-forwarding:
-            - _last_wake_time becomes now, so the next wait measures relative timing from when we stopped
+            - _last_event_time becomes now, so the next wait measures relative timing from when we stopped
                 fast-forwarding.
             - self._start_time is set to self._ideal_time seconds in the past so that we are reanchored
                 to be exactly on time as far as absolute timing is concerned.
         """
-        self._last_wake_time = now
+        self._last_event_time = now
         self._start_time = now - self._ideal_time
 
     def _compute_wait_duration(self, next_event: 'QueueEvent', now: float) -> float:
         """Calculate the correct wait duration based on the time of the next event and the
         current timing policy."""
-        # relative = how long we would wait to make the time between event firings exactly right
-        # Could also be written (next_event.t - self._ideal_time) - (now - self._last_wake_time) which shows
-        # that it's scheduled delta t minus the time that has already elapsed since the last event fired
-        relative_wait_dur = self._last_wake_time + (next_event.t - self._ideal_time) - now
-        # absolute = how long we would wait to land exactly on the absolute schedule, measured from start time
-        absolute_wait_dur = self._start_time + next_event.t - now
-        if relative_wait_dur <= 0:
-            # The nominal wait time has already elapsed (e.g. a callback ran longer than its own wait)
-            # So fall back to absolute_wait_dur (which is probably also negative unless we somehow got
-            # way ahead).
-            wait_duration = absolute_wait_dur
+        # the time between the last event and this next event in ideal, scheduler time
+        ideal_wait_duration = next_event.t - self._ideal_time
+        # absolute_target = the target wall time that would land exactly on the absolute schedule
+        # (take the wall time when the scheduler started, and add the ideal, scheduled time of the next event)
+        absolute_target = self._start_time + next_event.t
+        # relative_target = the target wall time that lands exactly ideal_wait_duration after the last event
+        # *actually* fired (pure relative timing; drift never corrected). Only used for the debug log below.
+        relative_target = self._last_event_time + ideal_wait_duration
+        if ideal_wait_duration <= 0:
+            # Degenerate case in which the next event is scheduled in the past, *before* scheduled time
+            # of the last event that fired. In this case, relative timing makes no sense so we should aim
+            # to get back on the absolute schedule.
+            target = absolute_target
         else:
             # The timing policy sets an allowable deviation from the ideal relative wait time.
-            # We take the absolute_wait (tracking absolute time since start) and clamp it
-            # on the low side by self.timing_policy * relative_wait_dur, and on the high side by
-            # (1 / self.timing_policy) * relative_wait_dur (or inf if self.timing_policy is 0).
+            # We take the absolute target wall time (tracking absolute time since start) and clamp it
+            # on the low side by `self._last_event_time + ideal_wait_duration * self.timing_policy`,
+            # and on the high side by `self._last_event_time + ideal_wait_duration / self.timing_policy`
+            # (or inf if self.timing_policy is 0).
             #
-            # A few examples make this clear:
+            # This is easiest to understand with a few examples:
             #
-            # - if timing policy is 0, the clamp is (0, ∞) i.e. no clamp, just take the absolute wait
-            # - if timing policy is 1, the clamp is (relative_wait_dur, relative_wait_dur), which simply
-            # insists upon the relative wait.
-            # - if timing policy is 0.5, the clamp is (0.5 * relative_wait_dur, 2 * relative_wait_dur)
-            # meaning that we can wait up to twice as long or as low as half as long as scheduled to
-            # get back on track.
-            lo = self.timing_policy * relative_wait_dur           # most we may compress toward the schedule
-            hi = (1 / self.timing_policy) * relative_wait_dur if self.timing_policy > 0 else float("inf")
-            wait_duration = min(hi, max(lo, absolute_wait_dur))
-        self._log_event_timing(next_event, relative_wait_dur, absolute_wait_dur, wait_duration)
+            # - if timing policy is 0, the clamp is (self._last_event_time, ∞), essentially a no-op, leading us
+            # to use the absolute target. (If that target is *before* the last event, technically this clamps to
+            # the last event time, but that leads to a wait of 0 regardless.)
+            # - if timing policy is 1, the clamp is (self._last_event_time + ideal_wait_duration,
+            # self._last_event_time + ideal_wait_duration), which simply insists upon the relative wait.
+            # - if timing policy is 0.5, the clamp is (self._last_event_time + ideal_wait_duration * 0.5,
+            # self._last_event_time + ideal_wait_duration * 2) meaning that we can fudge the time between
+            # events as low as half as long (or as much as much as twice as long) as scheduled to get back on track.
+            lo = self._last_event_time + ideal_wait_duration * self.timing_policy
+            hi = (self._last_event_time + ideal_wait_duration / self.timing_policy) \
+                if self.timing_policy > 0 else float("inf")
+            target = min(hi, max(lo, absolute_target))
+
+        # finally, now that we know the target wall time, the wait is simply the difference between that and now
+        wait_duration = target - now
+        self._log_event_timing(next_event, now, relative_target, absolute_target, target)
         return wait_duration
 
-    def _log_event_timing(self, event: 'QueueEvent', rel_wait: float, abs_wait: float, actual_wait: float) -> None:
-        """Detailed timing trace for one scheduled event (only formatted if DEBUG is enabled)."""
+    def _log_event_timing(self, event: 'QueueEvent', now: float,
+                          relative_target: float, absolute_target: float, target: float) -> None:
+        """Detailed timing trace for one scheduled event (only formatted if DEBUG is enabled).
+        The wall instants (last_event_actual, now, and the three targets) are printed relative to
+        _start_time — i.e. in seconds since the scheduler started — so they're on the same scale as the
+        scheduler-time fields (last_event_scheduled, next_event_scheduled)."""
         if not logger.isEnabledFor(logging.DEBUG):
             return
+        s = self._start_time
         logger.debug(
-            "event=%r ideal=%.6f rel_wait=%.6f abs_wait=%.6f clamped_wait=%.6f",
-            event.metadata, self._ideal_time, rel_wait, abs_wait, actual_wait,
+            "event=%r last_event_scheduled=%.6f last_event_actual=%.6f next_event_scheduled=%.6f now=%.6f "
+            "rel_target=%.6f abs_target=%.6f target_based_on_policy=%.6f calculated_wait=%.6f",
+            event.metadata, self._ideal_time, self._last_event_time - s, event.t, now - s,
+            relative_target - s, absolute_target - s, target - s, target - now,
         )
 
     def _execute_event(self, event: QueueEvent) -> None:
@@ -537,7 +553,7 @@ class Scheduler(threading.Thread):
         # Record the wake time *now*, before running the action, so it marks when this event actually fired.
         # Relative timing measures the next wait from here (see _compute_wait_duration), so event spacing
         # tracks the requested durations regardless of how long each action's callback runs.
-        self._last_wake_time = self._time.now()
+        self._last_event_time = self._time.now()
         logger.debug("Executing event %r scheduled at %s", event.metadata, event.t)
         try:
             event.action()
