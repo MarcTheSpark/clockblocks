@@ -1,10 +1,12 @@
+"""
+Two unrelated (master) clocks running at different tempi.
+"""
+
 import threading
 
 from clockblocks.clock import Clock
-from clockblocks.tempo_envelope import TempoEnvelope
 import math
 
-TempoEnvelope.from_function(lambda b: 120 + math.sin(b) * 80, domain_end=100)
 c = Clock(initial_tempo=90)
 # c.tempo_history.apply_function(lambda b: 120 + math.sin(b/10) * 80, duration_units="time")
 
