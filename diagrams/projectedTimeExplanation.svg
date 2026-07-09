@@ -1,0 +1,579 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="8.5in"
+   height="17in"
+   viewBox="0 0 816 1632"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.3 (1:1.4.3+202512261035+0d15f75042)"
+   sodipodi:docname="projectedTimeExplanation.svg"
+   inkscape:export-filename="projectedTimeExplanation.pdf"
+   inkscape:export-xdpi="96"
+   inkscape:export-ydpi="96"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="in"
+     inkscape:export-bgcolor="#000000ff"
+     inkscape:zoom="1.5255159"
+     inkscape:cx="385.77114"
+     inkscape:cy="217.6313"
+     inkscape:window-width="1920"
+     inkscape:window-height="1131"
+     inkscape:window-x="0"
+     inkscape:window-y="0"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="layer1" />
+  <defs
+     id="defs1">
+    <rect
+       x="246.93103"
+       y="265.13794"
+       width="35.275864"
+       height="33"
+       id="rect2" />
+  </defs>
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1">
+    <text
+       xml:space="preserve"
+       style="font-size:24px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:start;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:start;white-space:pre;inline-size:729.371;display:inline;fill:#000000;stroke-width:20;stroke-linecap:round"
+       x="-160.34361"
+       y="92.172417"
+       id="text1"
+       transform="matrix(0.80945469,0,0,0.80945469,251.5507,30.743719)"><tspan
+         x="-160.34361"
+         y="92.172417"
+         id="tspan7">1) Fast-forwarding or last_event_time is None:
+</tspan><tspan
+         x="-160.34361"
+         y="118.57242"
+         id="tspan10">    if fast-forwarding, there's no concept of progress between </tspan><tspan
+         x="-160.34361"
+         y="144.97242"
+         id="tspan11">events, so the only logical projected time is ideal_time. If </tspan><tspan
+         x="-160.34361"
+         y="171.37242"
+         id="tspan16">last_event_time is None, scheduler hasn't started yet so just </tspan><tspan
+         x="-160.34361"
+         y="197.77242"
+         id="tspan17">set projected time to 0 (=self._ideal_time)
+</tspan><tspan
+         x="-160.34361"
+         y="224.17241"
+         id="tspan18">    projected time = self._ideal_time
+</tspan><tspan
+         x="-160.34361"
+         y="250.57241"
+         id="tspan21">2) else no next event: 
+</tspan><tspan
+         x="-160.34361"
+         y="276.9724"
+         id="tspan23">    projected time = self._ideal_time + (now - </tspan><tspan
+         x="-160.34361"
+         y="303.37239"
+         id="tspan24">last_event_time)
+</tspan><tspan
+         x="-160.34361"
+         y="329.77239"
+         id="tspan25">3) else next_event.t &lt;= self.ideal_time:
+</tspan><tspan
+         x="-160.34361"
+         y="356.17238"
+         id="tspan32">    event is immediately/past due and will fire immediately
+</tspan><tspan
+         x="-160.34361"
+         y="382.57238"
+         id="tspan37">    projected time = self.ideal_time (don't move backwards)
+</tspan><tspan
+         x="-160.34361"
+         y="408.97237"
+         id="tspan38">4) else:
+</tspan><tspan
+         x="-160.34361"
+         y="435.37236"
+         id="tspan44">    we have established that there is a last event (which has
+</tspan><tspan
+         x="-160.34361"
+         y="461.77236"
+         id="tspan47">    an ideal time and last_event_time), and there is a next
+</tspan><tspan
+         x="-160.34361"
+         y="488.17235"
+         id="tspan60">    event whose sheduled time is after self.ideal time
+</tspan><tspan
+         x="-160.34361"
+         y="514.57235"
+         id="tspan61">    A few possible scenarios detailed below (note that 
+</tspan><tspan
+         x="-160.34361"
+         y="540.97234"
+         id="tspan62">    _target_wall_time is in a range (shaded region that  
+</tspan><tspan
+         x="-160.34361"
+         y="567.37236"
+         id="tspan63">    depends on timing_policy, and the dashed line is one
+</tspan><tspan
+         x="-160.34361"
+         y="593.77239"
+         id="tspan64">    possible example).</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-size:24px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:start;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:start;white-space:pre;inline-size:729.371;display:inline;fill:#000000;stroke-width:20;stroke-linecap:round"
+       x="-160.34361"
+       y="92.172417"
+       id="text1-8"
+       transform="matrix(0.80945469,0,0,0.80945469,264.83073,1437.8887)"><tspan
+         x="-160.34361"
+         y="92.172417"
+         id="tspan65">So, case 4) simplifies to:
+</tspan><tspan
+         x="-160.34361"
+         y="118.57242"
+         id="tspan66">    Is target_wall_time &lt;= last_event_time?
+</tspan><tspan
+         x="-160.34361"
+         y="144.97242"
+         id="tspan67">         if so, simply return next_event.t (next event is </tspan><tspan
+         x="-160.34361"
+         y="171.37242"
+         id="tspan68">overdue and immediate)
+</tspan><tspan
+         x="-160.34361"
+         y="197.77242"
+         id="tspan69">    else: use the established formula</tspan></text>
+    <text
+       xml:space="preserve"
+       id="text2"
+       style="font-size:24px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;white-space:pre;shape-inside:url(#rect2);display:inline;fill:#000000;stroke-width:20;stroke-linecap:round"
+       transform="translate(0,100)" />
+    <g
+       id="g31"
+       transform="translate(26.704173,180)">
+      <g
+         id="g22"
+         transform="matrix(0.90431775,0,0,0.90431775,72.235355,32.565629)">
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 172.96552,460.86207 V 565.55172"
+           id="path16" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 99.890978,460.86207 V 565.55172"
+           id="path33" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:1.80468;stroke-linecap:round;stroke-dasharray:1.80468, 3.60935;stroke-dashoffset:0"
+           d="M 322.83211,460.86207 V 565.55172"
+           id="path18" />
+        <rect
+           style="fill:#cccccc;stroke:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:3, 9;stroke-dashoffset:0"
+           id="rect22"
+           width="73.116005"
+           height="108.63147"
+           x="422.84503"
+           y="460.09378" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 474.41585,462.09379 V 566.78344"
+           id="path22" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 496.13793,460.86207 V 565.55172"
+           id="path19" />
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="174.45599"
+           y="595.11694"
+           id="text19"><tspan
+             sodipodi:role="line"
+             id="tspan19"
+             x="174.45599"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">self._ideal_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="95.384399"
+           y="440.15143"
+           id="text20"><tspan
+             sodipodi:role="line"
+             id="tspan20"
+             x="95.384399"
+             y="440.15143"
+             style="font-style:italic;stroke-width:4.0133">last_event_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="488.5108"
+           y="441.17276"
+           id="text34"><tspan
+             sodipodi:role="line"
+             x="488.5108"
+             y="441.17276"
+             style="font-style:italic;stroke-width:4.0133"
+             id="tspan34">_target_wall_time</tspan></text>
+        <path
+           style="font-style:italic;font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;letter-spacing:0px;word-spacing:0px;text-anchor:middle;white-space:pre;stroke-width:4.0133;stroke-linecap:round"
+           d="m 318.06767,434.8142 -1.23221,6.35856 h -1.74013 l 1.2322,-6.29272 q 0.0847,-0.44208 0.13169,-0.78071 0.047,-0.33862 0.047,-0.53615 0,-0.79011 -0.49853,-1.2322 -0.49852,-0.44209 -1.39211,-0.44209 -1.39211,0 -2.39857,0.93121 -1.00646,0.9218 -1.31686,2.51144 l -1.15696,5.84122 h -1.73073 l 2.04114,-10.53489 h 1.73073 l -0.34803,1.65548 q 0.72428,-0.91239 1.74014,-1.41092 1.01586,-0.49853 2.1352,-0.49853 1.39211,0 2.15401,0.7525 0.7713,0.75249 0.7713,2.11638 0,0.33862 -0.047,0.72427 -0.0376,0.38566 -0.12228,0.83715 z m 6.36796,6.63134 q -1.85301,0 -2.93472,-1.13815 -1.0723,-1.14755 -1.0723,-3.12284 0,-1.14755 0.36684,-2.33272 0.37625,-1.19459 0.96884,-2.00351 0.93121,-1.26043 2.07876,-1.86242 1.14755,-0.602 2.59609,-0.602 1.79658,0 2.8971,1.11934 1.10993,1.11933 1.10993,2.92531 0,1.25102 -0.36684,2.49263 -0.36684,1.24161 -0.95943,2.05995 -0.9218,1.26042 -2.06936,1.86241 -1.14755,0.602 -2.61491,0.602 z m -2.21044,-4.31743 q 0,1.42974 0.59259,2.14461 0.60199,0.70546 1.81538,0.70546 1.74014,0 2.87829,-1.51439 1.14755,-1.5238 1.14755,-3.85652 0,-1.3639 -0.6114,-2.05995 -0.6114,-0.69606 -1.79658,-0.69606 -0.97824,0 -1.74014,0.4609 -0.76189,0.4515 -1.36389,1.38271 -0.44209,0.69605 -0.68665,1.58964 -0.23515,0.89358 -0.23515,1.8436 z m 10.74182,-6.49024 h 1.71192 l 0.44209,8.47494 3.93177,-8.47494 h 2.00352 l 0.58318,8.47494 3.73424,-8.47494 h 1.73073 l -4.81595,10.53489 h -2.02232 l -0.51734,-8.72891 -4.02583,8.72891 h -2.04114 z"
+           id="text21"
+           aria-label="now" />
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="500.61102"
+           y="595.11694"
+           id="text22"><tspan
+             sodipodi:role="line"
+             id="tspan22"
+             x="500.61102"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">next_event.t</tspan></text>
+      </g>
+      <text
+         xml:space="preserve"
+         style="font-size:18.649px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:2.33112;stroke-linecap:round;stroke-dasharray:2.33112, 6.99336;stroke-dashoffset:0"
+         x="381.46884"
+         y="394.52005"
+         id="text30"><tspan
+           sodipodi:role="line"
+           id="tspan30"
+           x="381.46884"
+           y="394.52005"
+           style="stroke-width:2.33112">If now is before self._ideal_time (we're ahead of schedule):</tspan></text>
+    </g>
+    <g
+       id="g32"
+       transform="translate(22.672949,249.16685)">
+      <g
+         id="g29"
+         transform="matrix(0.90431775,0,0,0.90431775,72.235355,254.70507)">
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 172.96552,460.86207 V 565.55172"
+           id="path23" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 248.06897,460.86207 V 565.55172"
+           id="path24" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 248.06897,460.86207 V 565.55172"
+           id="path25" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 496.13793,460.86207 V 565.55172"
+           id="path26" />
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="150.12827"
+           y="595.11694"
+           id="text26"><tspan
+             sodipodi:role="line"
+             id="tspan26"
+             x="150.12827"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">self._ideal_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="250.19724"
+           y="440.15143"
+           id="text27"><tspan
+             sodipodi:role="line"
+             id="tspan27"
+             x="250.19724"
+             y="440.15143"
+             style="font-style:italic;stroke-width:4.0133">last_event_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="532.74304"
+           y="441.17276"
+           id="text28"><tspan
+             sodipodi:role="line"
+             x="532.74304"
+             y="441.17276"
+             style="font-style:italic;stroke-width:4.0133"
+             id="tspan28">_target_wall_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="500.61102"
+           y="595.11694"
+           id="text29"><tspan
+             sodipodi:role="line"
+             id="tspan29"
+             x="500.61102"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">next_event.t</tspan></text>
+        <rect
+           style="fill:#cccccc;stroke:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:3, 9;stroke-dashoffset:0"
+           id="rect29"
+           width="73.116005"
+           height="108.63147"
+           x="497"
+           y="458.86206" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 515.39664,460.86207 V 565.55172"
+           id="path29" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:1.80468;stroke-linecap:round;stroke-dasharray:1.80468, 3.60935;stroke-dashoffset:0"
+           d="M 398.63573,457.64543 V 562.33508"
+           id="path18-6" />
+        <path
+           style="font-style:italic;font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;letter-spacing:0px;word-spacing:0px;text-anchor:middle;white-space:pre;stroke-width:4.0133;stroke-linecap:round"
+           d="m 393.87129,431.59756 -1.23221,6.35856 h -1.74013 l 1.2322,-6.29272 q 0.0847,-0.44208 0.13169,-0.78071 0.047,-0.33862 0.047,-0.53615 0,-0.79011 -0.49853,-1.2322 -0.49852,-0.44209 -1.39211,-0.44209 -1.39211,0 -2.39857,0.93121 -1.00646,0.9218 -1.31686,2.51144 l -1.15696,5.84122 h -1.73073 l 2.04114,-10.53489 h 1.73073 l -0.34803,1.65548 q 0.72428,-0.91239 1.74014,-1.41092 1.01586,-0.49853 2.1352,-0.49853 1.39211,0 2.15401,0.7525 0.7713,0.75249 0.7713,2.11638 0,0.33862 -0.047,0.72427 -0.0376,0.38566 -0.12228,0.83715 z m 6.36796,6.63134 q -1.85301,0 -2.93472,-1.13815 -1.0723,-1.14755 -1.0723,-3.12284 0,-1.14755 0.36684,-2.33272 0.37625,-1.19459 0.96884,-2.00351 0.93121,-1.26043 2.07876,-1.86242 1.14755,-0.602 2.59609,-0.602 1.79658,0 2.8971,1.11934 1.10993,1.11933 1.10993,2.92531 0,1.25102 -0.36684,2.49263 -0.36684,1.24161 -0.95943,2.05995 -0.9218,1.26042 -2.06936,1.86241 -1.14755,0.602 -2.61491,0.602 z m -2.21044,-4.31743 q 0,1.42974 0.59259,2.14461 0.60199,0.70546 1.81538,0.70546 1.74014,0 2.87829,-1.51439 1.14755,-1.5238 1.14755,-3.85652 0,-1.3639 -0.6114,-2.05995 -0.6114,-0.69606 -1.79658,-0.69606 -0.97824,0 -1.74014,0.4609 -0.76189,0.4515 -1.36389,1.38271 -0.44209,0.69605 -0.68665,1.58964 -0.23515,0.89358 -0.23515,1.8436 z m 10.74182,-6.49024 h 1.71192 l 0.44209,8.47494 3.93177,-8.47494 h 2.00352 l 0.58318,8.47494 3.73424,-8.47494 h 1.73073 l -4.81595,10.53489 h -2.02232 l -0.51734,-8.72891 -4.02583,8.72891 h -2.04114 z"
+           id="text21-0"
+           aria-label="now" />
+      </g>
+      <text
+         xml:space="preserve"
+         style="font-size:18.649px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:2.33112;stroke-linecap:round;stroke-dasharray:2.33112, 6.99336;stroke-dashoffset:0"
+         x="381.46884"
+         y="615.49603"
+         id="text31"><tspan
+           sodipodi:role="line"
+           id="tspan31"
+           x="381.46884"
+           y="615.49603"
+           style="stroke-width:2.33112">If now is between self._ideal_time and next_event.t:</tspan></text>
+    </g>
+    <g
+       id="g33"
+       transform="translate(-0.61814512,313.95258)">
+      <g
+         id="g15"
+         transform="matrix(0.90431775,0,0,0.90431775,-53.764645,469.88402)">
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 172.96552,460.86207 V 565.55172"
+           id="path9" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 557.69465,460.86207 V 565.55172"
+           id="path11" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:5;stroke-linecap:round;stroke-dasharray:none"
+           d="M 496.13793,460.86207 V 565.55172"
+           id="path12" />
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="216.47662"
+           y="595.11694"
+           id="text12"><tspan
+             sodipodi:role="line"
+             id="tspan12"
+             x="216.47662"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">self._ideal_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="559.823"
+           y="444.57465"
+           id="text13"><tspan
+             sodipodi:role="line"
+             id="tspan13"
+             x="559.823"
+             y="444.57465"
+             style="font-style:italic;stroke-width:4.0133">last_event_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="737.65729"
+           y="441.67639"
+           id="text14"><tspan
+             sodipodi:role="line"
+             x="737.65729"
+             y="441.67639"
+             style="font-style:italic;stroke-width:4.0133"
+             id="tspan14">_target_wall_time</tspan></text>
+        <text
+           xml:space="preserve"
+           style="font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:4.0133;stroke-linecap:round;stroke-dasharray:none"
+           x="500.61102"
+           y="595.11694"
+           id="text15"><tspan
+             sodipodi:role="line"
+             id="tspan15"
+             x="500.61102"
+             y="595.11694"
+             style="font-style:italic;stroke-width:4.0133">next_event.t</tspan></text>
+        <rect
+           style="fill:#cccccc;stroke:none;stroke-width:6.29493;stroke-linecap:round;stroke-dasharray:6.29493, 18.8848;stroke-dashoffset:0"
+           id="rect15-2"
+           width="321.92322"
+           height="108.63147"
+           x="558.58594"
+           y="458.86206" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:1.80468;stroke-linecap:round;stroke-dasharray:1.80468, 3.60935;stroke-dashoffset:0"
+           d="M 648.66134,458.86592 V 563.55557"
+           id="path18-6-3" />
+        <path
+           style="font-style:italic;font-size:19.2638px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;letter-spacing:0px;word-spacing:0px;text-anchor:middle;white-space:pre;stroke-width:4.0133;stroke-linecap:round"
+           d="m 643.8969,587.63089 -1.23221,6.35856 h -1.74013 l 1.2322,-6.29272 q 0.0847,-0.44208 0.13169,-0.78071 0.047,-0.33862 0.047,-0.53615 0,-0.79011 -0.49853,-1.2322 -0.49852,-0.44209 -1.39211,-0.44209 -1.39211,0 -2.39857,0.93121 -1.00646,0.9218 -1.31686,2.51144 l -1.15696,5.84122 h -1.73073 l 2.04114,-10.53489 h 1.73073 l -0.34803,1.65548 q 0.72428,-0.91239 1.74014,-1.41092 1.01586,-0.49853 2.1352,-0.49853 1.39211,0 2.15401,0.7525 0.7713,0.75249 0.7713,2.11638 0,0.33862 -0.047,0.72427 -0.0376,0.38566 -0.12228,0.83715 z m 6.36796,6.63134 q -1.85301,0 -2.93472,-1.13815 -1.0723,-1.14755 -1.0723,-3.12284 0,-1.14755 0.36684,-2.33272 0.37625,-1.19459 0.96884,-2.00351 0.93121,-1.26043 2.07876,-1.86242 1.14755,-0.602 2.59609,-0.602 1.79658,0 2.8971,1.11934 1.10993,1.11933 1.10993,2.92531 0,1.25102 -0.36684,2.49263 -0.36684,1.24161 -0.95943,2.05995 -0.9218,1.26042 -2.06936,1.86241 -1.14755,0.602 -2.61491,0.602 z m -2.21044,-4.31743 q 0,1.42974 0.59259,2.14461 0.60199,0.70546 1.81538,0.70546 1.74014,0 2.87829,-1.51439 1.14755,-1.5238 1.14755,-3.85652 0,-1.3639 -0.6114,-2.05995 -0.6114,-0.69606 -1.79658,-0.69606 -0.97824,0 -1.74014,0.4609 -0.76189,0.4515 -1.36389,1.38271 -0.44209,0.69605 -0.68665,1.58964 -0.23515,0.89358 -0.23515,1.8436 z m 10.74182,-6.49024 h 1.71192 l 0.44209,8.47494 3.93177,-8.47494 h 2.00352 l 0.58318,8.47494 3.73424,-8.47494 h 1.73073 l -4.81595,10.53489 h -2.02232 l -0.51734,-8.72891 -4.02583,8.72891 h -2.04114 z"
+           id="text21-0-5"
+           aria-label="now" />
+        <path
+           style="fill:#000000;stroke:#000000;stroke-width:3;stroke-linecap:round;stroke-dasharray:6, 6;stroke-dashoffset:0"
+           d="M 715.41135,459.63035 V 564.32"
+           id="path15" />
+      </g>
+      <text
+         xml:space="preserve"
+         style="font-size:18.649px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke:none;stroke-width:2.33112;stroke-linecap:round;stroke-dasharray:2.33112, 6.99336;stroke-dashoffset:0"
+         x="415.46884"
+         y="842.0166"
+         id="text8"><tspan
+           sodipodi:role="line"
+           id="tspan8"
+           x="415.46884"
+           y="842.0166"
+           style="stroke-width:2.33112">If now is at or after next_event.t (we're behind and already overdue):</tspan></text>
+    </g>
+    <text
+       xml:space="preserve"
+       style="font-size:17.3333px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;inline-size:783.699;display:inline;fill:#000000;stroke:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:3, 9;stroke-dashoffset:0"
+       x="226.11465"
+       y="623.76459"
+       id="text48"
+       transform="matrix(0.80097573,0,0,0.80097573,231.06623,291.41621)"><tspan
+         x="226.11465"
+         y="623.76459"
+         id="tspan70">In this case, projected time is 
+</tspan><tspan
+         x="226.11465"
+         y="642.83126"
+         id="tspan73"><tspan
+   style="font-weight:bold"
+   id="tspan71">self.ideal_time + min(1, max(0, progress)) * (next_event.t -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan72">self._ideal_time))</tspan><tspan
+   y="642.83126"
+   id="tspan74"> </tspan></tspan><tspan
+         x="226.11465"
+         y="661.89791"
+         id="tspan77">where <tspan
+   style="font-weight:bold"
+   id="tspan75">progress = (now - last_event_time) /  (target_wall_time -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan76">last_event_time)</tspan></tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-size:17.3333px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;inline-size:783.699;display:inline;fill:#000000;stroke:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:3, 9;stroke-dashoffset:0"
+       x="226.11465"
+       y="623.76459"
+       id="text57"
+       transform="matrix(0.80097573,0,0,0.80097573,231.06623,582.7225)"><tspan
+         x="226.11465"
+         y="623.76459"
+         id="tspan78">In this case, projected time is also 
+</tspan><tspan
+         x="226.11465"
+         y="642.83126"
+         id="tspan81"><tspan
+   style="font-weight:bold"
+   id="tspan79">self.ideal_time +  min(1, max(0, progress)) * (next_event.t -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan80">self._ideal_time))</tspan><tspan
+   y="642.83126"
+   id="tspan82"> </tspan></tspan><tspan
+         x="226.11465"
+         y="661.89791"
+         id="tspan85">where <tspan
+   style="font-weight:bold"
+   id="tspan83">progress = (now - last_event_time) /  (target_wall_time -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan84">last_event_time)</tspan></tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-size:17.3333px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;inline-size:840.109;display:inline;fill:#000000;stroke:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:3, 9;stroke-dashoffset:0"
+       x="226.11465"
+       y="623.76459"
+       id="text33"
+       transform="matrix(0.80097573,0,0,0.80097573,231.06623,862.68718)"><tspan
+         x="226.11465"
+         y="623.76459"
+         id="tspan86">In this case, projected time is yet again 
+</tspan><tspan
+         x="226.11465"
+         y="642.83126"
+         id="tspan89"><tspan
+   style="font-weight:bold"
+   id="tspan87">self.ideal_time +  min(1, max(0, progress)) * (next_event.t -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan88">self._ideal_time))</tspan> where 
+</tspan><tspan
+         x="226.11465"
+         y="661.89791"
+         id="tspan92"><tspan
+   style="font-weight:bold"
+   id="tspan90">progress = (now - last_event_time) /  (target_wall_time -</tspan> <tspan
+   style="font-weight:bold"
+   id="tspan91">last_event_time)
+</tspan></tspan><tspan
+         x="226.11465"
+         y="680.96456"
+         id="tspan94"><tspan
+           style="font-weight:bold"
+           id="tspan93">
+</tspan></tspan><tspan
+         x="226.11465"
+         y="700.03121"
+         id="tspan96"><tspan
+           style="font-weight:bold"
+           id="tspan95">HOWEVER
+</tspan></tspan><tspan
+         x="226.11465"
+         y="719.09786"
+         id="tspan97">
+</tspan><tspan
+         x="226.11465"
+         y="738.16451"
+         id="tspan98">Since we're past due, a pure absolute policy could lead to _target_wall_time = last_event_time
+</tspan><tspan
+         x="226.11465"
+         y="757.23116"
+         id="tspan99">which would lead to a divide by zero in the formula above.</tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-size:26.6667px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke-width:20;stroke-linecap:round"
+       x="110.2471"
+       y="1482.6071"
+       id="text58"><tspan
+         sodipodi:role="line"
+         id="tspan58"
+         x="110.2471"
+         y="1504.2008"></tspan></text>
+    <text
+       xml:space="preserve"
+       style="font-size:33.1764px;line-height:1.1;font-family:Sans;-inkscape-font-specification:Sans;text-align:center;text-decoration-color:#000000;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;direction:ltr;text-anchor:middle;white-space:pre;fill:#000000;stroke-width:24.8823;stroke-linecap:round"
+       x="389.12442"
+       y="62.817291"
+       id="text59"><tspan
+         sodipodi:role="line"
+         id="tspan59"
+         x="389.12442"
+         y="62.817291"
+         style="stroke-width:24.8823">How Projected Time is Caculated</tspan></text>
+  </g>
+</svg>
