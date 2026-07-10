@@ -24,7 +24,7 @@ class DurationUnits(StrEnum):
 
     Note that time is only true seconds on the master clock.
     Within a clock tree, a child's TIME is the same as its parent's BEATS, and is affected by the rates of
-    all clocks above it in the tree. Use :meth:`~clockblocks.clock.Clock.time_in_master` for true seconds.
+    all clocks above it in the tree. Use ``clock.master.time()`` for true seconds.
 
     A ``StrEnum``, so the bare strings "beats" / "time" are accepted interchangeably."""
     BEATS = "beats"

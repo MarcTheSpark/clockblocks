@@ -310,13 +310,12 @@ class Clock:
             threading.current_thread().__clock__ = self
             # the "parent" of the master clock, timing wise, is the scheduler. But master_clock.parent is None
             # still because there is not parent clock.
-            self.parent_offset = self._start_time_in_scheduler = self.scheduler.time()
+            self.parent_offset = self.scheduler.time()
         else:
             # Forked children start PENDING and flip to ALIVE at the top of _fork_wrapper
             # once their start_delay has elapsed.
             self._state = ClockState.PENDING
             self.parent_offset = self.parent.beat()
-            self._start_time_in_scheduler = self.parent_offset + self.parent._start_time_in_scheduler
 
     @staticmethod
     def _rate_tempo_or_beat_length_to_rate(rate, tempo, beat_length) -> float:
@@ -483,73 +482,90 @@ class Clock:
         )
 
     ##################################################################################################################
-    #                                        Boilerplate TempoHistory Functionality
+    #                                                 Clock Position
     ##################################################################################################################
+    # Methods describing the current beat/time of this clock. Positions are derived on demand from the scheduler
+    # and mapped onto this clock's axes by `scheduler_to_clock_time`, so they are consistent from any thread.
+    # These methods are read-only and never mutate `tempo_history` (the owning thread's committed pointer).
+    #
+    # Two different readings of the clock position are available:
+    #
+    # - The *committed* position (`time`/`beat`) is based on what `Scheduler.time()` reports, and is only updated
+    #   when a new event executes in the scheduler. Since the scheduler is shared for the whole clock family, this
+    #   means that any such read of any clock's position from a clock thread is fully up-to-date. Reads coming from
+    #   *outside* of the clock family, however, are quantized to the family's event stream.
+    # - The *projected* position (`projected_time`/`projected_beat`) is based on what `Scheduler.projected_time()`
+    #   reports: a wall-clock-interpolated estimate that advances smoothly between events. This is the natural
+    #   choice for a reader outside the clock system looking for a smoothly advancing clock position. Being an
+    #   estimate, it can step backward; see `Scheduler.projected_time`.
+    # ------------------------------------------------------------------
 
-    def time(self, projected: bool = False) -> float:
+    def time(self) -> float:
         """
         How much time has passed since this clock was created. Either in seconds, if this is the master
-        clock, or in beats in the parent clock, if this clock was the result of a call to fork.
+        clock, or in beats in the parent clock, if this clock was the result of a call to fork. Note that
+        this is quantized to the scheduler's event stream; for a live estimate when outside the clock system
+        use :meth:`projected_time`.
 
-        Computed on demand from the scheduler's committed position, so it is consistent from any thread
-        without the owning thread having had to advance its `tempo_history` pointer first. Note, however,
-        that the scheduler's position is **event-quantized, not wall-clock-interpolated**: it is bumped to
-        each event's time as that event executes (across the whole family), so a clock reading its own
-        position while its action runs sees the exact current value, but a read taken *between* events
-        (from a non-clock thread) is frozen at the time of the most recent event.
-
-        :param projected: if ``True``, return a wall-clock-interpolated estimate of the current position
-            (via :meth:`Scheduler.projected_time`) instead of the committed, event-quantized value. Useful
-            for a smoothly-advancing read from a non-clock thread between events; the default ``False`` gives
-            the committed value that everything else in the family agrees on.
         :return: the elapsed time (see units above).
-
-        Does not mutate `tempo_history` (the committed pointer).
         """
-        scheduler_time = self.scheduler.projected_time() if projected else self.scheduler.time()
-        return self.scheduler_to_clock_time(scheduler_time, desired_units="time")
+        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="time")
 
-    def beat(self, projected: bool = False) -> float:
+    def beat(self) -> float:
         """
-        How many beats have passed since this clock was created. See :meth:`time` for thread/laziness
-        semantics and for the ``projected`` flag.
+        How many beats have passed since this clock was created. Note that this is quantized to the scheduler's
+        event stream; for a live estimate when outside the clock system use :meth:`projected_time`.
 
-        :param projected: if ``True``, return a wall-clock-interpolated estimate of the current beat rather
-            than the committed, event-quantized value. See :meth:`time`.
         :return: the elapsed beats.
         """
-        scheduler_time = self.scheduler.projected_time() if projected else self.scheduler.time()
-        return self.scheduler_to_clock_time(scheduler_time, desired_units="beats")
+        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
 
-    def time_in_master(self) -> float:
+    def projected_time(self) -> float:
         """
-        This clock's current position projected onto the master's time axis (true seconds since the
-        master was created). Equivalent to ``self.master.time()``, since master.time() is itself live
-        and any thread reads the same scheduler-derived value.
-        """
-        return self.master.time()
+        A wall-clock-interpolated estimate of :meth:`time`, advancing smoothly between events rather than
+        holding still between them. For readers outside the clock system; see the section comment above.
 
-    def wall_time_in_scheduler(self) -> float:
+        This is an estimate, and it can step backward — see :meth:`Scheduler.projected_time`.
+
+        :return: the estimated elapsed time, in the same units as :meth:`time`.
         """
-        How long has this clock been alive in the scheduler.
+        return self.scheduler_to_clock_time(self.scheduler.projected_time(), desired_units="time")
+
+    def projected_beat(self) -> float:
         """
-        return self.scheduler.wall_time() - self._start_time_in_scheduler
+        A wall-clock-interpolated estimate of :meth:`beat`. See :meth:`projected_time`.
+
+        :return: the estimated elapsed beats.
+        """
+        return self.scheduler_to_clock_time(self.scheduler.projected_time(), desired_units="beats")
 
     def status(self, verbose: bool = False) -> str:
         """
-        A snapshot of this clock's name, beat, time, and wall time in the scheduler.
+        A snapshot of this clock's name and position, alongside the scheduler's elapsed wall time and how
+        far behind schedule it is currently running.
         """
         name = self.name if self.name is not None else "UNNAMED"
+        wall = self.scheduler.wall_time()
+        lag = self.scheduler.lag()
         if verbose:
             return (f"Clock {name!r}\n"
                     f"  beat: {self.beat():.9f}\n"
                     f"  time: {self.time():.9f}\n"
-                    f"  wall: {self.wall_time_in_scheduler():.9f}")
-        return f"[{name} beat={self.beat():.3f} time={self.time():.3f} wall={self.wall_time_in_scheduler():.3f}]"
+                    f"  wall: {wall:.9f}\n"
+                    f"  lag:  {lag:.9f}")
+        return f"[{name} beat={self.beat():.3f} time={self.time():.3f} wall={wall:.3f} lag={lag:.3f}]"
 
     def print_status(self, verbose: bool = False) -> None:
         """Print this clock's :meth:`status` snapshot."""
         print(self.status(verbose), flush=True)
+
+    ##################################################################################################################
+    #                                               Tempo Properties
+    ##################################################################################################################
+    # `beat_length`, `rate` and `tempo` are three views on the same quantity, delegated to this clock's
+    # `TempoHistory`; the `absolute_*` readings fold in every ancestor's rate to express it against true
+    # seconds rather than the parent's beats.
+    # ------------------------------------------------------------------
 
     @property
     def beat_length(self) -> float:
@@ -1371,12 +1387,11 @@ class Clock:
             def _fork_wrapper(*args, **kwds):
                 # ~~~~~ Wrapper step 1: Thread/clock setup ~~~~~
                 # Bind __clock__ so current_clock() resolves to the child inside the user function,
-                # finalize parent_offset / _start_time_in_scheduler, and flip ALIVE. Both are read now,
-                # at the actual fire instant, so they reflect where the child truly starts — correct no
-                # matter how the fork event was rescheduled in the interim (e.g. by a tempo change).
+                # finalize parent_offset, and flip ALIVE. parent_offset is read now, at the actual fire
+                # instant, so it reflects where the child truly starts — correct no matter how the fork
+                # event was rescheduled in the interim (e.g. by a tempo change).
                 threading.current_thread().__clock__ = child
                 child.parent_offset = self.beat()
-                child._start_time_in_scheduler = self.scheduler.time()
                 child._state = ClockState.ALIVE
 
                 try:
@@ -1844,6 +1859,21 @@ class Clock:
         Clock._removed_attribute(
             "Clock.release_from_suspension()", "`with clock.while_scheduler_quiescent(): ...`",
             "the rouse/hold pair is now an exception-safe `with` block"
+        )
+
+    def time_in_master(self, *args, **kwargs) -> None:
+        Clock._removed_attribute(
+            "Clock.time_in_master()", "`clock.master.time()`",
+            "it was a bare proxy for master.time(), and being one it could not forward the `projected` "
+            "flag that an out-of-clock reader of the master's position usually wants"
+        )
+
+    def wall_time_in_scheduler(self, *args, **kwargs) -> None:
+        Clock._removed_attribute(
+            "Clock.wall_time_in_scheduler()", "`clock.scheduler.wall_time()` or `clock.scheduler.lag()`",
+            "it subtracted a scheduler-time from a wall-time, yielding this clock's lifetime contaminated "
+            "by whatever schedule lag predated the clock; both quantities it conflated are scheduler-wide, "
+            "not per-clock"
         )
 
     def __repr__(self):

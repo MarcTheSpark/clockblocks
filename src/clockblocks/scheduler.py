@@ -200,6 +200,11 @@ class Scheduler(threading.Thread):
         the last event toward the next, so continuous readers (e.g. parameter automation) see smooth motion. The
         estimate depends on :attr:`timing_policy`, which decides when the next event is planned to arrive.
 
+        This is an *estimate*, and it is **not monotonic**: it can step backward when the schedule changes under
+        it — a fast-forward begins, an event is booked at or before the committed time, a newly non-empty queue
+        caps a previously free-climbing projection, or `timing_policy` is retuned live. A consumer that needs a
+        non-decreasing reading must ratchet it itself.
+
         Refer to ``diagrams/projectedTimeExplanation`` for how this resolves under the various scenarios (ahead
         of schedule, behind, empty queue, etc.).
         """
@@ -250,6 +255,18 @@ class Scheduler(threading.Thread):
         (slews or steps) to CLOCK_REALTIME. Under a compressed backend it is scaled in step with everything else.
         """
         return self._time.now() - self._start_time if self._start_time else 0.0
+
+    def lag(self) -> float:
+        """
+        How far behind the absolute schedule the scheduler is currently running, in seconds: the real time
+        that has elapsed minus the ideal time that should have elapsed.
+
+        Positive means events are firing late. It grows when an event's action takes longer than the gap to
+        the next event, and (under a relative timing policy) is allowed to persist rather than being chased
+        down. Fast-forwarding resets it to zero, since :meth:`_reanchor_timing` re-anchors ``_start_time``
+        to put us exactly on the absolute schedule.
+        """
+        return self.wall_time() - self.time()
 
     def set_fast_forward_goal(self, goal: float | None) -> None:
         """
