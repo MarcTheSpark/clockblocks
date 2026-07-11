@@ -4,7 +4,8 @@ origins the redesign has to handle:
 
   * the clock's own thread (trivial — the running clock changes its own tempo and its next wait reflects it),
   * a sibling clock's thread (Step 3 — reschedule a foreign clock's pending wakeup),
-  * a non-clock thread (Step 8 — an external mutator takes while_quiescent() + the tree lock).
+  * a non-clock thread (Step 8 — an external mutator takes held() + the tree lock),
+  * another family's clock thread (a clock, but of a different scheduler, so it too must take held()).
 
 The common shape for the foreign-origin cases: a child parks in a long wait at tempo 60; a mutator on the
 other thread speeds the child's tempo up dramatically; the child must wake far sooner than its original
@@ -101,6 +102,49 @@ class TempoChangeOriginTestCase(unittest.TestCase):
         self.assertIn("wall", woke)
         self.assertLess(woke["wall"], 2.0,
                         f"sleeper woke at {woke['wall']:.3f}s — non-clock-thread tempo change didn't reschedule it.")
+
+    # ---- another family's clock thread ----
+
+    def test_tempo_change_from_other_family_takes_held(self):
+        """A mutator that is a clock, but of a *different* family, must still take held() on the target's
+        scheduler — it can't skip it the way an own-family clock legitimately does. Proven by holding the
+        target family in a long action and checking the cross-family mutation does not return until that
+        action finishes. Fails if the hold_scheduler() branch mistreats another family as same-family
+        (the pre-fix `current_clock() is None` predicate did exactly that, taking only the tree lock)."""
+        in_action = threading.Event()      # set while family A is mid-action (its exec lock is held)
+        action_done = threading.Event()
+        mutation_done = threading.Event()
+        observed = {}
+
+        # Family A: `worker`'s turn holds A's execution lock for a real 0.3s; `sleeper` is a parked target.
+        def worker():
+            in_action.set()
+            timing.sleep(0.3)              # A's scheduler is parked in this turn, holding _execution_lock
+            in_action.clear()
+            action_done.set()
+        sleeper = self.master.fork(lambda: current_clock().wait(5.0))
+        self.master.fork(worker)
+
+        def other_family():
+            other_master = Clock(name="other", initial_tempo=60)
+            try:
+                def mutator():
+                    in_action.wait(timeout=1)                 # mutate WHILE A is mid-action
+                    sleeper.tempo = 120                       # cross-family: held() must block until A is idle
+                    observed["action_still_running"] = in_action.is_set()
+                    mutation_done.set()
+                other_master.fork(mutator)
+                other_master.wait(1.0)
+            finally:
+                other_master.kill()
+
+        threading.Thread(target=other_family, daemon=True).start()
+        self.master.wait(1.0)
+        self.assertTrue(mutation_done.wait(timeout=2), "cross-family mutation never completed")
+        self.assertTrue(action_done.is_set())
+        self.assertFalse(observed.get("action_still_running", True),
+                         "cross-family tempo change returned while the target scheduler was mid-action — "
+                         "held() was skipped.")
 
 
 if __name__ == "__main__":

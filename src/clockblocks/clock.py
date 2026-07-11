@@ -154,34 +154,24 @@ def _reschedule_after_tempo_change(fn):
     Two concurrency hazards, two locks:
       * The clock tree must not change while we enumerate descendants to reschedule them, so we hold
         `_tree_lock` throughout.
-      * A clock mutates its own tempo_history in wait()'s cleanup, as well as possibly from user code,
-        so we must not rewrite tempo_history from an outside thread while a clock is awake. This is not an issue
-        for any of the other threads *within* the clock system, since only one clock can be awake at a time.
-        On the other hand, when a tempo-modifier is called from a thread *external to the clock system*
-        (current_clock() is None), we must wait for a dormant window where no clocks are executing. We do
-        this via `scheduler.while_quiescent()`. Note that, if we tried to use while_quiescent() from a clock
-        thread it would deadlock (see its docstring).
+      * A clock mutates its own tempo_history in wait()'s cleanup, and possibly from user code, so we must
+        not rewrite it from elsewhere while a clock is awake. *Within* a clock family this can't happen, since only
+        one clock is ever awake at a time. But a caller *outside* the family (a plain thread, or a clock of
+        another family) *could* cause issues by acting at the same time that the clock is mutating its own history.
+        We use `self.hold_scheduler()` to handle these two cases gracefully, and also ensure that the scheduler
+        is up-to-date, so the change applies from the current position.
 
-    The lock order — `_execution_lock` (via while_quiescent) then `_tree_lock` — matters: while_quiescent()
-    blocks until the scheduler finishes its current action, and the clock running that action may itself
-    need `_tree_lock` (to fork, kill, or finish and detach). Holding `_tree_lock` while waiting in
-    while_quiescent() would therefore deadlock.
+    Note that lock order (`_execution_lock` (via held) → `_tree_lock`) matters: held() blocks until the scheduler
+    finishes its current action, and the clock running that action may itself need `_tree_lock` (to fork,
+    kill, or finish and detach). Holding `_tree_lock` while waiting in held() would therefore deadlock.
     """
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
-        def apply():
+        with self.hold_scheduler(), self._tree_lock:
             self.bring_up_to_date()
             result = fn(self, *args, **kwargs)
             self._reschedule_self_and_descendants()
             return result
-
-        if current_clock() is None:
-            # External thread: wait until no clock is awake, then mutate.
-            with self.scheduler.while_quiescent(), self._tree_lock:
-                return apply()
-        # On a clock's own thread: scheduler is frozen on us; only the tree needs guarding.
-        with self._tree_lock:
-            return apply()
     return wrapper
 
 
@@ -356,22 +346,21 @@ class Clock:
         """
         return self.parent is None
 
-    def while_scheduler_quiescent(self):
+    def hold_scheduler(self):
         """
-        Context manager that ensures the scheduler is not mid-action while the body runs. Wraps
-        :meth:`Scheduler.while_quiescent` with a same-family skip: if the calling thread is already a
-        clock thread of this scheduler (either a clock executing user code between waits, or a foreign
-        thread already inside an outer ``while_scheduler_quiescent`` block that tagged ``__clock__``),
-        re-acquiring the lock would deadlock — so we yield a no-op instead, since the caller already
-        has exclusive access by construction.
+        Context manager that: 1) ensures that the scheduler is not executing scheduled actions — waiting if one is
+        in flight, then preventing others from starting; 2) rouses the scheduler and updates its committed time to
+        the current projected time. Code under this context manager therefore acts like an immediately scheduled
+        action, holding exclusive access to an up-to-date scheduler.
 
-        Use this anywhere foreign-thread callers might mutate state a scheduled action reads
-        (e.g. a pygame handler calling scamp's :meth:`~scamp.transcriber.Transcriber.start_transcribing`).
+        Note that, when used from within the clock system, this context manager is a no-op, since the current thread
+        already holds exclusive access to an up-to-date scheduler. In fact, invoking `clock.scheduler.held()` in
+        that context would cause deadlock, which is why this method exists as the main entry point.
         """
         active_clock = getattr(threading.current_thread(), '__clock__', None)
         if getattr(active_clock, 'scheduler', None) is self.scheduler:
             return nullcontext()
-        return self.scheduler.while_quiescent()
+        return self.scheduler.held()
 
     def children(self) -> Sequence['Clock']:
         """
@@ -634,7 +623,7 @@ class Clock:
     ##################################################################################################################
     # Thin Clock-level bridges over TempoHistory's tempo-curve mutation API: they wrap the underlying
     # call in `@_reschedule_after_tempo_change` (so queued descendant wake-ups re-project against the
-    # new curve and so the mutation acquires `_tree_lock` / `while_quiescent` as appropriate) and
+    # new curve and so the mutation acquires `_tree_lock` / `held` as appropriate) and
     # express *when* a target is reached as a ResolvableMoment — a `Moment` (after_beats/after_time/
     # at_beat/at_time) or a `MetricPhaseTarget` (which lands the target on the next matching metric
     # phase). The Moment carries its own beats-vs-time axis, so there is no separate `duration_units`,
@@ -1850,14 +1839,14 @@ class Clock:
 
     def rouse_and_hold(self, *args, **kwargs) -> None:
         Clock._removed_attribute(
-            "Clock.rouse_and_hold()", "`with clock.while_scheduler_quiescent(): ...`",
+            "Clock.rouse_and_hold()", "`with clock.hold_scheduler(): ...`",
             "the rouse half is obsolete (lazy beat()/time() are live from any thread), and the hold "
             "half is now an exception-safe `with` block that pairs acquire/release automatically"
         )
 
     def release_from_suspension(self, *args, **kwargs) -> None:
         Clock._removed_attribute(
-            "Clock.release_from_suspension()", "`with clock.while_scheduler_quiescent(): ...`",
+            "Clock.release_from_suspension()", "`with clock.hold_scheduler(): ...`",
             "the rouse/hold pair is now an exception-safe `with` block"
         )
 

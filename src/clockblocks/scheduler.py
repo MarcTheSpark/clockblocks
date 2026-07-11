@@ -138,11 +138,11 @@ class Scheduler(threading.Thread):
         self._queue = []
 
         # Two synchronization primitives, kept deliberately separate. How each is used (and why) lives
-        # where it matters — see run() for _queue_change_condition and while_quiescent() for _execution_lock.
+        # where it matters — see run() for _queue_change_condition and held() for _execution_lock.
         #   _queue_change_condition — guards the heap and signals changes to it: anything that reads or
         #       writes _queue holds it, and notify_all() wakes the run loop to re-evaluate the head.
         #   _execution_lock — held by the run loop for the full duration of each action's execution, so
-        #       "held" == "mid-action". while_quiescent() takes it to mutate action-related state safely.
+        #       "locked" == "mid-action". held() takes it to mutate action-related state safely.
         # Lock order: the run loop never holds _queue_change_condition while taking _execution_lock — if
         # it did, a running action couldn't modify the queue. For the clock system that's essential:
         # actions routinely schedule wake-ups, fork, and reschedule after tempo changes.
@@ -200,10 +200,14 @@ class Scheduler(threading.Thread):
         the last event toward the next, so continuous readers (e.g. parameter automation) see smooth motion. The
         estimate depends on :attr:`timing_policy`, which decides when the next event is planned to arrive.
 
-        This is an *estimate*, and it is **not monotonic**: it can step backward when the schedule changes under
-        it — a fast-forward begins, an event is booked at or before the committed time, a newly non-empty queue
-        caps a previously free-climbing projection, or `timing_policy` is retuned live. A consumer that needs a
-        non-decreasing reading must ratchet it itself.
+        This is an estimate, and not monotonic. It resets on deliberate schedule changes (a fast-forward, a
+        live `timing_policy` retune), and booking an event below the current projection pulls it back to that
+        event. (This kind of makes sense, since the free-climb overshot a point where something needed to happen.)
+        In both cases the cause of the backward step is that we are collapsing the gap between a stale committed
+        time and an overly optimistic projected time.
+
+        To avoid this issue entirely, use the :meth:`held` context manager, which first rouses
+        the scheduler to the projected position.
 
         Refer to ``diagrams/projectedTimeExplanation`` for how this resolves under the various scenarios (ahead
         of schedule, behind, empty queue, etc.).
@@ -291,23 +295,51 @@ class Scheduler(threading.Thread):
             self._queue_change_condition.notify_all()
 
     @contextmanager
-    def while_quiescent(self):
+    def held(self):
         """
-        Context manager that blocks until the scheduler is *between* actions, and keeps it that way for
-        the body of the `with`. Use it to mutate state that a scheduled action reads or writes without
-        racing that action: while held, no action is executing and the run loop can't start one.
+        Context manager that: 1) ensures that the scheduler is not executing scheduled actions — waiting if one is
+        in flight, then preventing others from starting; 2) rouses the scheduler and updates its committed time to
+        the current projected time. Code under this context manager therefore acts like an immediately scheduled
+        action, holding exclusive access to an up-to-date scheduler.
 
         Implemented by taking `_execution_lock`, which the run loop holds for the full duration of each
         action. So don't call this from within a scheduled action: you'd block waiting for that action
         to finish, but it can't finish while it's stuck waiting here.
 
-        In the context of the clock system, it also shouldn't be called from the clock thread, since that
-        will only be running while the scheduler is parked inside of _execute_event. For this reason we
-        have :meth:`Clock.while_scheduler_quiescent`, which safely wraps this method by detecting whether
-        we are running from a clock and no-op'ing in that case.
+        In the context of the clock system, this context manager should be used any time you want to
+        take clock-related actions from a non-clock thread. However, since it's implemented by taking the
+        same `_execution_lock` held during scheduled actions, it should never be used *within* a scheduled
+        action: the action would block waiting for itself to finish. For this reason we have
+        :meth:`Clock.hold_scheduler`, which safely wraps this method by detecting whether we are running
+        from a clock and no-op'ing in that case.
         """
         with self._execution_lock:
+            self._rouse_to_now()
             yield self
+
+    def _rouse_to_now(self) -> None:
+        """
+        Advance the committed position (:meth:`time`) to the current interpolated position, as if a
+        zero-duration event had just fired now. Internal helper of :meth:`held` (never call it directly —
+        it must run under `_execution_lock`) so that a scheduler woken between actions sees an up-to-date time.
+        """
+        if self._last_event_time is None or self._fast_forward_goal is not None:
+            # not started, or fast-forwarding (no meaningful "now" between events): nothing to advance
+            return
+        # Safe by construction, because :meth:`projected_time` always lies in ``[_ideal_time, next_event.t]``:
+        # the bump only ever moves ``_ideal_time`` forward (committed time stays monotonic) and never past the
+        # next queued event (so nothing is skipped or mis-stamped when the run loop resumes). ``_start_time`` is
+        # left untouched, so the absolute schedule — and therefore the next event's wall-clock target — is
+        # preserved; we re-anchor ``_last_event_time`` to now, exactly as a real event would.
+        #
+        # The write is under _queue_change_condition because this method runs on a *foreign* thread, and the run loop
+        # reads this pair together in Step 1b (under _compute_wait_duration -> _target_wall_time) under that same lock.
+        # Without it, run-loop STEP 1 could read a torn pair — new _ideal_time against the old _last_event_time — and
+        # compute the wrong wait. Lock order is _execution_lock (already held) → _queue_change_condition, matching
+        # _execute_event.
+        with self._queue_change_condition:
+            self._ideal_time = self.projected_time()
+            self._last_event_time = self._time.now()
 
     def remove_events(self, matches: Callable[['QueueEvent'], bool]) -> int:
         """
@@ -448,10 +480,10 @@ class Scheduler(threading.Thread):
 
             # --------------------------- STEP 2: Perform the scheduled action -------------------------------
             # Executed events happen under the _execution_lock. If an external thread wants to make sure that
-            # we are not mid-action, it can use the context manager while_quiescent().
+            # we are not mid-action, it can use the context manager held().
             #
             # In the context of the Clock system, the scheduled action parks the scheduler and allows the clock
-            # to perform user code until the next wait. clock._reschedule_after_tempo_change uses while_quiescent()
+            # to perform user code until the next wait. clock._reschedule_after_tempo_change uses held()
             # to ensure that we only modify tempo/reschedule events once every clock is dormant again.
             with self._execution_lock:
                 self._execute_event(next_event)
@@ -595,7 +627,7 @@ class Scheduler(threading.Thread):
         # event and execute `event.action` with stale bookkeeping. We use the condition here purely as the queue
         # lock (no wait/notify), held only to pop.
         # The scheduled action then runs unguarded by _queue_change_condition; the mechanism for avoiding racing with
-        # the action is to use scheduler.while_quiescent(), since _execution_lock is held around this whole call.
+        # the action is to use scheduler.held(), since _execution_lock is held around this whole call.
         with self._queue_change_condition:
             if self._queue and self._queue[0] == event:
                 heapq.heappop(self._queue)

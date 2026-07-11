@@ -1,7 +1,7 @@
 """
 Tests for clockblocks.scheduler.Scheduler. Wall-clock paced, but compression-aware: the timing-measuring tests
 reason in the scheduler domain via tests/timing (so they honor CLOCKBLOCKS_TEST_COMPRESSION), while the
-lock/ordering tests (while_quiescent, priority) keep real sleeps since they gate on behavior, not measured
+lock/ordering tests (held, priority) keep real sleeps since they gate on behavior, not measured
 time. The timing-policy tolerance scales with the factor (handshake jitter isn't compressed).
 """
 import unittest
@@ -17,8 +17,8 @@ class TestScheduler(unittest.TestCase):
             self.sched.kill()
             self.sched.join(timeout=1)
 
-    def test_while_quiescent_blocks_during_execution(self):
-        # while_quiescent() must not return until no event is executing: _execution_lock is held by
+    def test_held_blocks_during_execution(self):
+        # held() must not return until no event is executing: _execution_lock is held by
         # the run loop for the whole duration of an action, so an external caller blocks until it ends.
         started = threading.Event()
         finished = threading.Event()
@@ -34,7 +34,7 @@ class TestScheduler(unittest.TestCase):
 
         self.assertTrue(started.wait(timeout=1))
         self.assertFalse(finished.is_set())  # action is mid-flight
-        with self.sched.while_quiescent():
+        with self.sched.held():
             # We only get here once the executing action has finished.
             self.assertTrue(finished.is_set())
 
