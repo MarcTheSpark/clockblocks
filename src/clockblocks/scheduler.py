@@ -94,7 +94,8 @@ class Scheduler(threading.Thread):
     """
     The background timing thread for one clock family. Internal: user code need never touch it directly.
     Each master clock mints and owns its own Scheduler, children share their master's, and the public
-    timing knobs are surfaced on :class:`Clock` (e.g. :attr:`Clock.timing_policy`, fast-forward).
+    timing knobs are surfaced on :class:`~clockblocks.clock.Clock`
+    (e.g. :attr:`~clockblocks.clock.Clock.timing_policy`, fast-forward).
 
     Runs a single loop over a time-ordered heap of events, sleeping until the next is due and then
     firing it. Utilizes two locks for concurrency safety: :attr:`_queue_change_condition`, for anything
@@ -187,9 +188,9 @@ class Scheduler(threading.Thread):
 
         This is *event-quantized*, not wall-clock-interpolated: it is bumped to each event's scheduled time
         as that event executes (see :meth:`_execute_event`), so between events it holds the most recently
-        executed event's time. See :meth:`Clock.time` for what that means for reads taken between events /
-        from other threads. For a smoothly-advancing estimate of the position *between* events, see
-        :meth:`projected_time`."""
+        executed event's time. See :meth:`~clockblocks.clock.Clock.time` for what that means for reads taken
+        between events / from other threads. For a smoothly-advancing estimate of the position *between* events,
+        see :meth:`projected_time`."""
         return self._ideal_time
 
     def projected_time(self) -> float:
@@ -310,8 +311,8 @@ class Scheduler(threading.Thread):
         take clock-related actions from a non-clock thread. However, since it's implemented by taking the
         same `_execution_lock` held during scheduled actions, it should never be used *within* a scheduled
         action: the action would block waiting for itself to finish. For this reason we have
-        :meth:`Clock.hold_scheduler`, which safely wraps this method by detecting whether we are running
-        from a clock and no-op'ing in that case.
+        :meth:`~clockblocks.clock.Clock.hold_scheduler`, which safely wraps this method by detecting whether we
+        are running from a clock and no-op'ing in that case.
         """
         with self._execution_lock:
             self._rouse_to_now()

@@ -514,7 +514,7 @@ class Clock:
         A wall-clock-interpolated estimate of :meth:`time`, advancing smoothly between events rather than
         holding still between them. For readers outside the clock system; see the section comment above.
 
-        This is an estimate, and it can step backward — see :meth:`Scheduler.projected_time`.
+        This is an estimate, and it can step backward — see :meth:`~clockblocks.scheduler.Scheduler.projected_time`.
 
         :return: the estimated elapsed time, in the same units as :meth:`time`.
         """
@@ -657,8 +657,9 @@ class Clock:
         `alignment_target` TempoHistory / :meth:`_align_run` want — one of:
 
           * ``None`` — no alignment;
-          * a :class:`MetricPhaseTarget` on the *free* axis (the one opposite `pinned_axis`), passed through
-            unchanged (its own ``units`` is validated against / inferred as the free axis);
+          * a :class:`~clockblocks.metric_phase.MetricPhaseTarget` on the *free* axis (the one opposite
+            `pinned_axis`), passed through unchanged (its own ``units`` is validated against / inferred as
+            the free axis);
           * a fixed numeric coordinate on the free axis (resolved from a plain Moment).
 
         A plain Moment or MetricPhaseTarget on the *pinned* axis is an error.
@@ -816,8 +817,9 @@ class Clock:
         :meth:`set_tempo_target` and :meth:`set_rate_target`; a longer beat length means a slower tempo.
 
         :param beat_length_target: the beat length to arrive at, in seconds per beat.
-        :param when: when the target should be reached, as a :class:`Moment` (e.g. ``Moment.after_beats(4)``,
-            ``Moment.at_time(10)``) or a :class:`MetricPhaseTarget` (the next point matching a particular
+        :param when: when the target should be reached, as a :class:`~clockblocks.moment.Moment`
+            (e.g. ``Moment.after_beats(4)``, ``Moment.at_time(10)``) or a
+            :class:`~clockblocks.metric_phase.MetricPhaseTarget` (the next point matching a particular
             phase within the beat cycle). ``after_*`` moments count from the clock's *current* position.
             A plain number is rejected; wrap it in a Moment to clarify beat/time and relative/absolute.
         :param curve_shape: the bend of the transition. ``0`` (the default) is a straight line; ``> 0``
@@ -897,12 +899,13 @@ class Clock:
         """Smoothly change this clock's beat length (seconds per beat) through a series of targets,
         building a multi-segment tempo curve in one call — the multi-segment form of
         :meth:`set_beat_length_target`. This is non-looping; to apply a looping tempo shape, build a
-        :class:`TempoEnvelope` and use :meth:`apply_tempo_envelope`.
+        :class:`~clockblocks.tempo_envelope.TempoEnvelope` and use :meth:`apply_tempo_envelope`.
 
         :param beat_length_targets: the beat lengths (seconds per beat) to arrive at, one per segment.
         :param whens: when each target is reached (same length as ``beat_length_targets``), each a
-            :class:`Moment` or :class:`MetricPhaseTarget`. Note that every `when` is resolved against the clock's
-            *current* position, so an ``after_*`` moment counts from now, not from the previous segment's.
+            :class:`~clockblocks.moment.Moment` or :class:`~clockblocks.metric_phase.MetricPhaseTarget`. Note
+            that every `when` is resolved against the clock's *current* position, so an ``after_*`` moment
+            counts from now, not from the previous segment's.
             Beats- and time-axis moments may be freely mixed across the list, so long as the whens come
             out in strictly increasing clock-time.
         :param curve_shapes: optional per-segment bends (same length as ``beat_length_targets``), each as in
@@ -914,8 +917,8 @@ class Clock:
         :param align_to: optional curvature-solved alignment, extending :meth:`set_beat_length_target`'s
             ``align_to`` to runs of segments. Either:
 
-            * a single :class:`Moment`/:class:`MetricPhaseTarget` — align the *whole* call as one run,
-              landing its end on the target; or
+            * a single :class:`~clockblocks.moment.Moment`/:class:`~clockblocks.metric_phase.MetricPhaseTarget`
+              — align the *whole* call as one run, landing its end on the target; or
             * a per-segment list/tuple (same length as ``beat_length_targets``) of ``None``/targets — each
               non-``None`` entry closes a *run* (all segments since the previous alignment, or the start)
               and bends them collectively so the run lands on that target.
@@ -979,7 +982,8 @@ class Clock:
                                    truncate: bool = True, loop: bool = False,
                                    extension_increment: float = 2.0, **kwargs) -> None:
         """Drive this clock's beat_length from a function. See
-        :meth:`TempoHistory.apply_function` for the full parameter list (passed via **kwargs)."""
+        :meth:`~clockblocks.tempo_envelope.TempoHistory.apply_function` for the full parameter list
+        (passed via ``**kwargs``)."""
         self.tempo_history.apply_function(
             function, domain_start=domain_start, domain_end=domain_end, units="beatlength",
             duration_units=duration_units, truncate=truncate, loop=loop,
@@ -1013,9 +1017,9 @@ class Clock:
     @_reschedule_after_tempo_change
     def apply_tempo_envelope(self, envelope: TempoEnvelope, truncate: bool = True,
                              loop: bool = False) -> None:
-        """Append the given :class:`TempoEnvelope` onto this clock's internal tempo envelope, starting from
-        the current beat. With `loop=True` the envelope repeats indefinitely until
-        :meth:`stop_tempo_loop_or_function`. `truncate` first discards any tempo curve already
+        """Append the given :class:`~clockblocks.tempo_envelope.TempoEnvelope` onto this clock's internal
+        tempo envelope, starting from the current beat. With `loop=True` the envelope repeats indefinitely
+        until :meth:`stop_tempo_loop_or_function`. `truncate` first discards any tempo curve already
         projected past the current beat so the envelope begins cleanly from now."""
         self.tempo_history.append_envelope(envelope, truncate=truncate, loop=loop)
 
@@ -1330,12 +1334,13 @@ class Clock:
         :param initial_tempo: starting tempo of this clock (if set, don't set initial rate or beat length)
         :param initial_beat_length: starting beat length of this clock (if set, don't set initial tempo or rate)
         :param when: when the forked function should begin, as a :class:`~clockblocks.moment.ResolvableMoment`.
-            None (default) starts it immediately. Otherwise pass an explicit Moment — :meth:`Moment.at_beat`
-            (or :meth:`Moment.at_time`) for an absolute point, or :meth:`Moment.after_beats`
-            (or :meth:`Moment.after_time`) for an offset from now. Unlike wait and wait_until, a bare
-            number is rejected here, since it's not clear whether it would be relative or absolute. Also possible
-            is a :class:`~clockblocks.metric_phase.MetricPhaseTarget` which starts it at the next matching point
-            in a cycle.
+            None (default) starts it immediately. Otherwise pass an explicit Moment —
+            :meth:`~clockblocks.moment.Moment.at_beat` (or :meth:`~clockblocks.moment.Moment.at_time`) for an
+            absolute point, or :meth:`~clockblocks.moment.Moment.after_beats`
+            (or :meth:`~clockblocks.moment.Moment.after_time`) for an offset from now. Unlike wait and wait_until,
+            a bare number is rejected here, since it's not clear whether it would be relative or absolute. Also
+            possible is a :class:`~clockblocks.metric_phase.MetricPhaseTarget` which starts it at the next
+            matching point in a cycle.
         :param done_callback: a callback function to be invoked when the clock has terminated
         :return: the spawned child clock
         """
@@ -1486,8 +1491,9 @@ class Clock:
         running. Typically called once a clock has forked its work and has nothing left to do itself
         (e.g. the master clock keeping the main thread alive).
 
-        This only ever unblocks via :meth:`kill`, at which point it raises :class:`ClockKilledError`.
-        For a forked clock, this is caught by the fork wrapper and it cleanly unwinds.
+        This only ever unblocks via :meth:`kill`, at which point it raises
+        :class:`~clockblocks.exceptions.ClockKilledError`. For a forked clock, this is caught by the fork
+        wrapper and it cleanly unwinds.
         For a master clock it would need to be caught. A built-in way to do this is by using the clock
         as a context manager, which does exception handling and teardown for you. (:meth:`run_as_server`
         also absorbs the exception automatically within the spawned thread).
@@ -1504,8 +1510,8 @@ class Clock:
         Block this clock's own thread until all of its child clocks have finished, yielding to the
         scheduler so they can run, then return as soon as the last child ends.
 
-        If this clock is itself killed while waiting, raises :class:`ClockKilledError` rather than
-        returning — so a normal return always means the children genuinely finished.
+        If this clock is itself killed while waiting, raises :class:`~clockblocks.exceptions.ClockKilledError`
+        rather than returning — so a normal return always means the children genuinely finished.
         """
         # Park on an indefinite _wait(None) (no scheduled wake-up); _detach_child watches
         # _waiting_for_children and schedules the wakeup that releases us when the last child detaches.
@@ -1706,9 +1712,10 @@ class Clock:
         End this clock (and the corresponding forked function if not master) and cascade to all descendant clocks.
 
         Pending scheduled work for this clock and its descendants is cancelled and the clocks are
-        marked dead. A clock currently blocked in :meth:`wait` raises :class:`ClockKilledError`; any
-        later :meth:`wait` or :meth:`fork` on a dead clock raises :class:`DeadClockError`. Killing the
-        master also tears down the family's scheduler.
+        marked dead. A clock currently blocked in :meth:`wait` raises
+        :class:`~clockblocks.exceptions.ClockKilledError`; any later :meth:`wait` or :meth:`fork` on a dead clock
+        raises :class:`~clockblocks.exceptions.DeadClockError`. Killing the master also tears down the
+        family's scheduler.
 
         Safe to call from any thread, and killing an already-dead clock is a no-op.
 
@@ -1801,9 +1808,10 @@ class Clock:
         its scheduler thread (the two are 1:1). This guarantees cleanup even when the clock runs off the
         main thread, where simply falling off the end would otherwise leak the parked scheduler daemon.
 
-        A :class:`ClockKilledError` / :class:`DeadClockError` propagating out of the block (e.g. an
-        external ``kill()`` interrupted a wait) is suppressed — being killed is a clean way for a managed
-        clock to end. Any other exception propagates normally (after the clock is killed).
+        A :class:`~clockblocks.exceptions.ClockKilledError` / :class:`~clockblocks.exceptions.DeadClockError`
+        propagating out of the block (e.g. an external ``kill()`` interrupted a wait) is suppressed — being
+        killed is a clean way for a managed clock to end. Any other exception propagates normally (after
+        the clock is killed).
         """
         self.kill()
         return exc_type is not None and issubclass(exc_type, (ClockKilledError, DeadClockError))

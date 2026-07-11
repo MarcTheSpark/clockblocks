@@ -1,7 +1,8 @@
 """
 Module defining the :class:`TempoEnvelope` class for describing a time-varying tempo, the :class:`TempoHistory` class,
-which adds to that a tracking of the current beat and time, and the :class:`MetricPhaseTarget` class, which specifies a
-goal arrival point within the beat (or meter) cycle.
+which adds to that a tracking of the current beat and time, and the
+:class:`~clockblocks.metric_phase.MetricPhaseTarget` class, which specifies a goal arrival point within the
+beat (or meter) cycle.
 """
 
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
@@ -589,8 +590,9 @@ class TempoHistory(TempoEnvelope):
             time/beat, there's only one curvature solution, if it exists.)
         :param alignment_target: optional constraint on the endpoint's *free* axis (the one `duration` does not pin:
             time when duration_units is beats, beats when it is time). Either a number (land the free axis exactly on
-            that coordinate, which fully determines the curvature) or a :class:`MetricPhaseTarget` (snap to the nearest
-            matching phase on the free axis). See :meth:`_add_segment`. Raises ValueError if unreachable due to
+            that coordinate, which fully determines the curvature) or a
+            :class:`~clockblocks.metric_phase.MetricPhaseTarget` (snap to the nearest matching phase on the free
+            axis). See :meth:`_add_segment`. Raises ValueError if unreachable due to
             the limited flexibility of curvature adjustment.
         :param duration_units: one of ("beats", "time"); defines whether the duration is in beats or in seconds.
         :param truncate: Whether or not to truncate this TempoEnvelope to the current beat before setting this target.
@@ -617,8 +619,9 @@ class TempoHistory(TempoEnvelope):
         We set a desired beat length target for `duration` `duration_units` (beats/seconds)  in the future.
         We can optionally also give a desired curve shape, and/or `alignment_target`, which constrains the
         endpoint's *free* axis (time when duration_units is beats, beats when it is time). `alignment_target`
-        is either a number (land the free axis exactly on that coordinate) or a :class:`MetricPhaseTarget`
-        (snap to the nearest matching phase on the free axis; its own `units`, if given, is ignored — the axis
+        is either a number (land the free axis exactly on that coordinate) or a
+        :class:`~clockblocks.metric_phase.MetricPhaseTarget` (snap to the nearest matching phase on the free axis;
+        its own `units`, if given, is ignored — the axis
         is already determined from context). Curvature is solved to satisfy it; raises ValueError if no
         candidate is reachable.
         """
