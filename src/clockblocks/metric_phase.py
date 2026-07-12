@@ -13,6 +13,13 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Module containing the :class:`MetricPhaseTarget` class, which names a point within a repeating beat or measure
+cycle — "the next downbeat", say, or "halfway through the bar" — without having to work out how far away that
+point actually is. Pass one wherever a moment in time is called for: to :func:`~clockblocks.utilities.wait` to
+wait until the next such point, to :func:`~clockblocks.utilities.fork` to start a child clock there, or as the
+`when` or `align_to` of a tempo target, to land an accelerando exactly on a downbeat.
+"""
 
 import math
 from typing import Union, Sequence, Tuple, TYPE_CHECKING

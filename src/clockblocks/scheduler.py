@@ -13,6 +13,13 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Module containing the :class:`Scheduler`, the single background thread that drives an entire clock family:
+it holds a queue of upcoming events, sleeps until the next one is due, and wakes the clocks waiting on them.
+Also contains the :class:`TimingBackend` that supplies the scheduler's notion of "now" and how it sleeps,
+along with :class:`CompressedTime`, a backend that makes a clock family run in scaled-down real time.
+(Currently used for testing purposes.)
+"""
 
 import threading
 import time
@@ -39,9 +46,17 @@ class TimingBackend:
     """
 
     def now(self) -> float:
+        """
+        The backend's current time, in seconds. Only differences between readings are meaningful;
+        the origin is arbitrary.
+        """
         return time.perf_counter()
 
     def get_sleep_condition(self) -> threading.Condition:
+        """
+        A fresh condition variable for the scheduler's run loop to wait on. Timeouts passed to its
+        ``wait()`` are interpreted in the same units :meth:`now` returns.
+        """
         return threading.Condition(threading.Lock())
 
 
@@ -69,9 +84,12 @@ class CompressedTime(TimingBackend):
         self._t0 = time.perf_counter()
 
     def now(self) -> float:
+        """Real time since this backend was created, scaled up by ``factor``."""
         return (time.perf_counter() - self._t0) * self.factor + self._t0
 
     def get_sleep_condition(self) -> threading.Condition:
+        """A condition whose ``wait()`` shortens any timeout by ``factor``, so that sleeps in
+        compressed time take correspondingly less real time."""
         factor = self.factor
 
         class _CompressedCondition(threading.Condition):
@@ -105,30 +123,29 @@ class Scheduler(threading.Thread):
     In the clock system each event wakes a clock and parks until the user code runs up
     to its next ``wait()``. Tempo changes reschedule pending events using :meth:`reschedule`,
     and killing a clock removes them via :meth:`remove_events`.
+
+    :param timing_policy:
+        Bounds how far each wait may deviate from its nominal length in order to track the absolute
+        schedule. 0 -> Absolute timing (cut/extend the wait as needed to match ideal time since start).
+        1 -> Relative timing (wait exactly the nominal delay, drift never corrected). 0.98 (default) ->
+        a wait may be compressed to 98% (or stretched to 102%) of its nominal length to correct any
+        accumulated drift.
+    :param precise_timing:
+        When True, close the final approach to each event with a busy-spin instead of resting on
+        the (jittery) OS wait timeout, hitting the event time to within microseconds. Costs one core
+        for at most ``spin_guard_duration`` seconds per event — see :meth:`run` STEP 1c.
+    :param spin_guard_duration:
+        Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. The coarse
+        OS wait stops this far short of the deadline and the remainder is spun out. Default 500µs.
+    :param daemon: run as a daemon thread (the default) so it can't keep the process alive on its own.
+    :param time_backend:
+        The :class:`TimingBackend` supplying "now" and the sleep condition. Defaults to real
+        ``perf_counter`` time; tests pass :class:`CompressedTime` to run faster.
     """
 
     def __init__(self, timing_policy: float = 0.98, precise_timing: bool = False,
                  spin_guard_duration: float = 0.0005, daemon: bool = True,
                  time_backend: 'TimingBackend | None' = None):
-        """
-        :param timing_policy:
-            Bounds how far each wait may deviate from its nominal length in order to track the absolute
-            schedule. 0 -> Absolute timing (cut/extend the wait as needed to match ideal time since start).
-            1 -> Relative timing (wait exactly the nominal delay, drift never corrected). 0.98 (default) ->
-            a wait may be compressed to 98% (or stretched to 102%) of its nominal length to correct any
-            accumulated drift.
-        :param precise_timing:
-            When True, close the final approach to each event with a busy-spin instead of resting on
-            the (jittery) OS wait timeout, hitting the event time to within microseconds. Costs one core
-            for at most ``spin_guard_duration`` seconds per event — see :meth:`run` STEP 1c.
-        :param spin_guard_duration:
-            Width (seconds) of the busy-spin guard band used when ``precise_timing`` is on. The coarse
-            OS wait stops this far short of the deadline and the remainder is spun out. Default 500µs.
-        :param daemon: run as a daemon thread (the default) so it can't keep the process alive on its own.
-        :param time_backend:
-            The :class:`TimingBackend` supplying "now" and the sleep condition. Defaults to real
-            ``perf_counter`` time; tests pass :class:`CompressedTime` to run faster.
-        """
         super().__init__(daemon=daemon)
         self.timing_policy = timing_policy
         self.precise_timing = precise_timing

@@ -13,6 +13,26 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Clockblocks is a library for controlling the flow of musical time, part of SCAMP (Suite for Computer-Assisted
+Music in Python).
+
+Each :class:`~clockblocks.clock.Clock` runs on its own thread, and clocks form families under a single master
+clock, whose :class:`~clockblocks.scheduler.Scheduler` wakes each thread back up when its call to
+:func:`~clockblocks.utilities.wait` is due. The scheduler keeps the whole clock family coordinated under a
+shared, ideal timeline, which is not polluted by the small delays that user code inevitably incurs. How
+aggressively a clock catches up when it does fall behind is set by its timing policy, which ranges from
+waiting out each delay in full to staying pinned to the absolute schedule.
+
+The rate at which beats pass within a clock is given by its tempo, which may vary over time, as described by
+a :class:`~clockblocks.tempo_envelope.TempoEnvelope`. Clocks are also nestable: :func:`~clockblocks.utilities.fork`
+spawns a child clock running a function in a parallel, subordinate timeline. A child clock's tempo is felt
+relative to that of its parent, so the true rate at which time passes in a clock is the product of the clock's
+own rate and that of each of its ancestors.
+
+Taken together, these features allow a composer to create multiple, polyphonic (and perhaps poly-tempo) layers
+of music, each with its own tempo curve, all coordinated under a master clock.
+"""
 
 from importlib.metadata import version, PackageNotFoundError
 

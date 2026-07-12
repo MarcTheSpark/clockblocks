@@ -13,6 +13,12 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Module containing the free functions that make up clockblocks' most convenient interface. Rather than calling
+methods on a particular clock, these operate on whichever clock is running the current thread: most importantly
+:func:`wait` and :func:`fork`, along with getters and setters for that clock's tempo (:func:`set_tempo`,
+:func:`set_tempo_target`, :func:`apply_tempo_envelope`, and their rate/beat-length counterparts).
+"""
 
 from __future__ import annotations
 import math

@@ -13,6 +13,11 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Module containing the :class:`TimeStamp` class, which captures a moment on the scheduler's timeline in a
+clock-agnostic way, so that it can later be projected into the beat or time axis of any clock in the family.
+Also contains :class:`TimeStampInterval`, representing the span between two such time stamps.
+"""
 
 from __future__ import annotations
 from functools import total_ordering

@@ -13,6 +13,11 @@
 #  You should have received a copy of the GNU General Public License along with this program.    #
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
+"""
+Module containing the enums used to express units of duration and rate: :class:`DurationUnits`, for saying
+whether a quantity is measured in beats or in time, and :class:`TempoUnits`, for saying whether a rate of
+musical time is expressed as a tempo, a rate, or a beat length.
+"""
 
 from enum import StrEnum
 

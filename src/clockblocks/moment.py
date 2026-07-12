@@ -14,6 +14,11 @@
 #  If not, see <http://www.gnu.org/licenses/>.                                                   #
 #  ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++  #
 
+"""
+Module containing :class:`Moment`, which names a point on a clock's timeline, and the
+:class:`ResolvableMoment` protocol implemented by anything that can be pinned to such a point.
+"""
+
 from __future__ import annotations
 from typing import Protocol, runtime_checkable, TYPE_CHECKING
 from clockblocks.enums import DurationUnits
@@ -29,6 +34,12 @@ class ResolvableMoment(Protocol):
     absolute Moment on that clock. Moment and MetricPhaseTarget both implement this.
     """
     def resolve(self, clock: Clock) -> Moment:
+        """
+        Pin this to an absolute :class:`Moment` on the given clock.
+
+        :param clock: the clock whose timeline the result is measured against
+        :return: an absolute Moment on that clock
+        """
         ...
 
 
@@ -47,6 +58,11 @@ class Moment:
     process works only with absolute Moments, which are either pinned to a specific beat or a specific time in
     the clock's timeline. Relative moments or MetricPhaseTargets are resolved at scheduling time into absolute
     moments.
+
+    :param value: how far along the timeline this moment sits, in the given units
+    :param units: whether `value` counts beats or time ("beats"/"time", or a :class:`~clockblocks.enums.DurationUnits`)
+    :param relative: if True, `value` is an offset from the clock's current position rather than a point
+        measured from the clock's start
     """
 
     def __init__(self, value: float, units: str | DurationUnits = "beats", relative: bool = False):
@@ -56,21 +72,48 @@ class Moment:
 
     @classmethod
     def at_beat(cls, beat: float) -> Moment:
+        """
+        An absolute moment at the given beat of a clock.
+
+        :param beat: beat, counted from the clock's start
+        """
         return cls(beat, DurationUnits.BEATS, relative=False)
 
     @classmethod
     def at_time(cls, time: float) -> Moment:
+        """
+        An absolute moment at the given time on a clock.
+
+        :param time: time in seconds, counted from the clock's start
+        """
         return cls(time, DurationUnits.TIME, relative=False)
 
     @classmethod
     def after_beats(cls, beats: float) -> Moment:
+        """
+        A relative moment, the given number of beats from a clock's current beat.
+
+        :param beats: how many beats from now
+        """
         return cls(beats, DurationUnits.BEATS, relative=True)
 
     @classmethod
     def after_time(cls, time: float) -> Moment:
+        """
+        A relative moment, the given amount of time from a clock's current time.
+
+        :param time: how many seconds from now
+        """
         return cls(time, DurationUnits.TIME, relative=True)
 
     def resolve(self, clock: Clock) -> Moment:
+        """
+        Pin this moment to an absolute one on the given clock. A no-op if it is already absolute;
+        a relative moment is measured out from the clock's current beat or time.
+
+        :param clock: the clock whose timeline the result is measured against
+        :return: an absolute Moment on that clock
+        """
         if not self.relative:
             return self
         now = clock.beat() if self.units == DurationUnits.BEATS else clock.time()

@@ -47,6 +47,11 @@ import textwrap
 
 
 class ClockState(Enum):
+    """
+    Where a clock sits in its lifecycle. A forked clock starts out PENDING, becomes ALIVE once its
+    function begins running, and ends up DEAD once that function returns or the clock is killed.
+    """
+
     PENDING = "pending"  # forked, awaiting start_delay; thread not yet running user code
     ALIVE = "alive"      # forked_function is running (or about to run)
     DEAD = "dead"        # killed, or forked_function returned
@@ -1831,6 +1836,7 @@ class Clock:
 
     @property
     def synchronization_policy(self):
+        """:meta private:"""
         Clock._removed_attribute(
             "Clock.synchronization_policy", "(no replacement needed)",
             "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
@@ -1846,6 +1852,7 @@ class Clock:
         )
 
     def rouse_and_hold(self, *args, **kwargs) -> None:
+        """:meta private:"""
         Clock._removed_attribute(
             "Clock.rouse_and_hold()", "`with clock.hold_scheduler(): ...`",
             "the rouse half is obsolete (lazy beat()/time() are live from any thread), and the hold "
@@ -1853,12 +1860,14 @@ class Clock:
         )
 
     def release_from_suspension(self, *args, **kwargs) -> None:
+        """:meta private:"""
         Clock._removed_attribute(
             "Clock.release_from_suspension()", "`with clock.hold_scheduler(): ...`",
             "the rouse/hold pair is now an exception-safe `with` block"
         )
 
     def time_in_master(self, *args, **kwargs) -> None:
+        """:meta private:"""
         Clock._removed_attribute(
             "Clock.time_in_master()", "`clock.master.time()`",
             "it was a bare proxy for master.time(), and being one it could not forward the `projected` "
@@ -1866,6 +1875,7 @@ class Clock:
         )
 
     def wall_time_in_scheduler(self, *args, **kwargs) -> None:
+        """:meta private:"""
         Clock._removed_attribute(
             "Clock.wall_time_in_scheduler()", "`clock.scheduler.wall_time()` or `clock.scheduler.lag()`",
             "it subtracted a scheduler-time from a wall-time, yielding this clock's lifetime contaminated "
