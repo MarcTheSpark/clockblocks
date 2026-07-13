@@ -1,4 +1,9 @@
-.idea*
-*__pycache__*
+*.pyc
+.idea
+build
+dist
 *.egg-info
+*__pycache__
+
+# Diagrams are committed as .svg sources; the exported .pdf is generated.
 *.pdf
