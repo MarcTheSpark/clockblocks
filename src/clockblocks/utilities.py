@@ -125,6 +125,28 @@ def wait(dt: 'float | ResolvableMoment', units="beats") -> None:
         raise NoActiveClockError("wait() called on a thread with no active clock.")
 
 
+def wait_until(when: 'float | ResolvableMoment', units="beats") -> None:
+    """
+    Block the clock currently active on this thread until the *absolute* beat (or time, if ``units="time"``)
+    given by ``when``. Forwards to :meth:`~clockblocks.clock.Clock.wait_until`.
+
+    ``when`` may also be a :class:`~clockblocks.moment.Moment` or
+    :class:`~clockblocks.metric_phase.MetricPhaseTarget`, in which case the units are ignored and behavior is
+    identical to wait(). If ``when`` is already in the past, this returns essentially immediately.
+
+    On a thread with no active clock, raises NoActiveClockError.
+
+    :param when: the absolute beat (or time, if ``units="time"``) to wait until, or a Moment /
+        MetricPhaseTarget to resolve.
+    :param units: either ``"beats"`` or ``"time"`` (ignored when ``when`` is a Moment).
+    """
+    c = current_clock()
+    if c is not None:
+        c.wait_until(when, units=units)
+    else:
+        raise NoActiveClockError("wait_until() called on a thread with no active clock.")
+
+
 def wait_forever() -> None:
     """
     Block forever on the currently active clock (see :meth:`~clockblocks.clock.Clock.wait_forever`) — usually

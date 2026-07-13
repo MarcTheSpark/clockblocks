@@ -1178,8 +1178,9 @@ class Clock:
         """
         Block this clock until the beat (or time, if units="time") indicated by `when` — a convenience
         for absolute targets given as a bare number (equivalent to wait(Moment.at_beat(when)), or
-        Moment.at_time for units="time"). `when` may also be any ResolvableMoment, resolved directly
-        (units ignored). If `when` is in the past, returns essentially immediately.
+        Moment.at_time for units="time"). `when` may also be any ResolvableMoment, in which case the
+        units are ignored and behavior is identical to wait(). If `when` is in the past, returns
+        essentially immediately.
         """
         self._wait(to_absolute_moment(when, self, units_if_number=units, relative_if_number=False))
 
