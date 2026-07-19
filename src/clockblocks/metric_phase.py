@@ -92,7 +92,7 @@ class MetricPhaseTarget:
         :return: tuple of nearest beat below, nearest beat above
         """
         if self.relative:
-            return self._get_nearest_matches(beat, current_clock().beat())
+            return self._get_nearest_matches(beat, current_clock().beat)
         else:
             return self._get_nearest_matches(beat)
 
@@ -104,7 +104,7 @@ class MetricPhaseTarget:
         :return: tuple of nearest time below, nearest time above
         """
         if self.relative:
-            return self._get_nearest_matches(time, current_clock().time())
+            return self._get_nearest_matches(time, current_clock().time)
         else:
             return self._get_nearest_matches(time)
 
@@ -118,8 +118,8 @@ class MetricPhaseTarget:
         # nearness. Since we want to be at or past the search point we use max to filter for the nearest
         # time in the Moment at or after the indicated min_duration.
         if self.units != DurationUnits.TIME:   # None or BEATS -> beats
-            return Moment.at_beat(max(*self.get_nearest_matching_beats(clock.beat() + self.min_duration)))
-        return Moment.at_time(max(*self.get_nearest_matching_times(clock.time() + self.min_duration)))
+            return Moment.at_beat(max(*self.get_nearest_matching_beats(clock.beat + self.min_duration)))
+        return Moment.at_time(max(*self.get_nearest_matching_times(clock.time + self.min_duration)))
 
     def __repr__(self):
         return "MetricPhaseTarget({}{}{}{}{})".format(

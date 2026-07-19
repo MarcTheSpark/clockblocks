@@ -36,7 +36,7 @@ class FastForwardTestCase(unittest.TestCase):
         self.master.wait(10)  # 10 beats == 10 real seconds at the default rate
         elapsed = timing.elapsed(start)
         self.assertLess(elapsed, 0.5, f"fast-forwarded wait took {elapsed:.3f}s, expected ~instant")
-        self.assertAlmostEqual(self.master.beat(), 10, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 10, delta=0.05)
 
     def test_fast_forward_off_resumes_realtime(self):
         # The falling-edge re-anchor: after fast-forward ends, the next wait must run in real time
@@ -50,7 +50,7 @@ class FastForwardTestCase(unittest.TestCase):
         self.master.wait(1)  # 1 beat == 1 real second
         elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 1.0, delta=0.3, msg=f"post-FF wait took {elapsed:.3f}s, expected ~1s")
-        self.assertAlmostEqual(self.master.beat(), 6, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 6, delta=0.05)
 
     # ---- bounded fast-forward (to a goal) ----
 
@@ -61,7 +61,7 @@ class FastForwardTestCase(unittest.TestCase):
         start = timing.stopwatch()
         self.master.wait(3)  # entirely within the FF region -> instant
         self.assertLess(timing.elapsed(start), 0.5)
-        self.assertAlmostEqual(self.master.beat(), 3, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 3, delta=0.05)
         self.assertTrue(self.master.is_fast_forwarding())  # goal (beat 5) not yet reached
 
         start = timing.stopwatch()
@@ -69,7 +69,7 @@ class FastForwardTestCase(unittest.TestCase):
         elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 2.0, delta=0.3, msg=f"crossing wait took {elapsed:.3f}s, expected ~2s")
         self.assertFalse(self.master.is_fast_forwarding())
-        self.assertAlmostEqual(self.master.beat(), 7, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 7, delta=0.05)
 
     def test_goal_between_two_waits_compresses_only_up_to_goal(self):
         # Goal at beat 15, with waits landing at beat 10 and beat 20. The beat-10 wait is wholly before
@@ -88,7 +88,7 @@ class FastForwardTestCase(unittest.TestCase):
         elapsed = timing.elapsed(start)
         self.assertAlmostEqual(elapsed, 5.0, delta=0.3, msg=f"crossing wait took {elapsed:.3f}s, expected ~5s")
         self.assertFalse(self.master.is_fast_forwarding())
-        self.assertAlmostEqual(self.master.beat(), 20, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 20, delta=0.05)
 
     def test_early_wakeup_after_goal_does_not_delay_event(self):
         # Regression for the stale-_was_fast_forwarding bug. After fast-forward reaches a finite goal,
@@ -107,7 +107,7 @@ class FastForwardTestCase(unittest.TestCase):
             for _ in range(4):
                 c.wait(1)        # events at beats 1,2,3,4 — before the goal, fast-forwarded (sets the flag)
             c.wait(6)            # next event at beat 10 — beyond the goal, waited out in real time
-            fired["beat"] = c.beat()
+            fired["beat"] = c.beat
             fired["elapsed"] = timing.elapsed(start)
 
         self.master.fast_forward_to_beat(5)  # goal at beat 5
@@ -136,7 +136,7 @@ class FastForwardTestCase(unittest.TestCase):
         start = timing.stopwatch()
         self.master.wait(4, units="time")  # right up to the goal -> instant
         self.assertLess(timing.elapsed(start), 0.5)
-        self.assertAlmostEqual(self.master.time(), 4, delta=0.05)
+        self.assertAlmostEqual(self.master.time, 4, delta=0.05)
         self.assertFalse(self.master.is_fast_forwarding())
 
     def test_fast_forward_in_beats_and_in_time(self):
@@ -144,11 +144,11 @@ class FastForwardTestCase(unittest.TestCase):
         self.assertTrue(self.master.is_fast_forwarding())
         self.master.wait(3)  # instant up to the goal
         self.assertFalse(self.master.is_fast_forwarding())
-        self.assertAlmostEqual(self.master.beat(), 3, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 3, delta=0.05)
 
         self.master.fast_forward_in_time(2)
         self.master.wait(2, units="time")
-        self.assertAlmostEqual(self.master.time(), 5, delta=0.05)
+        self.assertAlmostEqual(self.master.time, 5, delta=0.05)
 
     # ---- whole-family behavior ----
 
@@ -157,7 +157,7 @@ class FastForwardTestCase(unittest.TestCase):
 
         def proc():
             for _ in range(5):
-                log.append(round(current_clock().beat()))
+                log.append(round(current_clock().beat))
                 current_clock().wait(1)
 
         self.master.fork(proc)

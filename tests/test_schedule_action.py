@@ -27,7 +27,7 @@ class ScheduleActionTestCase(unittest.TestCase):
 
     def test_action_fires_after_delay(self):
         beats_at_fire = []
-        self.master.schedule_action(lambda: beats_at_fire.append(self.master.beat()), when=Moment.after_beats(0.05))
+        self.master.schedule_action(lambda: beats_at_fire.append(self.master.beat), when=Moment.after_beats(0.05))
         self.master.wait(0.1)
         self.assertEqual(len(beats_at_fire), 1)
         self.assertAlmostEqual(beats_at_fire[0], 0.05, delta=0.03)

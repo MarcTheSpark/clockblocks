@@ -200,21 +200,22 @@ class Scheduler(threading.Thread):
         # See _fast_forwarding_through (which sets the flag) and _end_fast_forward_if_active (which consumes it).
         self._was_fast_forwarding = False
 
+    @property
     def time(self) -> float:
-        """Return the scheduler's ideal time (the time that should have passed by schedule).
+        """The scheduler's ideal time (the time that should have passed by schedule).
 
         This is *event-quantized*, not wall-clock-interpolated: it is bumped to each event's scheduled time
         as that event executes (see :meth:`_execute_event`), so between events it holds the most recently
-        executed event's time. See :meth:`~clockblocks.clock.Clock.time` for what that means for reads taken
-        between events / from other threads. For a smoothly-advancing estimate of the position *between* events,
-        see :meth:`projected_time`."""
+        executed event's time. See :attr:`~clockblocks.clock.Clock.time` for what that means for reads taken
+        between events / from other threads. Deterministic, hence a read-only property; for a
+        smoothly-advancing wall-clock *sample* of the position between events, see :meth:`projected_time`."""
         return self._ideal_time
 
     def projected_time(self) -> float:
-        """A wall-clock-interpolated estimate of where the scheduler is *right now*, as opposed to :meth:`time`,
+        """A wall-clock-interpolated estimate of where the scheduler is *right now*, as opposed to :attr:`time`,
         which returns the time of the last executed event.
 
-        Between events, :meth:`time` stays put while real time passes; this fills the gap by interpolating from
+        Between events, :attr:`time` stays put while real time passes; this fills the gap by interpolating from
         the last event toward the next, so continuous readers (e.g. parameter automation) see smooth motion. The
         estimate depends on :attr:`timing_policy`, which decides when the next event is planned to arrive.
 
@@ -290,7 +291,7 @@ class Scheduler(threading.Thread):
         down. Fast-forwarding resets it to zero, since :meth:`_reanchor_timing` re-anchors ``_start_time``
         to put us exactly on the absolute schedule.
         """
-        return self.wall_time() - self.time()
+        return self.wall_time() - self.time
 
     def set_fast_forward_goal(self, goal: float | None) -> None:
         """
@@ -339,7 +340,7 @@ class Scheduler(threading.Thread):
 
     def _rouse_to_now(self) -> None:
         """
-        Advance the committed position (:meth:`time`) to the current interpolated position, as if a
+        Advance the committed position (:attr:`time`) to the current interpolated position, as if a
         zero-duration event had just fired now. Internal helper of :meth:`held` (never call it directly —
         it must run under `_execution_lock`) so that a scheduler woken between actions sees an up-to-date time.
         """

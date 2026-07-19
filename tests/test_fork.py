@@ -59,7 +59,7 @@ class ForkTestCase(unittest.TestCase):
         def grandchild():
             current_clock().wait(2.0)            # 2 grandchild beats; grandchild inherits child's tempo (120)
             record["wall"] = timing.elapsed(t0)
-            record["parent_beat"] = current_clock().parent.beat()
+            record["parent_beat"] = current_clock().parent.beat
 
         def child():
             c = current_clock()
@@ -84,7 +84,7 @@ class ForkTestCase(unittest.TestCase):
         beats_at_fire = []
 
         def proc():
-            beats_at_fire.append(current_clock().parent.beat())
+            beats_at_fire.append(current_clock().parent.beat)
 
         self.master.fork(proc, when=Moment.after_beats(0.05))
         self.master.wait(0.1)
@@ -99,7 +99,7 @@ class ForkTestCase(unittest.TestCase):
         beats_at_fire = []
 
         def proc():
-            beats_at_fire.append(current_clock().parent.beat())
+            beats_at_fire.append(current_clock().parent.beat)
 
         self.master.wait(0.05)                          # advance so absolute != relative
         self.master.fork(proc, when=Moment.at_beat(0.12))
@@ -156,7 +156,7 @@ class ForkTestCase(unittest.TestCase):
         the 1.0 the old code would have baked in.
         """
         parent_beat_at_start = []
-        child = self.master.fork(lambda: parent_beat_at_start.append(current_clock().parent.beat()),
+        child = self.master.fork(lambda: parent_beat_at_start.append(current_clock().parent.beat),
                                  when=Moment.at_time(1.0))
         self.master.wait(0.1)        # beat 0.1, time 0.1
         self.master.tempo = 120
@@ -181,8 +181,8 @@ class ForkTestCase(unittest.TestCase):
         def child_proc():
             c = current_clock()
             c.wait(Moment.after_time(1.0))     # wait 1 sec of child-time
-            result["live_beat"] = c.beat()                 # scheduler-derived, under the new tempo
-            result["committed_beat"] = c.tempo_history.beat()   # advanced by STEP 4b
+            result["live_beat"] = c.beat                 # scheduler-derived, under the new tempo
+            result["committed_beat"] = c.tempo_history.beat   # advanced by STEP 4b
 
         child = self.master.fork(child_proc)
         self.master.wait(0.1)        # let the child enter its time-wait (child ~beat 0.1)

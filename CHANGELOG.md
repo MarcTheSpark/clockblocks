@@ -21,6 +21,24 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   planted at the first event that actually requires waiting, restoring the 0.6.x behavior
   where time doesn't start counting until the first wait.
 
+### Changed
+
+- **The position accessors are now read-only properties: write `clock.beat`, `clock.time`,
+  `clock.absolute_rate`, `clock.absolute_tempo`, and `clock.absolute_beat_length` without
+  parentheses.** This aligns them with `tempo`/`rate`/`beat_length`, which were already
+  properties. The rule throughout the library is now: deterministic state is a property
+  (`clock.beat` changes only when an event commits time — never merely because wall time
+  has passed, so back-to-back reads agree), while wall-clock *samples* that differ on
+  every call remain methods (`projected_beat()`, `projected_time()`, `wall_time()`).
+
+### Deprecated
+
+- **The old method spelling for the new read-only properties (`clock.beat()`, `clock.time()`, 
+  `clock.absolute_rate()`, ...) still works**, for now: The properties now return a float that
+  is also callable, but emits a `DeprecationWarning` and will be removed in clockblocks 2.0. 
+  Just drop the parentheses to use the new form.
+
+
 ## [1.0.0] - 2026-07-12
 
 A ground-up redesign. Clockblocks is now built around a **single central scheduler**

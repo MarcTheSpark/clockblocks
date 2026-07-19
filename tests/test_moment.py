@@ -33,19 +33,19 @@ class MomentTestCase(unittest.TestCase):
         self.master.wait(0.1)
         resolved = Moment.after_beats(2).resolve(self.master)
         self.assertFalse(resolved.relative)
-        self.assertAlmostEqual(resolved.value, self.master.beat() + 2, delta=0.05)
+        self.assertAlmostEqual(resolved.value, self.master.beat + 2, delta=0.05)
 
     def test_none_resolves_to_now(self):
         self.master.wait(0.1)
         m = to_absolute_moment(None, self.master)
         self.assertFalse(m.relative)
-        self.assertAlmostEqual(m.value, self.master.beat(), delta=0.05)
+        self.assertAlmostEqual(m.value, self.master.beat, delta=0.05)
 
     def test_bare_number_convention(self):
         # relative_if_number controls how a bare number is read
         rel = to_absolute_moment(3, self.master, relative_if_number=True)
         ab = to_absolute_moment(3, self.master, relative_if_number=False)
-        self.assertAlmostEqual(rel.value, self.master.beat() + 3, delta=0.05)
+        self.assertAlmostEqual(rel.value, self.master.beat + 3, delta=0.05)
         self.assertEqual(ab.value, 3)
 
     def test_scheduler_time_matches_clock_conversion(self):
@@ -105,23 +105,23 @@ class MomentTestCase(unittest.TestCase):
     def test_wait_until_absolute_beat(self):
         self.master.wait(0.05)
         self.master.wait_until(0.2)
-        self.assertAlmostEqual(self.master.beat(), 0.2, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 0.2, delta=0.05)
 
     def test_wait_until_past_returns_immediately(self):
         self.master.wait(0.1)
         t0 = timing.stopwatch()
         self.master.wait_until(0.05)          # already in the past
         self.assertLess(timing.elapsed(t0), 0.05, "wait_until(past) should return ~immediately")
-        self.assertGreaterEqual(self.master.beat(), 0.1, "must not rewind the clock")
+        self.assertGreaterEqual(self.master.beat, 0.1, "must not rewind the clock")
 
     def test_wait_accepts_moment(self):
         self.master.wait(Moment.after_beats(0.1))
-        self.assertAlmostEqual(self.master.beat(), 0.1, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 0.1, delta=0.05)
 
     def test_wait_accepts_metric_phase_target(self):
         self.master.wait(0.3)
         self.master.wait(MetricPhaseTarget(0, 1))   # advance to the next integer beat
-        self.assertAlmostEqual(self.master.beat(), 1.0, delta=0.05)
+        self.assertAlmostEqual(self.master.beat, 1.0, delta=0.05)
 
 
 if __name__ == "__main__":

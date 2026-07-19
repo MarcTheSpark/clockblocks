@@ -116,7 +116,7 @@ class Moment:
         """
         if not self.relative:
             return self
-        now = clock.beat() if self.units == DurationUnits.BEATS else clock.time()
+        now = clock.beat if self.units == DurationUnits.BEATS else clock.time
         return Moment(now + self.value, self.units, relative=False)
 
     def beat_on(self, clock: Clock) -> float:

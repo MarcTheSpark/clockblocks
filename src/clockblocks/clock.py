@@ -191,6 +191,35 @@ def _threadpool_error_callback(e: BaseException) -> None:
           file=sys.stderr)
 
 
+class _CallableFloat(float):
+    """
+    Transitional return type for :class:`Clock`'s position and absolute-tempo properties (``beat``, ``time``,
+    ``absolute_rate``, ``absolute_tempo``, ``absolute_beat_length``), which were methods before clockblocks 1.1.
+    It is a genuine float in every respect (arithmetic, comparison, hashing, serialization), but remains
+    callable so that the old method spelling still works, emitting a DeprecationWarning attributed to the
+    caller. Scheduled for removal in clockblocks 2.0.
+    """
+
+    __slots__ = ("_property_name",)
+
+    def __new__(cls, value: float, property_name: str):
+        instance = super().__new__(cls, value)
+        instance._property_name = property_name
+        return instance
+
+    def __call__(self) -> float:
+        warnings.warn(
+            f"'{self._property_name}' is now a property: write 'clock.{self._property_name}' instead of "
+            f"'clock.{self._property_name}()'. The callable spelling will be removed in clockblocks 2.0.",
+            DeprecationWarning, stacklevel=2
+        )
+        return float(self)
+
+    def __reduce__(self):
+        # pickle/copy as a plain float: the callability is a transitional affordance, not part of the value
+        return float, (float(self),)
+
+
 class Clock:
     """
     Recursively nestable clock. Clocks can fork child-clocks, which can in turn fork their own
@@ -296,7 +325,7 @@ class Clock:
             self._state = ClockState.ALIVE
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
-            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
+            self.scheduler.schedule_action(self.scheduler.time, self._wake_and_advance_to_next_wait_call,
                                            self._priority,
                                            {"description": f"Initial wake for Clock(name={self.name!r})",
                                             "acting_clock": self})
@@ -305,12 +334,12 @@ class Clock:
             threading.current_thread().__clock__ = self
             # the "parent" of the master clock, timing wise, is the scheduler. But master_clock.parent is None
             # still because there is not parent clock.
-            self.parent_offset = self.scheduler.time()
+            self.parent_offset = self.scheduler.time
         else:
             # Forked children start PENDING and flip to ALIVE at the top of _fork_wrapper
             # once their start_delay has elapsed.
             self._state = ClockState.PENDING
-            self.parent_offset = self.parent.beat()
+            self.parent_offset = self.parent.beat
 
     @staticmethod
     def _rate_tempo_or_beat_length_to_rate(rate, tempo, beat_length) -> float:
@@ -394,7 +423,7 @@ class Clock:
             self._children.remove(child)
         if self._waiting_for_children and not self._children and self._state is ClockState.ALIVE:
             self._waiting_for_children = False
-            self.scheduler.schedule_action(self.scheduler.time(), self._wake_and_advance_to_next_wait_call,
+            self.scheduler.schedule_action(self.scheduler.time, self._wake_and_advance_to_next_wait_call,
                                            self._priority,
                                            {"description": f"{self} wake (children finished)",
                                             "acting_clock": self})
@@ -478,13 +507,22 @@ class Clock:
     ##################################################################################################################
     #                                                 Clock Position
     ##################################################################################################################
-    # Methods describing the current beat/time of this clock. Positions are derived on demand from the scheduler
-    # and mapped onto this clock's axes by `scheduler_to_clock_time`, so they are consistent from any thread.
-    # These methods are read-only and never mutate `tempo_history` (the owning thread's committed pointer).
+    # Read-only properties describing the current beat/time of this clock. Positions are derived on demand from
+    # the scheduler and mapped onto this clock's axes by `scheduler_to_clock_time`, so they are consistent from
+    # any thread. They never mutate `tempo_history` (the owning thread's committed pointer).
+    #
+    # The property/method split throughout this class follows a consistent rule: deterministic state is a
+    # property (`beat` changes only when an event commits time — never merely because wall time has passed, so
+    # back-to-back reads agree), whereas a wall-clock derived *sample* that differs on every call is a method
+    # (`projected_time()`, `wall_time()`). The parentheses are therefore informative.
+    #
+    # Prior to v1.1, the property/method split was inconsistent; for backwards compatibility. For backwards
+    # compatibilty, the methods that have turned into properties now return a `_CallableFloat` which emits
+    # a DeprecationWarning, while returning the desired value. That shim is scheduled for removal in clockblocks 2.0.
     #
     # Two different readings of the clock position are available:
     #
-    # - The *committed* position (`time`/`beat`) is based on what `Scheduler.time()` reports, and is only updated
+    # - The *committed* position (`time`/`beat`) is based on what `Scheduler.time` reports, and is only updated
     #   when a new event executes in the scheduler. Since the scheduler is shared for the whole clock family, this
     #   means that any such read of any clock's position from a clock thread is fully up-to-date. Reads coming from
     #   *outside* of the clock family, however, are quantized to the family's event stream.
@@ -494,6 +532,7 @@ class Clock:
     #   estimate, it can step backward; see `Scheduler.projected_time`.
     # ------------------------------------------------------------------
 
+    @property
     def time(self) -> float:
         """
         How much time has passed since this clock was created. Either in seconds, if this is the master
@@ -501,33 +540,37 @@ class Clock:
         this is quantized to the scheduler's event stream; for a live estimate when outside the clock system
         use :meth:`projected_time`.
 
-        :return: the elapsed time (see units above).
+        (Read-only property. Before clockblocks 1.1 this was a method; the ``clock.time()`` spelling still
+        works, with a DeprecationWarning.)
         """
-        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="time")
+        return _CallableFloat(self.scheduler_to_clock_time(self.scheduler.time, desired_units="time"), "time")
 
+    @property
     def beat(self) -> float:
         """
         How many beats have passed since this clock was created. Note that this is quantized to the scheduler's
         event stream; for a live estimate when outside the clock system use :meth:`projected_time`.
 
-        :return: the elapsed beats.
+        (Read-only property. Before clockblocks 1.1 this was a method; the ``clock.beat()`` spelling still
+        works, with a DeprecationWarning.)
         """
-        return self.scheduler_to_clock_time(self.scheduler.time(), desired_units="beats")
+        return _CallableFloat(self.scheduler_to_clock_time(self.scheduler.time, desired_units="beats"), "beat")
 
     def projected_time(self) -> float:
         """
-        A wall-clock-interpolated estimate of :meth:`time`, advancing smoothly between events rather than
+        A wall-clock-interpolated estimate of :attr:`time`, advancing smoothly between events rather than
         holding still between them. For readers outside the clock system; see the section comment above.
+        (A method rather than a property, because it is a live sample: every call returns a different value.)
 
         This is an estimate, and it can step backward — see :meth:`~clockblocks.scheduler.Scheduler.projected_time`.
 
-        :return: the estimated elapsed time, in the same units as :meth:`time`.
+        :return: the estimated elapsed time, in the same units as :attr:`time`.
         """
         return self.scheduler_to_clock_time(self.scheduler.projected_time(), desired_units="time")
 
     def projected_beat(self) -> float:
         """
-        A wall-clock-interpolated estimate of :meth:`beat`. See :meth:`projected_time`.
+        A wall-clock-interpolated estimate of :attr:`beat`. See :meth:`projected_time`.
 
         :return: the estimated elapsed beats.
         """
@@ -543,11 +586,11 @@ class Clock:
         lag = self.scheduler.lag()
         if verbose:
             return (f"Clock {name!r}\n"
-                    f"  beat: {self.beat():.9f}\n"
-                    f"  time: {self.time():.9f}\n"
+                    f"  beat: {self.beat:.9f}\n"
+                    f"  time: {self.time:.9f}\n"
                     f"  wall: {wall:.9f}\n"
                     f"  lag:  {lag:.9f}")
-        return f"[{name} beat={self.beat():.3f} time={self.time():.3f} wall={wall:.3f} lag={lag:.3f}]"
+        return f"[{name} beat={self.beat:.3f} time={self.time:.3f} wall={wall:.3f} lag={lag:.3f}]"
 
     def print_status(self, verbose: bool = False) -> None:
         """Print this clock's :meth:`status` snapshot."""
@@ -609,19 +652,28 @@ class Clock:
     def tempo(self, t):
         self.tempo_history.tempo = t
 
+    @property
     def absolute_rate(self) -> float:
         """
         Rate of this clock in beats / (true) second, with all parent rates folded in.
+
+        (Read-only property. Before clockblocks 1.1 this was a method; the ``clock.absolute_rate()``
+        spelling still works, with a DeprecationWarning.)
         """
-        return self.rate if self.parent is None else self.rate * self.parent.absolute_rate()
+        rate = self.rate if self.parent is None else self.rate * self.parent.absolute_rate
+        return _CallableFloat(rate, "absolute_rate")
 
+    @property
     def absolute_tempo(self) -> float:
-        """Tempo (BPM) in true minutes, with all parent rates folded in."""
-        return self.absolute_rate() * 60
+        """Tempo (BPM) in true minutes, with all parent rates folded in. (Read-only property; the
+        pre-1.1 ``clock.absolute_tempo()`` spelling still works, with a DeprecationWarning.)"""
+        return _CallableFloat(self.absolute_rate * 60, "absolute_tempo")
 
+    @property
     def absolute_beat_length(self) -> float:
-        """Beat length in true seconds, with all parent rates folded in."""
-        return 1 / self.absolute_rate()
+        """Beat length in true seconds, with all parent rates folded in. (Read-only property; the
+        pre-1.1 ``clock.absolute_beat_length()`` spelling still works, with a DeprecationWarning.)"""
+        return _CallableFloat(1 / self.absolute_rate, "absolute_beat_length")
 
     ##################################################################################################################
     #                                          Tempo Targets / Functions
@@ -649,10 +701,10 @@ class Clock:
         abs_when = to_absolute_moment(when, self, allow_number=False)
         pinned_axis = abs_when.units
         # The reference "now" is read live, which is safe even when called repeatedly in a loop (see
-        # :meth:`_apply_targets`): ``beat()``/``time()`` derive from the scheduler's committed ``_ideal_time``,
+        # :meth:`_apply_targets`): ``beat``/``time`` derive from the scheduler's committed ``_ideal_time``,
         # which only advances when the scheduler executes an event — and the scheduler is parked/quiescent for
         # the duration of a tempo-setting call, so the reference does not drift between iterations.
-        now = self.beat() if pinned_axis == DurationUnits.BEATS else self.time()
+        now = self.beat if pinned_axis == DurationUnits.BEATS else self.time
         return abs_when.value - now, pinned_axis
 
     def _resolve_align_to(self, align_to: 'ResolvableMoment | None', pinned_axis: DurationUnits,
@@ -770,7 +822,7 @@ class Clock:
                     history_target_setter(target, duration, curve_shape=curve_shape, duration_units=units,
                                           truncate=(truncate and i == 0))
                 except ValueError as e:
-                    now = self.beat() if units == DurationUnits.BEATS else self.time()
+                    now = self.beat if units == DurationUnits.BEATS else self.time
                     raise ValueError(
                         f"`when` #{i} ({when!r}) resolves to {units} {duration + now:g}, which does not "
                         f"extend beyond the previous segment; `when`s must be strictly increasing in "
@@ -1074,7 +1126,7 @@ class Clock:
         this is a no-op since committed == current.
         """
         # delta = (live scheduler-derived beat) - (last committed beat in tempo_history)
-        delta = self.beat() - self.tempo_history.beat()
+        delta = self.beat - self.tempo_history.beat
         if delta > 0:
             self.tempo_history.advance(delta)
 
@@ -1099,7 +1151,7 @@ class Clock:
         initial_rate = tempo_histories[0].rate
         for i in range(1, len(tempo_histories)):
             # parent's beat at this moment = child's parent_offset + child's elapsed time
-            tempo_histories[i].go_to_beat(clocks[i - 1].parent_offset + tempo_histories[i - 1].time())
+            tempo_histories[i].go_to_beat(clocks[i - 1].parent_offset + tempo_histories[i - 1].time)
             initial_rate *= tempo_histories[i].rate
 
         def step_and_get_beat_length(step):
@@ -1109,7 +1161,7 @@ class Clock:
             return beat_change / step
 
         output_curve = TempoEnvelope(initial_rate, units="rate")
-        while any(th.beat() < th.length() for th in tempo_histories):
+        while any(th.beat < th.length() for th in tempo_histories):
             # sample twice at half step_size so we can use the midpoint as a curvature guide
             start_level = output_curve.end_level()
             halfway_level = step_and_get_beat_length(step_size / 2)
@@ -1253,8 +1305,8 @@ class Clock:
             raise ClockKilledError()
 
         # ~~~~~ Step 4b: Advance tempo_history's committed pointer to the beat we woke at ~~~~~
-        # bring_up_to_date() advances self.tempo_history's committed pointer to self.beat(), the live
-        # scheduler-derived position. Note that since were polling self.beat() now, this is robust even
+        # bring_up_to_date() advances self.tempo_history's committed pointer to self.beat, the live
+        # scheduler-derived position. Note that since were polling self.beat now, this is robust even
         # in the case of a time-based wakeup where the tempo has changed since it was scheduled.
         # The internal >0 guard also keeps a past/now target from rewinding.
         self.bring_up_to_date()
@@ -1391,7 +1443,7 @@ class Clock:
                 # instant, so it reflects where the child truly starts — correct no matter how the fork
                 # event was rescheduled in the interim (e.g. by a tempo change).
                 threading.current_thread().__clock__ = child
-                child.parent_offset = self.beat()
+                child.parent_offset = self.beat
                 child._state = ClockState.ALIVE
 
                 try:
@@ -1596,7 +1648,7 @@ class Clock:
         """
         if not self.is_master():
             raise NotMasterClockError("Only the master clock can be fast-forwarded.")
-        if t < self.time():
+        if t < self.time:
             raise ValueError("Cannot fast-forward to a time in the past.")
         if math.isinf(t):
             self.scheduler.set_fast_forward_goal(float("inf"))
@@ -1609,7 +1661,7 @@ class Clock:
 
         :param t: number of seconds to fast-forward by
         """
-        self.fast_forward_to_time(self.time() + t)
+        self.fast_forward_to_time(self.time + t)
 
     def fast_forward_to_beat(self, b: float) -> None:
         """
@@ -1619,7 +1671,7 @@ class Clock:
         """
         if not self.is_master():
             raise NotMasterClockError("Only the master clock can be fast-forwarded.")
-        if b < self.beat():
+        if b < self.beat:
             raise ValueError("Cannot fast-forward to a beat in the past.")
         if math.isinf(b):
             self.scheduler.set_fast_forward_goal(float("inf"))
@@ -1632,7 +1684,7 @@ class Clock:
 
         :param b: number of beats to fast-forward by
         """
-        self.fast_forward_to_beat(self.beat() + b)
+        self.fast_forward_to_beat(self.beat + b)
 
     def is_fast_forwarding(self) -> bool:
         """
@@ -1840,7 +1892,7 @@ class Clock:
         """:meta private:"""
         Clock._removed_attribute(
             "Clock.synchronization_policy", "(no replacement needed)",
-            "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
+            "Clock.beat/time now read live scheduler-derived positions from any thread, so there "
             "is nothing to synchronize between sibling clocks"
         )
 
@@ -1848,7 +1900,7 @@ class Clock:
     def synchronization_policy(self, value):
         Clock._removed_attribute(
             "Clock.synchronization_policy", "(no replacement needed)",
-            "Clock.beat()/time() now read live scheduler-derived positions from any thread, so there "
+            "Clock.beat/time now read live scheduler-derived positions from any thread, so there "
             "is nothing to synchronize between sibling clocks"
         )
 
@@ -1856,7 +1908,7 @@ class Clock:
         """:meta private:"""
         Clock._removed_attribute(
             "Clock.rouse_and_hold()", "`with clock.hold_scheduler(): ...`",
-            "the rouse half is obsolete (lazy beat()/time() are live from any thread), and the hold "
+            "the rouse half is obsolete (lazy beat/time are live from any thread), and the hold "
             "half is now an exception-safe `with` block that pairs acquire/release automatically"
         )
 
@@ -1870,8 +1922,8 @@ class Clock:
     def time_in_master(self, *args, **kwargs) -> None:
         """:meta private:"""
         Clock._removed_attribute(
-            "Clock.time_in_master()", "`clock.master.time()`",
-            "it was a bare proxy for master.time(), and being one it could not forward the `projected` "
+            "Clock.time_in_master()", "`clock.master.time`",
+            "it was a bare proxy for master.time, and being one it could not forward the `projected` "
             "flag that an out-of-clock reader of the master's position usually wants"
         )
 

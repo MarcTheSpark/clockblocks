@@ -451,12 +451,14 @@ class TempoHistory(TempoEnvelope):
     #                                                 Basic Properties
     ##################################################################################################################
 
+    @property
     def time(self):
         """
         The current time. Time is found by integrating under the beat length curve: seconds/beat * beats = seconds.
         """
         return self._t
 
+    @property
     def beat(self):
         """
         The current beat.
@@ -559,9 +561,9 @@ class TempoHistory(TempoEnvelope):
         """
         # truncate removes any segments that extend into the future
         if truncate:
-            self.remove_segments_after(self.beat())
+            self.remove_segments_after(self.beat)
         # add a flat segment up to the current beat if needed
-        self.extend_to(self.beat())
+        self.extend_to(self.beat)
 
         super().append_envelope(envelope_to_append)
         if loop:
@@ -570,7 +572,7 @@ class TempoHistory(TempoEnvelope):
                 envelope_to_append.length(),
                 envelope_to_append.integrate_interval(envelope_to_append.start_time(), envelope_to_append.end_time()),
                 self.end_time(),
-                self.beat() + self.integrate_interval(self.beat(), self.end_time())
+                self.beat + self.integrate_interval(self.beat, self.end_time())
             )
         return self
 
@@ -602,9 +604,9 @@ class TempoHistory(TempoEnvelope):
         try:
             # truncate removes any segments that extend into the future
             if truncate:
-                self.remove_segments_after(self.beat())
+                self.remove_segments_after(self.beat)
             # add a flat segment up to the current beat if needed
-            self.extend_to(self.beat())
+            self.extend_to(self.beat)
             self._add_segment(beat_length_target, duration, curve_shape, alignment_target, duration_units)
         except Exception:
             self.segments = backup
@@ -628,7 +630,7 @@ class TempoHistory(TempoEnvelope):
         duration_units = DurationUnits(duration_units)
         if duration_units == DurationUnits.BEATS:
             # how far the TempoEnvelope has planned things out already past the current beat
-            extension_into_future = self.length() - self.beat()
+            extension_into_future = self.length() - self.beat
             if duration < extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
             self.append_segment(beat_length_target, duration - extension_into_future, curve_shape)
@@ -639,7 +641,7 @@ class TempoHistory(TempoEnvelope):
                 if isinstance(alignment_target, MetricPhaseTarget):
                     # A phase target offers a set of matching times; pick the candidates nearest to the segment's
                     # current end time (so any curve_shape given acts as a seed for which phase we aim at).
-                    provisional_end_time = self.time() + self.integrate_interval(self.beat(), segment.end_time)
+                    provisional_end_time = self.time + self.integrate_interval(self.beat, segment.end_time)
                     candidates = alignment_target.get_nearest_matching_times(provisional_end_time)
                 else:
                     # A fixed target is the single exact end time to hit
@@ -652,7 +654,7 @@ class TempoHistory(TempoEnvelope):
             # duration_units == TIME, so first figure out how far this TempoEnvelope is *already* extended
             # into the future in TIME, and make sure that end time of our desired segment is at least
             # that far in the future
-            time_extension_into_future = self.integrate_interval(self.beat(), self.length())
+            time_extension_into_future = self.integrate_interval(self.beat, self.length())
             if duration < time_extension_into_future:
                 raise ValueError("Duration to target must extend beyond the last existing target.")
 
@@ -714,7 +716,7 @@ class TempoHistory(TempoEnvelope):
         mutated); else leaves the segment unchanged and returns False. (``set_curvature_to_desired_integral``
         range-checks before mutating, so a failure leaves the segment clean.)"""
         # NB segment.start_time / end_time are really the start and end *beats*.
-        segment_start_time = self.time() + self.integrate_interval(self.beat(), segment.start_time)
+        segment_start_time = self.time + self.integrate_interval(self.beat, segment.start_time)
         for new_end_time in candidate_end_times:
             try:
                 segment.set_curvature_to_desired_integral(new_end_time - segment_start_time)
@@ -806,7 +808,7 @@ class TempoHistory(TempoEnvelope):
         NB ``EnvelopeSegment.start_time`` / ``end_time`` are really start/end *beats* in this internal naming.
         """
         run_start_beat = run_segments[0].start_time
-        run_start_time = self.time() + self.integrate_interval(self.beat(), run_start_beat)
+        run_start_time = self.time + self.integrate_interval(self.beat, run_start_beat)
 
         if free_axis == DurationUnits.TIME:
             # The run pins beats, so the end beat is fixed; push the run's total *time* onto the target by
@@ -896,16 +898,16 @@ class TempoHistory(TempoEnvelope):
         duration_units = DurationUnits(duration_units)
         # truncate removes any segments that extend into the future
         if truncate:
-            self.remove_segments_after(self.beat())
+            self.remove_segments_after(self.beat)
         # make sure that we're caught up to the current beat
-        self.extend_to(self.beat())
+        self.extend_to(self.beat)
 
         if domain_end is None:
             # set the function follow info
             self.follow_func_or_envelope_loop = FunctionFollowInfo(
                 func, domain_start, extension_increment, units, duration_units,
                 scanning_step_size, min_key_point_distance, iterations, key_point_resolution_multiple,
-                self.end_time(), self.time() + self.integrate_interval(self.beat(), self.end_time())
+                self.end_time(), self.time + self.integrate_interval(self.beat, self.end_time())
             )
             # and then extend the follow function
             self._extend_follow_function()
@@ -972,7 +974,7 @@ class TempoHistory(TempoEnvelope):
             new_time = snap_float_to_nice_decimal(self._t + duration)
             new_beat = self.beat_at_time(new_time)
         # it's important to first calculate both new beat and new time before setting the new values, because
-        # function `self.beat_at_time` actually uses self.beat() and self.time(), which could otherwise be out of sync
+        # function `self.beat_at_time` actually uses self.beat and self.time, which could otherwise be out of sync
         delta_beat, delta_time = new_beat - self._beat, new_time - self._t
         self._beat, self._t = new_beat, new_time
         return delta_beat, delta_time
@@ -1023,11 +1025,11 @@ class TempoHistory(TempoEnvelope):
         plt = self._construct_plot(
             "Graph of TempoHistory" if title is None else title,
             resolution, show_segment_divisions, units,
-            (min(0.0, self.start_time()), max(self.end_time(), self.beat())) if x_range is None else x_range, y_range
+            (min(0.0, self.start_time()), max(self.end_time(), self.beat)) if x_range is None else x_range, y_range
         )
 
         if show_current_beat:
-            plt.vlines(self.beat(), *plt.ylim(), colors="green", linestyles="dashed")
+            plt.vlines(self.beat, *plt.ylim(), colors="green", linestyles="dashed")
         plt.show()
 
     def as_tempo_envelope(self) -> TempoEnvelope:

@@ -59,7 +59,7 @@ class TimeStamp:
         clock = current_clock() if master_clock is None else master_clock
         if not isinstance(clock, Clock):
             raise ValueError("No valid clock given or found for TimeStamp")
-        return cls(clock.scheduler.time(), clock.master)
+        return cls(clock.scheduler.time, clock.master)
 
     @property
     def time_in_master(self) -> float:

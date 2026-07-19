@@ -13,18 +13,18 @@ c = Clock("MASTER", initial_tempo=20, clock_family_options=ClockFamilyOptions(pr
 
 def grandchild():
     while True:
-        print(current_clock().name, current_clock().beat(), current_clock().time(), time.perf_counter()-start)
+        print(current_clock().name, current_clock().beat, current_clock().time, time.perf_counter()-start)
         wait(0.25, units="time")
 
 
 def child():
     current_clock().fork(grandchild, initial_rate=2, when=Moment.at_beat(2))
     while True:
-        print(current_clock().name, current_clock().beat(), current_clock().time(), time.perf_counter()-start)
+        print(current_clock().name, current_clock().beat, current_clock().time, time.perf_counter()-start)
         wait(1)
 
 
 c.fork(child, initial_rate=2, when=Moment.at_beat(1))
 while True:
-    print(current_clock().name, current_clock().beat(), current_clock().time(), time.perf_counter()-start)
+    print(current_clock().name, current_clock().beat, current_clock().time, time.perf_counter()-start)
     wait(1)
