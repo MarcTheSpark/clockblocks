@@ -11,6 +11,16 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Fixed
+
+- **Setup time before the first wait no longer counts against the schedule.** The scheduler
+  anchored its wall-clock reference the moment a `Clock` was constructed, so any time spent
+  between construction and the first `wait()` (loading resources, forking, typing in a REPL)
+  accrued as lag: the first wait returned immediately, and subsequent waits ran compressed
+  (2% fast at the default `timing_policy`) until the lag was absorbed. The anchor is now
+  planted at the first event that actually requires waiting, restoring the 0.6.x behavior
+  where time doesn't start counting until the first wait.
+
 ## [1.0.0] - 2026-07-12
 
 A ground-up redesign. Clockblocks is now built around a **single central scheduler**

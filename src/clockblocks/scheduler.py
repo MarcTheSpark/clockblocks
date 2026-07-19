@@ -232,8 +232,8 @@ class Scheduler(threading.Thread):
         """
         if self._last_event_time is None or self._fast_forward_goal is not None:
             # if fast-forwarding, there's no concept of progress between events, so the only logical projected
-            # time is ideal_time. If last_event_time is None, scheduler hasn't started yet (since it sets it and
-            # self._start_time to now() when it starts). So again, just set projected time to 0 = self._ideal_time.
+            # time is ideal_time. If last_event_time is None, timing hasn't been anchored yet (nothing has
+            # required a real wait — see run()), so time isn't passing: projected time is just self._ideal_time.
             return self._ideal_time
 
         try:
@@ -270,7 +270,9 @@ class Scheduler(threading.Thread):
 
     def wall_time(self) -> float:
         """
-        Return the actual time elapsed since the scheduler started.
+        Return the actual time elapsed on the schedule. Returns 0 until timing is anchored by the first
+        event that requires a real wait (see :meth:`run`), then advances in real time. Also resets to ideal
+        time after fast-forwarding, erasing any prior lag.
 
         Measured through the :class:`TimingBackend`, which defaults to ``time.perf_counter``. `perf_counter` is
         monotonic and high-resolution, so this is true elapsed real time, never affected by NTP corrections
@@ -408,9 +410,12 @@ class Scheduler(threading.Thread):
         The two subtle parts — how the wait is structured around `_queue_change_condition` so a queue
         change can't be lost, and why execution is wrapped in `_execution_lock` — are explained inline
         at STEP 1 and STEP 2 below.
+
+        Note that the clock starts in an unanchored state (`_start_time = _last_event_time = None`)
+        This is intentional: we don't want the code that runs before the first future action is scheduled
+        (which can be lengthy initial setup) to cause us to start off way behind schedule. The timing is
+        anchored (via `_reanchor_timing`) when the first future event is pulled from the queue.
         """
-        self._start_time = self._time.now()
-        self._last_event_time = self._start_time
         logger.info("Scheduler started")
         while not self._killed:
             # -------------------------   STEP 1: Wait for the next event -------------------------------
@@ -445,7 +450,17 @@ class Scheduler(threading.Thread):
                     wait_duration = 0.0
                 else:
                     self._end_fast_forward_if_active(now)
-                    wait_duration = self._compute_wait_duration(next_event, now)
+                    if self._start_time is None and next_event.t <= self._ideal_time:
+                        # Timing is not yet anchored, and this event is immediate (e.g. a clock's
+                        # initial wake, scheduled at the current ideal time): fire it with no wait
+                        # and leave timing unanchored, so that setup time stays off the schedule.
+                        wait_duration = 0.0
+                    else:
+                        if self._start_time is None:
+                            # First event that requires a real wait: plant the wall-clock anchor
+                            # here, so the wait is measured in full from this instant.
+                            self._reanchor_timing(now)
+                        wait_duration = self._compute_wait_duration(next_event, now)
 
                 # ~~~~~~ STEP 1c: Wait for the next scheduled event (if in the future) ~~~~~~
                 # Two paths, depending on whether we're spinning (busy-waiting) to hit the target time precisely
@@ -555,10 +570,10 @@ class Scheduler(threading.Thread):
 
     def _reanchor_timing(self, now: float) -> None:
         """
-        Reanchor the timing reference points after fast-forwarding:
-            - _last_event_time becomes now, so the next wait measures relative timing from when we stopped
-                fast-forwarding.
-            - self._start_time is set to self._ideal_time seconds in the past so that we are reanchored
+        (Re)anchor the timing reference points — used to plant the initial anchor at the first real wait
+        (see run()) and to re-anchor after fast-forwarding:
+            - _last_event_time becomes now, so the next wait measures relative timing from this instant.
+            - self._start_time is set to self._ideal_time seconds in the past so that we are anchored
                 to be exactly on time as far as absolute timing is concerned.
         """
         self._last_event_time = now
@@ -660,7 +675,9 @@ class Scheduler(threading.Thread):
         # Record the wake time *now*, before running the action, so it marks when this event actually fired.
         # Relative timing measures the next wait from here (see _compute_wait_duration), so event spacing
         # tracks the requested durations regardless of how long each action's callback runs.
-        self._last_event_time = self._time.now()
+        # Skipped while timing is unanchored (pre-anchor events are immediate and off the schedule)
+        if self._start_time is not None:
+            self._last_event_time = self._time.now()
         logger.debug("Executing event %r scheduled at %s", event.metadata, event.t)
         try:
             event.action()
