@@ -21,6 +21,14 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   planted at the first event that actually requires waiting, restoring the 0.6.x behavior
   where time doesn't start counting until the first wait.
 
+- **`extract_absolute_tempo_envelope()` no longer hangs on a clock following an open-ended
+  tempo function** (e.g. `apply_tempo_function(...)` with no `domain_end`). The extraction
+  loop kept auto-extending the followed function while chasing the envelope's end, so
+  building a score from such a clock's perspective (scamp's
+  `to_score()` on a performance recorded on that clock) never finished. The extraction now
+  freezes its copies of the tempo histories, using only what the clock has actually
+  materialized — matching 0.6.x behavior.
+
 ### Changed
 
 - **The position accessors are now read-only properties: write `clock.beat`, `clock.time`,

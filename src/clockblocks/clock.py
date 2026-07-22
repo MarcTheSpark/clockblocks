@@ -1147,6 +1147,11 @@ class Clock:
 
         clocks = self.inheritance()
         tempo_histories = [deepcopy(c.tempo_history) for c in clocks]
+        for th in tempo_histories:
+            # Freeze the copies: a clock following an open-ended tempo function or envelope loop
+            # auto-extends inside advance(), so the `th.beat < th.length()` loop below would chase
+            # a receding horizon forever. The copy already contains everything already materialized.
+            th.stop_follow_function_or_envelope_loop()
         tempo_histories[0].go_to_beat(start_beat)
         initial_rate = tempo_histories[0].rate
         for i in range(1, len(tempo_histories)):
