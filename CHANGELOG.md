@@ -11,6 +11,8 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-26
+
 ### Added
 
 - **`get_beat()` and `get_time()`**, module-level readers of the current clock's position, completing the
