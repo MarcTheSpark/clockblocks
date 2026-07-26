@@ -11,6 +11,15 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Added
+
+- **`get_beat()` and `get_time()`**, module-level readers of the current clock's position, completing the
+  family alongside `get_tempo()` / `get_rate()` / `get_beat_length()`. Saves the round trip through
+  `current_clock().beat`, so a loop can read `while get_beat() < 16:`. Like every other module-level helper,
+  they act on *this* clock rather than the master (use `current_clock().master.beat` for that) and raise
+  `NoActiveClockError` off a clock thread. They return plain floats, not the callable-float shim that
+  `Clock.beat` / `Clock.time` return (see Deprecated below).
+
 ### Fixed
 
 - **Setup time before the first wait no longer counts against the schedule.** The scheduler

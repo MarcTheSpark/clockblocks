@@ -275,6 +275,39 @@ def get_beat_length() -> float:
     return _current_clock_or_raise("get_beat_length").beat_length
 
 
+##################################################################################################################
+#                                     Context-inferring position readers
+##################################################################################################################
+# Module-level readers of the current clock's position, for user convenience (current_clock().beat is a bit wordy),
+# and consistency with other context-inferring readers. Note that there are deliberately no
+# projected_beat()/projected_time() counterparts, since these are intended for callers *outside* the clock family.
+# ---------------------------------------------------------------------------------------------------------------
+
+
+def get_beat() -> float:
+    """Return how many beats have passed on the currently active clock (see :attr:`~clockblocks.clock.Clock.beat`).
+
+    As with the tempo helpers, this reads *this* clock and not the master; use ``current_clock().master.beat`` for
+    that. Raises NoActiveClockError if there is no active clock.
+
+    :return: the current beat of the active clock."""
+    # float() sheds the _CallableFloat that Clock.beat returns, so this new function doesn't inherit the
+    # deprecated beat() call spelling. Drop the cast when that shim goes in 2.0.
+    return float(_current_clock_or_raise("get_beat").beat)
+
+
+def get_time() -> float:
+    """Return how much time has passed on the currently active clock (see :attr:`~clockblocks.clock.Clock.time`) —
+    in seconds if it is the master clock, or parent clock beats if it is a forked child clock.
+
+    As with the tempo helpers, this reads *this* clock and not the master; use ``current_clock().master.time`` for
+    that. Raises NoActiveClockError if there is no active clock.
+
+    :return: the current time of the active clock."""
+    # float() as in get_beat: sheds the 1.x-only _CallableFloat shim.
+    return float(_current_clock_or_raise("get_time").time)
+
+
 def set_tempo_target(tempo_target: float, when: 'ResolvableMoment', curve_shape: float = None,
                      truncate: bool = True, align_to: 'ResolvableMoment' = None) -> None:
     """Smoothly change the current clock's tempo to ``tempo_target`` (in beats per minute), arriving at

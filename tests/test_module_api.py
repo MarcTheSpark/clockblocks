@@ -200,6 +200,42 @@ class ModuleApiTestCase(unittest.TestCase):
         self.assertAlmostEqual(self.master.beat_length, 0.5)
         self.assertAlmostEqual(utilities.get_beat_length(), 0.5)
 
+    # ---- position readers: act on the CURRENT clock, raise off-thread ----
+
+    def test_get_beat_and_get_time_track_current_clock(self):
+        self.assertEqual(utilities.get_beat(), 0)
+        self.assertEqual(utilities.get_time(), 0)
+        self.master.wait(3)
+        self.assertAlmostEqual(utilities.get_beat(), 3)
+        self.assertAlmostEqual(utilities.get_time(), 3)
+
+    def test_get_beat_and_get_time_return_plain_floats(self):
+        # Not the _CallableFloat shim that Clock.beat/Clock.time still return for backwards compatibility:
+        # a new function has no old method spelling to support.
+        self.assertIs(type(utilities.get_beat()), float)
+        self.assertIs(type(utilities.get_time()), float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            utilities.get_beat()
+            utilities.get_time()
+
+    def test_position_readers_act_on_fork_not_master(self):
+        # Inside a fork at double tempo, get_beat() reports the fork's own beat, while get_time() reports
+        # its position in the parent's beats — neither is the master's reading.
+        seen = {}
+
+        def child():
+            utilities.wait(4)
+            seen["child_beat"] = utilities.get_beat()
+            seen["child_time"] = utilities.get_time()
+            seen["master_beat"] = self.master.beat
+
+        self.master.fork(child, initial_rate=2)
+        self.master.wait_for_children_to_finish()
+        self.assertAlmostEqual(seen["child_beat"], 4)
+        self.assertAlmostEqual(seen["child_time"], 2)
+        self.assertAlmostEqual(seen["master_beat"], 2)
+
     def test_tempo_helpers_act_on_fork_not_master(self):
         # set_tempo() inside a fork changes *that fork's* tempo, leaving the master untouched.
         self.master.tempo = 60
@@ -396,6 +432,8 @@ class ModuleApiTestCase(unittest.TestCase):
             utilities.get_tempo,
             utilities.get_rate,
             utilities.get_beat_length,
+            utilities.get_beat,
+            utilities.get_time,
             lambda: utilities.set_tempo_target(120, Moment.after_beats(1)),
             lambda: utilities.set_rate_target(2, Moment.after_beats(1)),
             lambda: utilities.set_beat_length_target(0.5, Moment.after_beats(1)),
