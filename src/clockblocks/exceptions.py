@@ -35,7 +35,11 @@ class ClockKilledError(ClockblocksError):
 
 class DeadClockError(ClockblocksError):
     """Raised when something tries to wait or fork on a clock that's no longer ALIVE
-    (either killed already, or — for fork — still PENDING in its start_delay)."""
+    (either killed already, or — for fork — still PENDING in its start_delay).
+
+    Note that, when a master clock is killed, context-inferring operations like `wait` and `fork` will raise a
+    NoActiveClockError, whereas direct calls of `c.wait` or `c.fork` on a reference to the dead clock will raise
+    a DeadClockError."""
     pass
 
 
@@ -48,9 +52,14 @@ class WrongThreadError(ClockblocksError):
 
 
 class NoActiveClockError(ClockblocksError):
-    """Raised when a clock operation (the module-level wait/fork/etc.) is attempted from a thread
-    that has no clock active on it. Establish one with fork() / run_as_server(), or call the method
-    on a Clock object directly."""
+    """Raised when a context-inferring clock operation (the module-level wait/fork/etc.) is attempted from
+    a thread that has no clock active on it. Establish one with fork() / run_as_server(), or call the method
+    on a Clock object directly.
+
+    Note that, when a master clock is killed, context-inferring operations like `wait` and `fork` will raise a
+    NoActiveClockError, whereas direct calls of `c.wait` or `c.fork` on a reference to the dead clock will raise
+    a DeadClockError.
+    """
     pass
 
 

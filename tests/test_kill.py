@@ -1,10 +1,11 @@
 import threading
+import time
 import unittest
 
 from clockblocks.clock import Clock, ClockState
-from clockblocks.exceptions import ClockKilledError, DeadClockError, WrongThreadError
+from clockblocks.exceptions import ClockKilledError, DeadClockError, NoActiveClockError, WrongThreadError
 from clockblocks.moment import Moment
-from clockblocks.utilities import current_clock
+from clockblocks.utilities import current_clock, wait
 
 
 class KillTestCase(unittest.TestCase):
@@ -76,6 +77,85 @@ class KillTestCase(unittest.TestCase):
         with self.assertRaises(DeadClockError):
             child.fork(lambda: None)
         child.kill()  # release the pending fork event from the scheduler heap
+
+    # ---- the owning thread's tag ----
+
+    def test_killing_master_releases_its_owning_thread(self):
+        """A dead master is no longer the thread's active clock, so the implicit helpers say so."""
+        self.assertIs(current_clock(), self.master)
+        self.master.kill()
+        self.assertIsNone(current_clock())
+        with self.assertRaises(NoActiveClockError):
+            wait(0.01)
+
+    def test_no_active_clock_error_explains_that_the_clock_was_killed(self):
+        """The bare 'no active clock' message is unhelpful when the clock was killed a line ago."""
+        self.master.kill()
+        with self.assertRaises(NoActiveClockError) as caught:
+            wait(0.01)
+        self.assertIn("was killed", str(caught.exception))
+        self.assertIn("master", str(caught.exception))
+
+    def test_no_active_clock_error_explains_run_as_server_handover(self):
+        self.master.kill()  # this test uses a dedicated server clock instead
+        server = Clock(name="served").run_as_server()
+        with self.assertRaises(NoActiveClockError) as caught:
+            wait(0.01)
+        self.assertIn("run_as_server()", str(caught.exception))
+        self.assertIn("served", str(caught.exception))
+        self.master = server
+
+    def test_no_active_clock_error_stays_bare_on_a_thread_that_never_had_one(self):
+        """No note when there's nothing to explain — a plain non-clock thread."""
+        caught = []
+
+        def on_plain_thread():
+            try:
+                wait(0.01)
+            except NoActiveClockError as e:
+                caught.append(str(e))
+
+        t = threading.Thread(target=on_plain_thread)
+        t.start()
+        t.join()
+        self.assertEqual(len(caught), 1)
+        self.assertNotIn("Note:", caught[0])
+
+    def test_killing_master_still_raises_dead_clock_error_through_a_reference(self):
+        """The other half of the split: holding a reference to the corpse still gets DeadClockError."""
+        self.master.kill()
+        with self.assertRaises(DeadClockError):
+            self.master.wait(0.01)
+
+    def test_killing_master_does_not_clear_a_newer_masters_tag(self):
+        """Killing a master out of order must not steal the tag from whoever owns the thread now."""
+        first = self.master
+        second = Clock(name="second")  # takes over this thread's tag
+        self.assertIs(current_clock(), second)
+        first.kill()
+        self.assertIs(current_clock(), second, "killing the older master stole the newer one's tag")
+        second.kill()
+        self.assertIsNone(current_clock())
+
+    def test_killing_a_server_master_releases_the_server_thread(self):
+        """run_as_server moves ownership to the background thread; kill must untag *that* thread."""
+        self.master.kill()  # this test uses a dedicated server clock instead
+        server = Clock(name="server").run_as_server()
+        time.sleep(0.1)
+        # run_as_server hands ownership to the background thread, so the tag tracks that thread, not ours.
+        tagged = server._tagged_thread
+        self.assertIsNot(tagged, threading.current_thread())
+        self.assertIs(getattr(tagged, '__clock__', None), server)
+        server.kill()
+        self.assertIsNone(getattr(tagged, '__clock__', None))
+        self.master = server  # tearDown's kill() is then a no-op on an already-dead clock
+
+    def test_killing_a_child_leaves_the_masters_tag_alone(self):
+        """Cascade is master-only for tagging: a child's tag lives on its own pool worker."""
+        child = self.master.fork(lambda: current_clock().wait(1.0))
+        self.master.wait(0.02)
+        child.kill()
+        self.assertIs(current_clock(), self.master, "killing a child disturbed the master's thread tag")
 
     # ---- killing children ----
 

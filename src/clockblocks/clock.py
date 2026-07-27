@@ -28,6 +28,7 @@ import sys
 import threading
 import traceback
 import warnings
+import weakref
 from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
@@ -128,10 +129,11 @@ class ClockFamilyOptions:
 #
 #   MASTER, natural end:
 #       The owning thread finishes its top-level code. There is no _fork_wrapper, so nothing notifies the
-#       scheduler — it stays parked on the master's _scheduler_park_condition. On the main thread this is
-#       harmless (the thread ending is process exit, and the daemon scheduler dies with it). On another
-#       thread in a long-lived process it leaks the parked scheduler daemon until exit, which is why a master
-#       created off the main thread should be killed explicitly (see Clock's class docstring).
+#       scheduler — it stays parked on the master's _scheduler_park_condition, and the family keeps running.
+#       In a long-lived process this leaks the parked scheduler daemon and any still-forked children (which
+#       are running as non-daemon threads on the ThreadPoolExecutor), which is why a master should be killed
+#       explicitly (see Clock's class docstring). Any master still live when the process exits is killed by
+#       _kill_live_masters_at_exit below, so at worst this leaks until exit rather than hanging it.
 #
 #   MASTER, killed:
 #       kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
@@ -145,8 +147,55 @@ class ClockFamilyOptions:
 #           `with clock:` block for a master, or the user's own try/except.
 #         - Self-kill (the owning thread calls master.kill() itself): it can only do so while running, not
 #           parked, so nothing observes DEAD here — kill() just winds things down and returns normally. No
-#           ClockKilledError; a *later* wait()/fork() on this thread would raise DeadClockError at entry.
+#           ClockKilledError.
+#       Either way, killing a master also clears its owning thread's __clock__ tag, so that thread has no
+#       active clock afterwards: a later module-level wait()/fork() there raises NoActiveClockError, while
+#       a call through a held reference (master.wait(...)) instead raises DeadClockError at the entry check.
 # ======================================================================================================
+
+
+# ======================================================================================================
+#                                  Cleaning up master clocks at process exit
+# ======================================================================================================
+# We maintain a set of all live master clocks, so that a user who never calls kill() still gets a clean
+# process exit. Weak, so a master that goes out of scope is collectable as usual.
+_live_master_clocks: 'weakref.WeakSet[Clock]' = weakref.WeakSet()
+
+
+def _kill_live_masters_at_exit() -> None:
+    """
+    Kill any master clock still running when the interpreter starts shutting down.
+
+    Without this, a forgotten `kill()` makes the interpreter hang on natural exit. This happens because:
+
+    1) The forked ThreadPoolExecutor workers are non-daemon and are joined during shutdown
+    2) Even though the scheduler is a daemon thread, these are only killed at the very *end* of interpreter
+    finalization.
+
+    So if we have a long- or infinite-running fork, then Python is stuck waiting for those to finish before
+    it can even kill the scheduler. Every new fork attempted raises "cannot schedule new futures
+    after shutdown" out of the now-closed pool.
+
+    Killing the masters first wakes those forked functions with a ClockKilledError, which _fork_wrapper
+    catches, letting the workers unwind and the join complete.
+    """
+    for clock in list(_live_master_clocks):
+        try:
+            clock.kill()
+        except Exception:
+            # Deliberately broad: kill() touches the scheduler, the tree locks and the thread pool, and one
+            # master failing to wind down must not abort the loop and strand the rest — stranding them is the
+            # hang this whole hook exists to prevent. Not BaseException, so a KeyboardInterrupt or SystemExit
+            # arriving during shutdown still propagates. Logged rather than swallowed so that a real bug in
+            # kill() stays visible; we run before logging's own atexit teardown, so this still reaches handlers.
+            logging.exception("Error killing %r during interpreter shutdown.", clock)
+
+
+# The ThreadPoolExecutor runs its cleanup on _register_atexit (since python 3.9), and this is where we wait
+# for all the non-daemon threads to join. threading._shutdown runs the list LIFO, and importing
+# ThreadPoolExecutor above guarantees that its cleanup registered first, and our killing of the clocks
+# runs first.
+threading._register_atexit(_kill_live_masters_at_exit)
 
 
 def _reschedule_after_tempo_change(fn):
@@ -294,6 +343,11 @@ class Clock:
         # own (an indefinite _wait(None)), so _detach_child watches this flag and, when the last child
         # detaches, schedules the wakeup that releases it. See _detach_child / wait_for_children_to_finish.
         self._waiting_for_children = False
+        # The thread whose __clock__ tag points at this clock, i.e. the thread this clock owns.
+        # Only used for the master clock, since a forked child's tag is managed by _fork_wrapper.
+        # kill() needs this in case it's called from another thread so it knows which thread to
+        # clear the tag from.
+        self._tagged_thread = None
 
         if self.is_master():
             # The whole family shares one thread pool, owned by the master, that carries out every fork
@@ -323,6 +377,8 @@ class Clock:
             self._clock_tree_lock = threading.RLock()
             # Master starts ALIVE (no fork / start_delay)
             self._state = ClockState.ALIVE
+            # Track this master so it gets killed at interpreter exit if the user never does
+            _live_master_clocks.add(self)
             # the first thing we do is stop and put things in the scheduler's hands
             # tell the scheduler to wake up right away and get this clock going, then wait for the scheduler to do it
             self.scheduler.schedule_action(self.scheduler.time, self._wake_and_advance_to_next_wait_call,
@@ -332,6 +388,7 @@ class Clock:
             self._wait_event.wait()
 
             threading.current_thread().__clock__ = self
+            self._tagged_thread = threading.current_thread()
             # the "parent" of the master clock, timing wise, is the scheduler. But master_clock.parent is None
             # still because there is not parent clock.
             self.parent_offset = self.scheduler.time
@@ -1506,9 +1563,19 @@ class Clock:
                     # If kill() was called during the start_delay window, just skip starting the thread.
                     # kill() will have removed this event in most cases, but guard against the race.
                     return
-                with child._scheduler_park_condition:
-                    self._run_in_pool(_fork_wrapper, args, kwargs)
-                    child._scheduler_park_condition.wait()
+                try:
+                    with child._scheduler_park_condition:
+                        self._run_in_pool(_fork_wrapper, args, kwargs)
+                        child._scheduler_park_condition.wait()
+                except BaseException:
+                    # The launch never got off the ground (e.g. the pool refuses new work because the
+                    # interpreter is shutting down). _fork_wrapper will therefore never run its cleanup, so
+                    # do the detach here instead; otherwise the unborn child sits in the parent's _children
+                    # list forever, leaking it and stalling any wait_for_children_to_finish().
+                    with self._tree_lock:
+                        self._detach_child(child)
+                        child._state = ClockState.DEAD
+                    raise
 
             self._schedule_at(start_moment, _start_new_clock, child._priority,
                               description=f"Forking of {child}",
@@ -1597,8 +1664,10 @@ class Clock:
         approach for driving clockblocks from an interactive REPL: ``c = Clock().run_as_server()``.
         The background thread becomes the clock's owning thread and waits forever; the calling thread
         relinquishes ownership (its `current_clock()` becomes None), so further work must be forked on
-        the returned clock object directly (``c.fork(...)``), not via the module-level helpers. Returns
-        self. Only valid on the master clock — raises NotMasterClockError on a child.
+        the returned clock object directly (``c.fork(...)``), not via the context-inferring helpers such
+        as :func:`~clockblocks.utilities.fork` and :func:`~clockblocks.utilities.wait`.
+
+        Returns self. Only valid on the master clock — raises NotMasterClockError on a child.
         """
         if not self.is_master():
             raise NotMasterClockError(
@@ -1614,9 +1683,17 @@ class Clock:
             except (ClockKilledError, DeadClockError):
                 pass
 
-        threading.Thread(target=run_server, daemon=True).start()
+        # Record the handover before starting the thread, so that a kill() arriving in the interim still
+        # finds the right thread to untag rather than racing run_server's own assignment.
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        self._tagged_thread = server_thread
+        server_thread.start()
         # The calling thread no longer owns this clock.
         threading.current_thread().__clock__ = None
+        threading.current_thread().__no_clock_reason__ = (
+            f"{self._label} was handed to a background thread by run_as_server(), so this thread no longer "
+            "owns it. Fork on the returned clock object directly, rather than via the module-level helpers"
+        )
         return self
 
     @property
@@ -1776,9 +1853,13 @@ class Clock:
 
         Pending scheduled work for this clock and its descendants is cancelled and the clocks are
         marked dead. A clock currently blocked in :meth:`wait` raises
-        :class:`~clockblocks.exceptions.ClockKilledError`; any later :meth:`wait` or :meth:`fork` on a dead clock
-        raises :class:`~clockblocks.exceptions.DeadClockError`. Killing the master also tears down the
-        family's scheduler.
+        :class:`~clockblocks.exceptions.ClockKilledError`; any later :meth:`wait` or :meth:`fork` made
+        through a reference to a dead clock raises :class:`~clockblocks.exceptions.DeadClockError`.
+
+        Killing the master also tears down the family's scheduler, and releases its owning thread: that
+        thread's :func:`~clockblocks.utilities.current_clock` becomes ``None``, so the module-level helpers
+        (``wait()``, ``fork()``, ``get_beat()``, ...) raise
+        :class:`~clockblocks.exceptions.NoActiveClockError` there rather than reporting a dead clock.
 
         Safe to call from any thread, and killing an already-dead clock is a no-op.
 
@@ -1851,6 +1932,20 @@ class Clock:
         # Clean up the scheduler and thread pool when killing the master.
         # (No need to hold tree lock here anymore; it's irrelevant)
         if self.is_master():
+            _live_master_clocks.discard(self)
+            # Release the owning thread: with this master dead, that thread has no active clock, so
+            # current_clock() — and the module-level helpers built on it — should report that by raising
+            # a NoActiveClockError, rather than handing back a clock that will raise a DeadClockError.
+            tagged_thread = self._tagged_thread
+            # the `getattr(tagged_thread, '__clock__', None) is self` prevents us from accidentally
+            # clearing the tag of a new master clock that was just created on the same thread.
+            if tagged_thread is not None and getattr(tagged_thread, '__clock__', None) is self:
+                tagged_thread.__clock__ = None
+                # Leave a note so a later NoActiveClockError on this thread can say what became of the clock
+                # that used to be here. It must stay a plain string: stashing the clock itself would pin the
+                # corpse to the thread, undoing the collectability that clearing the tag just bought.
+                tagged_thread.__no_clock_reason__ = f"{self._label} owned this thread, and was killed"
+            self._tagged_thread = None
             self.scheduler.kill()
             # All victims have been flagged DEAD, woken, and detached above, so any pooled fork workers
             # have already unwound (or are about to). shutdown(wait=False) lets the executor's workers
@@ -1940,6 +2035,11 @@ class Clock:
             "by whatever schedule lag predated the clock; both quantities it conflated are scheduler-wide, "
             "not per-clock"
         )
+
+    @property
+    def _label(self) -> str:
+        """Short identifier for error messages — like __repr__, but without the child list."""
+        return f"Clock({self.name!r})" if self.name is not None else "an unnamed clock"
 
     def __repr__(self):
         child_list = "" if len(self._children) == 0 else ", ".join(str(child) for child in self._children)

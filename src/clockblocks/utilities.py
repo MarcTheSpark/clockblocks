@@ -95,6 +95,19 @@ def current_clock() -> clock.Clock | None:
     return getattr(threading.current_thread(), '__clock__', None)
 
 
+def _no_active_clock_error(message: str) -> NoActiveClockError:
+    """
+    Build a NoActiveClockError, adding *why* this thread has no clock when we happen to know.
+
+    A thread can lose its clock in two ways that are easy to be surprised by: the clock was killed, or
+    ``run_as_server()`` handed ownership to a background thread. Both leave a short note on the thread as
+    they release it, which turns a bare "no active clock" into an explanation of what became of the one
+    that used to be here.
+    """
+    reason = getattr(threading.current_thread(), '__no_clock_reason__', None)
+    return NoActiveClockError(message if reason is None else f"{message} Note: {reason}.")
+
+
 ##################################################################################################################
 #                                  Context-inferring wait and fork methods
 ##################################################################################################################
@@ -122,7 +135,7 @@ def wait(dt: 'float | ResolvableMoment', units="beats") -> None:
     if c is not None:
         c.wait(dt, units=units)
     else:
-        raise NoActiveClockError("wait() called on a thread with no active clock.")
+        raise _no_active_clock_error("wait() called on a thread with no active clock.")
 
 
 def wait_until(when: 'float | ResolvableMoment', units="beats") -> None:
@@ -144,7 +157,7 @@ def wait_until(when: 'float | ResolvableMoment', units="beats") -> None:
     if c is not None:
         c.wait_until(when, units=units)
     else:
-        raise NoActiveClockError("wait_until() called on a thread with no active clock.")
+        raise _no_active_clock_error("wait_until() called on a thread with no active clock.")
 
 
 def wait_forever() -> None:
@@ -157,7 +170,7 @@ def wait_forever() -> None:
     if c is not None:
         c.wait_forever()
     else:
-        raise NoActiveClockError("wait_forever() called on a thread with no active clock.")
+        raise _no_active_clock_error("wait_forever() called on a thread with no active clock.")
 
 
 def wait_for_children_to_finish() -> None:
@@ -168,7 +181,7 @@ def wait_for_children_to_finish() -> None:
     """
     c = current_clock()
     if c is None:
-        raise NoActiveClockError("wait_for_children_to_finish() called on a thread with no active clock.")
+        raise _no_active_clock_error("wait_for_children_to_finish() called on a thread with no active clock.")
     c.wait_for_children_to_finish()
 
 
@@ -201,7 +214,7 @@ def fork(forked_function: Callable, args: Sequence = (), kwargs: dict = None, na
     """
     c = current_clock()
     if c is None:
-        raise NoActiveClockError("Cannot fork: there is no active clock on this thread.")
+        raise _no_active_clock_error("Cannot fork: there is no active clock on this thread.")
     return c.fork(forked_function, args=args, kwargs=kwargs, name=name, initial_rate=initial_rate,
                   initial_tempo=initial_tempo, initial_beat_length=initial_beat_length,
                   when=when, done_callback=done_callback)
@@ -223,7 +236,7 @@ def _current_clock_or_raise(caller: str) -> 'clock.Clock':
     """
     c = current_clock()
     if c is None:
-        raise NoActiveClockError(f"{caller}() called on a thread with no active clock.")
+        raise _no_active_clock_error(f"{caller}() called on a thread with no active clock.")
     return c
 
 

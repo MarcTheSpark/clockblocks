@@ -11,6 +11,39 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Changed
+
+- **Killing a master clock now releases its owning thread.** That thread's `current_clock()` becomes
+  `None`, so the module-level helpers (`wait()`, `fork()`, `get_beat()`, ...) raise `NoActiveClockError`
+  there instead of `DeadClockError`. This draws a clean line between the two errors: `DeadClockError`
+  means "the clock you're holding has died" — still what you get from `master.wait(...)` through a
+  reference — while `NoActiveClockError` means "you asked for the implicit clock and there isn't one".
+  `run_as_server()` already behaved this way when handing ownership to its background thread; `kill()` was
+  the odd one out. Only the master's own thread is affected: a forked child's thread is untagged by its
+  own cleanup as before. If you catch `DeadClockError` around a module-level `wait()` following a kill,
+  catch `NoActiveClockError` instead.
+- **`NoActiveClockError` now explains what became of the thread's clock**, when it knows. Killing a clock
+  or handing it to a background thread with `run_as_server()` leaves a note behind, so instead of a bare
+  "wait() called on a thread with no active clock" you get "… Note: Clock('master') owned this thread, and
+  was killed", or a pointer to fork on the returned object directly after `run_as_server()`. A thread that
+  simply never had a clock still gets the plain message.
+
+### Fixed
+
+- **A master clock left running no longer hangs interpreter exit.** Forgetting to `kill()` a master (or a
+  scamp `Session`) used to wedge the process: the thread pool's workers are non-daemon and get joined
+  during shutdown, but the forked functions running on them typically loop forever, so the join never
+  finished. Meanwhile the scheduler — a daemon thread, but daemon threads are only killed at the very end
+  of finalization, which was never reached — kept running, spraying `RuntimeError: cannot schedule new
+  futures after shutdown` for every fork it attempted, and playback carried on after the program was
+  "over". Any still-live master is now killed at the start of shutdown, so the process exits cleanly.
+  Killing masters explicitly is still the right thing to do; this just makes forgetting cost a leak until
+  exit rather than a hang.
+- **A fork that fails to launch no longer leaves a phantom child** attached to its parent. The child clock
+  is created before its thread starts, and was only detached by the thread itself, so if the launch raised
+  the child stayed in the parent's child list forever — leaking it and stalling any
+  `wait_for_children_to_finish()` on that parent.
+
 ## [1.1.0] - 2026-07-26
 
 ### Added
