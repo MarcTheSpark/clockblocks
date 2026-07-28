@@ -11,7 +11,7 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
-## [1.1.0] - 2026-07-26
+## [1.1.0] - 2026-07-27
 
 ### Added
 
