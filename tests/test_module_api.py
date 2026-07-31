@@ -316,12 +316,11 @@ class ModuleApiTestCase(unittest.TestCase):
 
     def test_set_tempo_target_align_to_fixed_coordinate_and_warns_on_curve_shape(self):
         self.master.tempo = 60
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with self.assertLogs(level="WARNING") as caught:
             # when pins time (20s); align_to pins the free (beat) axis to exactly 26; curvature solved
             self.master.set_tempo_target(130, Moment.after_time(20), curve_shape=2, align_to=Moment.at_beat(26))
-            self.assertTrue(any("curve_shape" in str(w.message) for w in caught),
-                            "expected a warning that curve_shape is discarded for a fixed align_to")
+        self.assertTrue(any("curve_shape" in line for line in caught.output),
+                        "expected a warning that curve_shape is discarded for a fixed align_to")
         th = self.master.tempo_history
         self.assertAlmostEqual(th.length(), 26, delta=1e-9)
         self.assertAlmostEqual(th.integrate_interval(0, 26), 20, delta=1e-6)

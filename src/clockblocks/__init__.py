@@ -44,7 +44,8 @@ from clockblocks.tempo_envelope import TempoEnvelope, TempoHistory
 from clockblocks.metric_phase import MetricPhaseTarget
 from clockblocks.moment import Moment, ResolvableMoment
 from clockblocks.time_stamp import TimeStamp, TimeStampInterval
-from clockblocks.utilities import current_clock, wait, wait_until, wait_forever, wait_for_children_to_finish, fork, \
+from clockblocks.utilities import current_clock, wait, wait_until, wait_forever, \
+    wait_for_children_to_finish, terminate_forked_children, fork, \
     set_tempo, set_rate, set_beat_length, get_tempo, get_rate, get_beat_length, get_beat, get_time, \
     set_tempo_target, set_rate_target, set_beat_length_target, \
     set_tempo_targets, set_rate_targets, set_beat_length_targets, \

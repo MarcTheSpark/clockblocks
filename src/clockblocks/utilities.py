@@ -176,13 +176,25 @@ def wait_forever() -> None:
 def wait_for_children_to_finish() -> None:
     """
     Block on the currently active clock until its child clocks have finished
-    (see :meth:`~clockblocks.clock.Clock.wait_for_children_to_finish`). Requires a real clock —
-    raises NoActiveClockError otherwise.
+    (see :meth:`~clockblocks.clock.Clock.wait_for_children_to_finish`). On a thread
+    with no active clock, raises NoActiveClockError.
     """
     c = current_clock()
     if c is None:
         raise _no_active_clock_error("wait_for_children_to_finish() called on a thread with no active clock.")
     c.wait_for_children_to_finish()
+
+
+def terminate_forked_children() -> None:
+    """
+    Kill the child clocks of the currently active clock
+    (see :meth:`~clockblocks.clock.Clock.terminate_forked_children`). The deliberate counterpart to
+    :func:`wait_for_children_to_finish`. On a thread with no active clock, raises NoActiveClockError.
+    """
+    c = current_clock()
+    if c is None:
+        raise _no_active_clock_error("terminate_forked_children() called on a thread with no active clock.")
+    c.terminate_forked_children()
 
 
 def fork(forked_function: Callable, args: Sequence = (), kwargs: dict = None, name: str = None,

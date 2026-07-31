@@ -42,8 +42,7 @@ from clockblocks.moment import Moment, ResolvableMoment, to_absolute_moment
 from clockblocks.metric_phase import MetricPhaseTarget
 from clockblocks.enums import DurationUnits
 from clockblocks.utilities import _PrintColors, current_clock
-from clockblocks.exceptions import (ClockKilledError, DeadClockError, WrongThreadError,
-                            NotMasterClockError)
+from clockblocks.exceptions import ClockKilledError, DeadClockError, WrongThreadError, NotMasterClockError
 import textwrap
 
 
@@ -110,14 +109,16 @@ class ClockFamilyOptions:
 # ======================================================================================================
 # Clock termination / lifecycle paths
 # ------------------------------------------------------------------------------------------------------
-# Every clock ends in one of four ways. They converge on the same final state (DEAD, detached from the
+# Every clock ends in one of five ways. They converge on the same final state (DEAD, detached from the
 # parent, scheduler released), but reach it differently. kill() and _fork_wrapper both implement parts of
 # this; this is the single reference for how they fit together.
 #
 #   SUB-CLOCK, natural end:
-#       The user function returns inside _fork_wrapper (no exception). _fork_wrapper removes the child
-#       from parent._children, sets state=DEAD, then notifies _scheduler_park_condition (the scheduler is
-#       parked there awaiting a next wait() that will never come). The thread exits.
+#       The user function returns inside _fork_wrapper (no exception), and any of its children still
+#       running are killed (with a warning) via _terminate_unfinished_children. Then _fork_wrapper
+#       removes the child from parent._children, sets state=DEAD, notifies _scheduler_park_condition
+#       (the scheduler is parked there awaiting a next wait() that will never come), runs the
+#       done_callback if one was given, and untags the pooled worker thread. The thread exits.
 #
 #   SUB-CLOCK, killed:
 #       kill() (possibly cascaded from an ancestor) sets state=DEAD, removes the clock's queued wake-up
@@ -125,7 +126,16 @@ class ClockFamilyOptions:
 #       _scheduler_park_condition, and detaches it from its parent. If it was parked inside wait(), it
 #       wakes, sees DEAD, and raises ClockKilledError. If it wasn't in wait(), its next wait() raises
 #       DeadClockError at the entry check. Either error propagates into _fork_wrapper, which catches it and
-#       falls through to the same cleanup as the natural-end path (detach + notify are idempotent).
+#       falls through to the same cleanup as the natural-end path (detach + notify are idempotent, and the
+#       child-termination step finds nothing left to do, kill() having already cascaded to the descendants).
+#
+#   SUB-CLOCK, error:
+#       The user function raises something other than a kill. The cleanup above runs unchanged in the finally
+#       block: terminate children (with warnings suppressed, since the exception is what the user needs to see),
+#       detach from parent, set state=DEAD, release scheduler. (All of these must happen on this path too, because
+#       leaving the scheduler parked on a dead clock freezes the entire family, and leaving the children behind
+#       orphans a live subtree outside the family tree.) The exception then propagates out of _fork_wrapper,
+#       where the pool's done-callback reports it via _threadpool_error_callback.
 #
 #   MASTER, natural end:
 #       The owning thread finishes its top-level code. There is no _fork_wrapper, so nothing notifies the
@@ -133,7 +143,8 @@ class ClockFamilyOptions:
 #       In a long-lived process this leaks the parked scheduler daemon and any still-forked children (which
 #       are running as non-daemon threads on the ThreadPoolExecutor), which is why a master should be killed
 #       explicitly (see Clock's class docstring). Any master still live when the process exits is killed by
-#       _kill_live_masters_at_exit below, so at worst this leaks until exit rather than hanging it.
+#       _kill_live_masters_at_exit below — which reports and terminates whatever forked children it is
+#       cutting off, as any other wind-down does — so at worst this leaks until exit rather than hanging it.
 #
 #   MASTER, killed:
 #       kill() sets state=DEAD, removes queued wake-ups, sets _wait_event, and notifies
@@ -181,6 +192,9 @@ def _kill_live_masters_at_exit() -> None:
     """
     for clock in list(_live_master_clocks):
         try:
+            # Same approach as a naturally finishing fork: if there are any child clocks, they are
+            # terminated, and we say what's being cut short. Then we explicitly kill the master.
+            clock._terminate_unfinished_children()
             clock.kill()
         except Exception:
             # Deliberately broad: kill() touches the scheduler, the tree locks and the thread pool, and one
@@ -343,6 +357,10 @@ class Clock:
         # own (an indefinite _wait(None)), so _detach_child watches this flag and, when the last child
         # detaches, schedules the wakeup that releases it. See _detach_child / wait_for_children_to_finish.
         self._waiting_for_children = False
+        # Optional noun phrase naming what this clock is doing, used in place of its label in user-facing
+        # messages so they can describe the consequence rather than the internal machinery. Currently only
+        # read by _terminate_unfinished_children.
+        self.description: str | None = None
         # The thread whose __clock__ tag points at this clock, i.e. the thread this clock owns.
         # Only used for the master clock, since a forked child's tag is managed by _fork_wrapper.
         # kill() needs this in case it's called from another thread so it knows which thread to
@@ -484,6 +502,49 @@ class Clock:
                                            self._priority,
                                            {"description": f"{self} wake (children finished)",
                                             "acting_clock": self})
+
+    def _terminate_unfinished_children(self, warn: bool = True) -> None:
+        """
+        Terminate any children still unfinished now that we reached the end of this clock's work, warning
+        about each. (Pass ``warn=False`` to skip warning, which is appropriate when the clock is ending
+        in an error; the error is the chief concern.)
+
+        Called on every wind-down path — a forked function returning (or exiting with an error), a ``with``
+        block closing, a master reaching the end of the script, and a killed clock unwinding. In the killed
+        case, the children have already been detached, and so there is nothing to do and no warning, which
+        is appropriate, since the intention of kill is clearly to terminate all children as well.
+
+        The warning is logged because the truncation is otherwise invisible, and it may not be what the user
+        intends. The two explicit options are for the user to call :meth:`terminate_forked_children` directly
+        (same result, but no warning, since the intention is clear) or to call :meth:`wait_for_children_to_finish`,
+        which allows the child processes to finish.
+
+        Children are named by :attr:`description` where set.
+        """
+        with self._tree_lock:
+            # A child that has died is already out of this list — kill() and _fork_wrapper's cleanup
+            # both detach and mark DEAD under this same lock. Children still in their start delay
+            # (PENDING) count as unfinished and should be warned about: they have yet to run at all.
+            if not self._children:
+                return
+            descriptions = [c.description or c._label for c in self._children]
+
+        # Descriptions are captured above, so the message survives the termination.
+        self.terminate_forked_children()
+
+        if not warn:
+            return
+
+        if len(descriptions) == 1:
+            which = f"1 unfinished child ({descriptions[0]})"
+        else:
+            which = f"{len(descriptions)} unfinished children " \
+                    f"({', '.join(descriptions[:-1])} and {descriptions[-1]})"
+        logging.warning(
+            f"{self._label} ended with {which}, which {'was' if len(descriptions) == 1 else 'were'} terminated. "
+            f"Use wait_for_children_to_finish() to keep the parent clock alive until its children "
+            f"have finished, or terminate_forked_children() to end them deliberately and silence this message."
+        )
 
     def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
         """
@@ -810,8 +871,8 @@ class Clock:
         # will be ignored, and probably represents a misunderstanding. Warn the user (unless this is a
         # multi-segment group run, where curve_shapes do meaningfully seed the distribution)
         if warn_on_fixed_curve_shape and curve_shape:
-            warnings.warn("curve_shape is ignored when align_to is a fixed point, as this fully determines "
-                          "the required curvature.")
+            logging.warning("curve_shape is ignored when align_to is a fixed point, as this fully determines "
+                            "the required curvature.")
         return abs_align_to.value
 
     def _apply_targets(self, history_target_setter: Callable, targets: Sequence[float],
@@ -1508,6 +1569,7 @@ class Clock:
                 child.parent_offset = self.beat
                 child._state = ClockState.ALIVE
 
+                ended_in_error = False
                 try:
                     # ~~~~~ Wrapper step 2: Run the user function ~~~~~
                     # ClockKilledError fires from inside wait() when kill() wakes us mid-wait.
@@ -1515,39 +1577,54 @@ class Clock:
                     # while it's awake and in the middle of running user code: when the user code finishes what
                     # it was doing and reaches its next wait call, it's calling wait on a dead clock, which
                     # raises DeadClockError.
-                    try:
-                        forked_function(*args, **kwds)
-                    except (ClockKilledError, DeadClockError):
-                        pass
+                    forked_function(*args, **kwds)
+                except (ClockKilledError, DeadClockError):
+                    pass
+                except BaseException:
+                    # Noted so the cleanup below can skip warnings about cutting children off: the error traceback
+                    # is what the user will want to see, not warning noise.
+                    ended_in_error = True
+                    raise
+                finally:
+                    # ~~~~~ Wrapper step 3: Cleanup, however the function ended ~~~~~
+                    # In a finally so that killing the fork, or an exception in the user function, still winds
+                    # this clock down. Non-kill exceptions still propagate afterwards.
 
-                    # ~~~~~ Wrapper step 3: Cleanup ~~~~~
-                    # Detach from the forking parent (self) and mark DEAD, under _tree_lock so it's
-                    # consistent with kill()'s detach and with any concurrent fork/kill. This is for natural
-                    # exits and is redundant for killed clocks.
+                    # when a clock ends naturally, any live children are cut off with a warning
+                    # when killed, no warning, since cutting off is the intention. On any other error,
+                    # no warning; let the error traceback do the talking
+                    child._terminate_unfinished_children(warn=not ended_in_error)
+
+                    # Detach from the forking parent (self) and mark DEAD, under _tree_lock since it
+                    # modifies the tree. This is for natural exits and is redundant for killed clocks.
+
                     with self._tree_lock:
                         # _detach_child does the list removal and, if this was the last child of a parent
                         # blocked in wait_for_children_to_finish(), releases it.
                         self._detach_child(child)
                         child._state = ClockState.DEAD
 
-                    # ~~~~~ Wrapper step 4: Release the scheduler ~~~~~
-                    # After the user function returns, the scheduler is parked on _scheduler_park_condition
-                    # (either from the most recent _wake_and_advance_to_next_wait_call, or — if the user function
-                    # never called wait — from _start_new_clock). Notify it so it can proceed to the next event.
-                    # Again, this is redundant for killed clocks, as the _scheduler_park_condition will already
-                    # have been notified from within kill()
+                    # Release the scheduler: it is parked on _scheduler_park_condition (either from the most
+                    # recent _wake_and_advance_to_next_wait_call, or — if the user function never called wait
+                    # — from _start_new_clock), awaiting a next wait() that will never come. Notify it so it
+                    # can proceed to the next event. Redundant for killed clocks, whose park condition kill()
+                    # has already notified.
                     with child._scheduler_park_condition:
                         child._scheduler_park_condition.notify_all()
 
-                    # ~~~~~ Wrapper Step 5: done_callback if requested by user ~~~~~
+                    # done_callback if requested by the user. Errors are logged rather than raised, in keeping with
+                    # the way the scheduler treats the actions it runs. Also, this is user code, and letting it throw
+                    # here would skip the untagging below.
                     if done_callback is not None:
-                        done_callback()
-                finally:
-                    # ~~~~~ Wrapper step 6: Untag the (pooled, reused) worker thread ~~~~~
-                    # Drop this thread's reference to the now-dead child so an idle pool worker doesn't pin
-                    # it (and its tempo_history etc.) alive until its next task. Done last, in a finally, so
-                    # done_callback still sees current_clock() == child and so it runs even on an error path.
-                    # The next task on this worker re-tags __clock__ before reading it, so None is safe here.
+                        try:
+                            done_callback()
+                        except Exception:
+                            logging.exception("Error in the done_callback of %r.", child)
+
+                    # Untag the (pooled, reused) worker thread: drop its reference to the now-dead child so
+                    # an idle worker doesn't pin it (and its tempo_history etc.) alive until its next task.
+                    # Last, so done_callback still sees current_clock() == child. The next task on this
+                    # worker re-tags __clock__ before reading it, so None is safe here.
                     threading.current_thread().__clock__ = None
 
             # ---------- STEP 4: Define the launcher, schedule it, and return the child ----------
@@ -1657,6 +1734,20 @@ class Clock:
             self._wait(None)
         finally:
             self._waiting_for_children = False
+
+    def terminate_forked_children(self) -> None:
+        """
+        Kill this clock's children and their descendants in turn. At the natural end of a forked clock that
+        has (or might have) still-active children, either this or :meth:`wait_for_children_to_finish` should
+        be called, making explicit what to do with those forked children. (The default is termination with a
+        warning, in case it's not what the user wants.)
+        """
+        # Snapshot under the lock, then kill outside it: kill() takes _tree_lock itself, and waits on
+        # threads that need it to detach.
+        with self._tree_lock:
+            children = list(self._children)
+        for child in children:
+            child.kill()
 
     def run_as_server(self) -> 'Clock':
         """
@@ -1970,7 +2061,13 @@ class Clock:
         propagating out of the block (e.g. an external ``kill()`` interrupted a wait) is suppressed — being
         killed is a clean way for a managed clock to end. Any other exception propagates normally (after
         the clock is killed).
+
+        Leaving the block is a wind-down like any other, so children still running are terminated with it.
+        If exiting naturally with no error, we should receive a warning that these children are being cut off.
+        If exiting due to a kill (either ClockKilledError or DeadClockError), terminating children is expected
+        behavior, and if exiting with any other error, the user doesn't need the warning noise.
         """
+        self._terminate_unfinished_children(warn=exc_type is None)
         self.kill()
         return exc_type is not None and issubclass(exc_type, (ClockKilledError, DeadClockError))
 

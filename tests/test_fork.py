@@ -2,6 +2,7 @@ import threading
 import unittest
 
 from clockblocks.clock import Clock
+from clockblocks.exceptions import ClockKilledError
 from tests import timing
 from clockblocks.moment import Moment
 from clockblocks.utilities import current_clock
@@ -76,6 +77,255 @@ class ForkTestCase(unittest.TestCase):
                                msg=f"grandchild woke at {record['wall']:.3f}s, expected ~1.0s")
         # the child advanced 2 beats by the time the grandchild woke
         self.assertAlmostEqual(record["parent_beat"], 2.0, delta=0.15)
+
+    # ---- a clock ending takes its unfinished children with it, audibly ----
+
+    def test_unfinished_children_terminated_with_warning(self):
+        """
+        A forked function that returns while its own children are still running takes them down with
+        it, and says so. Leaving them alive instead would orphan the subtree — still holding queued
+        wakeups, but detached from the family and so beyond the reach of kill().
+        """
+        record = {}
+
+        def grandchild():
+            current_clock().wait(5.0)                 # far longer than the child
+            record["grandchild_finished"] = True       # must never happen
+
+        def child():
+            c = current_clock()
+            record["grandchild_clock"] = c.fork(grandchild)
+            c.wait(0.05)                               # returns long before the grandchild is done
+
+        with self.assertLogs(level="WARNING") as caught:
+            self.master.fork(child)
+            self.master.wait(0.3)
+
+        self.assertFalse(record.get("grandchild_finished"))
+        self.assertFalse(record["grandchild_clock"].alive)
+        # nothing left dangling anywhere in the family
+        self.assertEqual(self.master.descendants(), ())
+        message = "\n".join(caught.output)
+        self.assertIn("1 unfinished child", message)
+        self.assertIn("grandchild", message)
+        self.assertIn("wait_for_children_to_finish", message)
+
+    def test_description_used_in_warning(self):
+        """A clock can describe what it's doing, so a library built on clockblocks can say
+        "a note that was still sounding" rather than naming an internal clock."""
+        def grandchild():
+            current_clock().wait(5.0)
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild).description = "a note on 'clarinet' that was still sounding"
+            c.wait(0.05)
+
+        with self.assertLogs(level="WARNING") as caught:
+            self.master.fork(child)
+            self.master.wait(0.3)
+
+        self.assertIn("a note on 'clarinet' that was still sounding", "\n".join(caught.output))
+
+    def test_multiple_unfinished_children_all_named(self):
+        """The warning lists every child it terminated, not just the first."""
+        def grandchild():
+            current_clock().wait(5.0)
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild, name="alpha")
+            c.fork(grandchild, name="beta")
+            c.wait(0.05)
+
+        with self.assertLogs(level="WARNING") as caught:
+            self.master.fork(child)
+            self.master.wait(0.3)
+
+        message = "\n".join(caught.output)
+        self.assertIn("2 unfinished children", message)
+        self.assertIn("alpha", message)
+        self.assertIn("beta", message)
+
+    def test_terminate_forked_children_suppresses_the_warning(self):
+        """
+        The other way to answer the question the warning asks: cut the children off on purpose. Nothing
+        is left unfinished by the time the clock winds down, so there is nothing to warn about.
+        """
+        record = {}
+
+        def grandchild():
+            try:
+                current_clock().wait(50)
+            except ClockKilledError:
+                record["cut_off_at"] = self.master.beat
+                raise
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild)
+            c.wait(0.05)
+            c.terminate_forked_children()
+
+        with self.assertNoLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.05)
+            cutoff_beat = self.master.beat
+            self.master.wait(0.3)
+
+        # and the child really was terminated, at the moment of the call rather than later
+        self.assertIn("cut_off_at", record)
+        self.assertAlmostEqual(record["cut_off_at"], cutoff_beat, delta=0.04)
+
+    def test_terminate_forked_children_with_no_children_is_a_noop(self):
+        """Safe to call unconditionally, whether or not anything is still running."""
+        reached = []
+
+        def child():
+            current_clock().wait(0.05)
+            current_clock().terminate_forked_children()
+            reached.append(True)
+
+        self.master.fork(child)
+        self.master.wait(0.2)
+        self.assertEqual(reached, [True])
+
+    def test_module_level_terminate_forked_children(self):
+        """The module-level spelling, acting on whatever clock the calling thread is running."""
+        from clockblocks.utilities import terminate_forked_children
+
+        killed = []
+
+        def grandchild():
+            try:
+                current_clock().wait(50)
+            except ClockKilledError:
+                killed.append(True)
+                raise
+
+        def child():
+            current_clock().fork(grandchild)
+            current_clock().wait(0.05)
+            terminate_forked_children()
+
+        with self.assertNoLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.3)
+
+        self.assertEqual(killed, [True])
+
+    def test_no_warning_when_children_finish_first(self):
+        """The warning is strictly about truncation: a fork that outlives its children says nothing."""
+        def grandchild():
+            current_clock().wait(0.05)
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild)
+            c.wait(0.3)                                # outlasts the grandchild
+
+        with self.assertNoLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.5)
+
+    def test_wait_for_children_to_finish_suppresses_termination(self):
+        """The escape hatch the warning names actually works: waiting explicitly lets children finish."""
+        record = {}
+
+        def grandchild():
+            current_clock().wait(0.2)
+            record["grandchild_finished"] = True
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild)
+            c.wait(0.05)
+            c.wait_for_children_to_finish()
+
+        with self.assertNoLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.5)
+
+        self.assertTrue(record.get("grandchild_finished"))
+
+    # ---- a forked function that raises still winds down cleanly ----
+    # (these print a red traceback to stderr, which is the reporting under test, not a failure)
+
+    def test_error_in_forked_function_does_not_freeze_family(self):
+        """
+        An unhandled exception in a forked function must still detach the clock and release the
+        scheduler. Otherwise the scheduler stays parked on the dead clock's condition and every other
+        clock in the family stops advancing.
+        """
+        def boom():
+            current_clock().wait(0.05)
+            raise ValueError("boom")
+
+        child = self.master.fork(boom, name="boom")
+        self.master.wait(0.2)           # the master must keep advancing past the child's error
+
+        self.assertAlmostEqual(self.master.beat, 0.2, delta=0.1)
+        self.assertFalse(child.alive)
+        self.assertNotIn(child, self.master.children())
+
+    def test_error_in_forked_function_terminates_its_children(self):
+        """
+        The wind-down after an error is a full one: children go too. Terminating them is what keeps the
+        subtree reachable — the clock is detached and marked DEAD either way, so children left running
+        would be stranded outside the family, holding queued wakeups on non-daemon pool threads where no
+        kill() or wait_for_children_to_finish() can ever reach them.
+
+        Quietly, though: the traceback being reported says why the clock ended, and the usual warning's
+        advice (wait for the children, or cut them off deliberately) misses the point next to it.
+        """
+        record = {}
+
+        def grandchild():
+            current_clock().wait(50)
+            record["grandchild_finished"] = True      # must never happen
+
+        def child():
+            c = current_clock()
+            record["grandchild_clock"] = c.fork(grandchild)
+            c.wait(0.05)
+            raise ValueError("boom")
+
+        with self.assertNoLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.3)
+
+        self.assertFalse(record.get("grandchild_finished"))
+        self.assertFalse(record["grandchild_clock"].alive)
+        self.assertEqual(self.master.descendants(), ())
+
+    def test_done_callback_fires_when_forked_function_raises(self):
+        """The done_callback reports clock termination, so it runs on the error path too."""
+        fired = []
+
+        def boom():
+            raise ValueError("boom")
+
+        self.master.fork(boom, done_callback=lambda: fired.append(True))
+        self.master.wait(0.1)
+        self.assertEqual(fired, [True])
+
+    def test_raising_done_callback_is_reported_and_does_not_freeze_family(self):
+        """
+        A done_callback is user code, so an error in it is logged rather than raised — the way the
+        scheduler treats the actions it runs. Letting it throw would skip the rest of the wind-down.
+        """
+        def child():
+            current_clock().wait(0.1)
+
+        def on_done():
+            raise ValueError("boom")
+
+        with self.assertLogs(level="ERROR") as caught:
+            self.master.fork(child, done_callback=on_done)
+            self.master.wait(0.3)
+
+        self.assertAlmostEqual(self.master.beat, 0.3, delta=0.1)
+        self.assertIn("done_callback", "\n".join(caught.output))
 
     # ---- scheduled fork: relative delay (Moment.after_beats) ----
 

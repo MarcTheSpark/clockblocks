@@ -11,6 +11,44 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Added
+
+- **`Clock.terminate_forked_children()`** (and the module-level `terminate_forked_children()` acting on the
+  calling thread's clock), which kills this clock's children and their descendants. It's the deliberate
+  counterpart to `wait_for_children_to_finish()`: the two are the answers to the same question — a clock has
+  run out of its own work while forked children are still going, so hang back for them, or cut them off?
+  Calling either one resolves the logged warning described under Fixed below.
+
+- **`Clock.description`**, an optional noun phrase describing what a clock is doing, used in place of its
+  label in user-facing messages — currently just that warning. It lets a library built on clockblocks
+  report the consequence rather than the machinery — scamp sets it so you read "a note on 'clarinet' that
+  was still sounding" rather than an internal clock name.
+
+### Fixed
+
+- **A fork that outlives its own function no longer strands its children.** When a forked function
+  returned while clocks it had forked were still running, the finishing clock detached itself from its
+  parent and took the whole live subtree with it. Those descendants kept their queued wakeups but were
+  invisible to the rest of the family: an ancestor's `wait_for_children_to_finish()` returned early,
+  `kill()` never reached them, and — since their pool threads are non-daemon — the interpreter hung on
+  exit instead of terminating.
+
+  A clock's lifetime is now firmly its function's lifetime, however that function ends: unfinished children
+  are terminated along with it, and a logged warning names each one, since silently truncating a note or a
+  layer is near-impossible to diagnose otherwise. That warning points at both ways out —
+  `wait_for_children_to_finish()` to keep the parent alive instead, or `terminate_forked_children()` to cut
+  them off deliberately. The same reporting covers the other wind-down paths, so a script that ends (or a
+  `with` block that closes) while forked parts are still playing says what it cut off rather than stopping
+  silently.
+
+- **An unhandled exception in a forked function no longer freezes the whole clock family.** The fork's
+  cleanup was skipped on the error path, leaving the scheduler parked on the dead clock forever, so every
+  other clock silently stopped advancing. Cleanup now runs however the function exits — including
+  terminating any children the fork outlived, which were otherwise orphaned exactly as described above,
+  though quietly here, since the traceback already says why the clock ended. The exception itself is
+  reported as before, and an error raised by a `done_callback` is likewise logged rather than allowed to
+  interrupt the wind-down.
+
 ## [1.1.0] - 2026-07-27
 
 ### Added
