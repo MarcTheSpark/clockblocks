@@ -402,6 +402,38 @@ class KillTestCase(unittest.TestCase):
         self.assertTrue(record.get("unwound_when_kill_returned"),
                         "kill() returned before the ancestor it killed had finished unwinding")
 
+    def test_killed_non_master_ancestor_unwinds_at_the_kill_beat(self):
+        """
+        The point of waiting for a killed ancestor: its cleanup lands at the beat it was cut off, not
+        wherever a fast-forwarding master has since run to. This needs both halves of the synchronous kill
+        — kill() waiting for the ancestor, and kill() *not* releasing the scheduler for the sub-clock that
+        did the killing, so time stays frozen while the ancestor tears down.
+        """
+        record = {}
+
+        def ancestor_layer():
+            c = current_clock()
+            c.fork(killer)
+            try:
+                c.wait(50)
+            except ClockKilledError:
+                time.sleep(0.05)                 # slow cleanup, e.g. a note-off doing I/O
+                record["ancestor_cleanup_beat"] = float(self.master.beat)
+                raise
+
+        def killer():
+            c = current_clock()
+            c.wait(1)
+            record["kill_beat"] = float(self.master.beat)
+            c.parent.kill()
+
+        self.master.fast_forward()
+        self.master.fork(ancestor_layer)
+        self.master.wait(50)
+        self.assertIn("ancestor_cleanup_beat", record)
+        # frozen at the kill beat (1.0), not run away toward 50 while the ancestor was still unwinding
+        self.assertAlmostEqual(record["ancestor_cleanup_beat"], record["kill_beat"], delta=0.02)
+
     def test_master_self_kill_is_prompt(self):
         """
         A master has no fork wrapper and so never signals that it has unwound. Waiting on one would burn

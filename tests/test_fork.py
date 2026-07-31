@@ -1,4 +1,5 @@
 import threading
+import time
 import unittest
 
 from clockblocks.clock import Clock
@@ -357,6 +358,64 @@ class ForkTestCase(unittest.TestCase):
 
         self.assertAlmostEqual(self.master.beat, 0.3, delta=0.1)
         self.assertIn("done_callback", "\n".join(caught.output))
+
+    # ---- done_callback runs at the moment its clock ended, not wherever time has since run on to ----
+
+    def test_done_callback_runs_at_the_moment_the_clock_ended(self):
+        """The scheduler is still parked while done_callback runs, so time can't move on under it."""
+        seen = []
+
+        def child():
+            current_clock().wait(1)
+
+        def on_done():
+            time.sleep(0.05)        # slow enough that an unpinned callback would read a later beat
+            seen.append(float(self.master.beat))
+
+        self.master.fast_forward()
+        self.master.fork(child, done_callback=on_done)
+        self.master.wait(20)        # fast-forwarded, so this covers 19 beats in no time at all
+        self.assertEqual(seen, [1.0])
+
+    def test_done_callback_of_a_self_killed_clock_runs_at_the_moment_of_the_kill(self):
+        """Killing is where this is easiest to get wrong: kill() must leave the scheduler parked on a
+        sub-clock victim, so the victim's own teardown still happens at the moment it was killed."""
+        seen = []
+
+        def child():
+            c = current_clock()
+            c.wait(1)
+            c.kill()                # the scheduler is parked on us, so it must stay parked
+
+        def on_done():
+            time.sleep(0.05)
+            seen.append(float(self.master.beat))
+
+        self.master.fast_forward()
+        self.master.fork(child, done_callback=on_done)
+        self.master.wait(20)
+        self.assertEqual(seen, [1.0])
+
+    def test_done_callback_of_a_clock_killed_from_a_foreign_thread(self):
+        """Same guarantee when the kill comes from outside the clock system entirely."""
+        seen = []
+        running = threading.Event()
+
+        def child():
+            c = current_clock()
+            c.wait(1)
+            running.set()
+            time.sleep(0.2)         # user code between waits: the scheduler is parked on this clock
+
+        def on_done():
+            time.sleep(0.05)
+            seen.append(float(self.master.beat))
+
+        self.master.fast_forward()
+        child_clock = self.master.fork(child, done_callback=on_done)
+        threading.Thread(target=lambda: (running.wait(), child_clock.kill()), daemon=True).start()
+        self.master.wait(20)
+        self.assertEqual(seen, [1.0])
 
     # ---- scheduled fork: relative delay (Moment.after_beats) ----
 

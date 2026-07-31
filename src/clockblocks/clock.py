@@ -122,14 +122,13 @@ class ClockFamilyOptions:
 #
 #   SUB-CLOCK, killed:
 #       kill() (possibly cascaded from an ancestor) sets state=DEAD, removes the clock's queued wake-up
-#       (and any other event for it) from the scheduler heap, sets _wait_event, notifies
-#       _scheduler_park_condition, and detaches it from its parent. If it was parked inside wait(), it
-#       wakes, sees DEAD, and raises ClockKilledError. If it wasn't in wait(), its next wait() raises
-#       DeadClockError at the entry check. Either error propagates into _fork_wrapper, which catches it and
-#       falls through to the same cleanup as the natural-end path (detach + notify are idempotent, and the
-#       child-termination step finds nothing left to do, kill() having already cascaded to the descendants).
-#       All of that runs on the victim's own thread, after kill() signaled it, so kill() waits for it to
-#       finish before returning — see _await_unwind and Clock._unwound.
+#       (and any other event for it) from the scheduler heap, sets _wait_event, and detaches it from its
+#       parent. If it was parked inside wait(), it wakes, sees DEAD, and raises ClockKilledError. If it
+#       wasn't in wait(), its next wait() raises DeadClockError at the entry check. Either error propagates
+#       into _fork_wrapper, which catches it and falls through to the same cleanup as the natural-end path:
+#       detach and child-termination are idempotent since kill took care of them, but release of the
+#       _scheduler_park_condition can be load-bearing, if the clock was mid-action. Finally, we set _unwound,
+#       which the killing thread is waiting on to ensure teardown is complete before returning.
 #
 #   SUB-CLOCK, error:
 #       The user function raises something other than a kill. The cleanup above runs unchanged in the finally
@@ -1633,22 +1632,23 @@ class Clock:
                         self._detach_child(child)
                         child._state = ClockState.DEAD
 
-                    # Release the scheduler: it is parked on _scheduler_park_condition (either from the most
-                    # recent _wake_and_advance_to_next_wait_call, or — if the user function never called wait
-                    # — from _start_new_clock), awaiting a next wait() that will never come. Notify it so it
-                    # can proceed to the next event. Redundant for killed clocks, whose park condition kill()
-                    # has already notified.
-                    with child._scheduler_park_condition:
-                        child._scheduler_park_condition.notify_all()
-
-                    # done_callback if requested by the user. Errors are logged rather than raised, in keeping with
-                    # the way the scheduler treats the actions it runs. Also, this is user code, and letting it throw
-                    # here would skip the untagging below.
+                    # done_callback runs before the scheduler is released below, so it sees musical time
+                    # frozen at the moment this clock ended. Its errors are logged to alert the user,
+                    # but not raised, to ensure that the scheduler gets released below.
                     if done_callback is not None:
                         try:
                             done_callback()
                         except Exception:
                             logging.exception("Error in the done_callback of %r.", child)
+
+                    # Release the scheduler, if it is parked on this clock's _scheduler_park_condition — i.e.
+                    # if this clock was mid-action (running user code) rather than parked in a wait. Always
+                    # the case on a natural end; on a kill, only when the clock was mid-action (an external
+                    # kill, a self-kill, or an ancestor-kill). This is the sole release point for a sub-clock
+                    # on every exit path including a kill: kill() leaves it to us so a killed clock's
+                    # teardown, above, lands at the beat of the kill.
+                    with child._scheduler_park_condition:
+                        child._scheduler_park_condition.notify_all()
 
                     # Untag the (pooled, reused) worker thread: drop its reference to the now-dead child so
                     # an idle worker doesn't pin it (and its tempo_history etc.) alive until its next task.
@@ -1656,7 +1656,8 @@ class Clock:
                     # worker re-tags __clock__ before reading it, so None is safe here.
                     threading.current_thread().__clock__ = None
 
-                    # Release the killing thread waiting on this clock to unwind.
+                    # Signal the killer blocked in _await_unwind, since this clock is now fully done
+                    # with its teardown.
                     child._unwound.set()
 
             # ---------- STEP 4: Define the launcher, schedule it, and return the child ----------
@@ -2047,15 +2048,12 @@ class Clock:
             for c in victims:
                 # if the victim is parked mid-wait, wake it: it will observe DEAD, raise ClockKilledError
                 c._wait_event.set()
-                # If a victim is mid-execution (running user code between waits), the scheduler
-                # is parked on its _scheduler_park_condition right now. Free it immediately.
-                # For a sub clock it would eventually be released by _fork_wrapper cleanup, but that will
-                # only happen when the user code hits the next wait and throws a DeadClockError
-                # (which could be arbitrarily long & hold up scheduled events). For the master clock
-                # this is critical, because it's not wrapped in _fork_wrapper and would never otherwise release
-                # the scheduler.
-                with c._scheduler_park_condition:
-                    c._scheduler_park_condition.notify_all()
+                # Forked child clocks free the _scheduler_park_condition at the end of _fork_wrapper,
+                # ensuring that the teardown and done_callback land at the beat of the kill. Master clocks
+                # do not have a fork wrapper, and so must release here.
+                if c.is_master():
+                    with c._scheduler_park_condition:
+                        c._scheduler_park_condition.notify_all()
                 # Detach from parent so the parent's _children list is accurate from the moment kill()
                 # returns. _fork_wrapper would normally do this on cleanup, but that can be delayed (user code
                 # between waits has to reach its next wait first) or skipped entirely (a PENDING victim

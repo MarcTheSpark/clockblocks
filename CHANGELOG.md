@@ -30,16 +30,16 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   Killing is only a signal: a killed clock runs its `except`/`finally` blocks on its own thread afterwards.
   Previously `kill()` returned before any of that had run, so musical time could move on ahead of it and the
   cleanup would take effect at some arbitrary later beat, differing from run to run. Anything a killed clock
-  does on the way out is now finished by the time `kill()` returns.
+  does on the way out is now finished by the time `kill()` returns. Note that this could be a very long time 
+  if the clock is in the middle of a long computation or has an expensive done_callback. But this is the price
+  of synchronicity.
 
-  Cases that cannot be waited for are skipped rather than stalling the call: a clock killing itself (it *is*
-  that thread), a master clock (whose owning thread is the script, not ours to wait for), and a clock still
-  inside its start delay. Everything else — including an ancestor a clock kills from underneath itself — is
-  waited for unconditionally, with no timeout —
-  a bounded wait would mean `kill()` occasionally returned early under load, which is precisely the
-  nondeterminism this removes. A clock only registers a kill when it next calls `wait()`, so a forked
-  function sitting in a long computation or a blocking call can hold things up; after a few seconds that
-  draws a warning naming the clock, and the wait goes on.
+- **A `fork(..., done_callback=...)` now runs at the moment its clock ended**, rather than racing the rest
+  of the family. It used to run just after the scheduler was let go, so time could move on underneath it: a
+  callback doing even a couple of milliseconds of work could observe the family several beats past the end
+  of the clock it was reporting on, especially if the clock family was fast-forwarding. The family now remains
+  frozen all the way through teardown and the done_callback, regardless of how the clock ended (returning 
+  normally, raising, or being killed from inside or outside the clock system).
 
 ### Fixed
 
