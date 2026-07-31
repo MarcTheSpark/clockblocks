@@ -248,6 +248,37 @@ class ForkTestCase(unittest.TestCase):
 
         self.assertTrue(record.get("grandchild_finished"))
 
+    def test_terminated_child_finishes_unwinding_before_parent_returns(self):
+        """
+        Killing is only a signal — the victim's thread still has to run its cleanup, which is where a
+        library releases what the clock was holding (a sounding note gets ended there). That must complete
+        before the parent releases the scheduler, or those releases land at a later beat than the moment
+        the clock was actually cut off.
+        """
+        record = {}
+
+        def grandchild():
+            try:
+                current_clock().wait(5.0)
+            except ClockKilledError:
+                record["unwound_at_master_beat"] = self.master.beat
+                raise
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild)
+            c.wait(0.05)
+
+        with self.assertLogs(level="WARNING"):
+            self.master.fork(child)
+            self.master.wait(0.05)      # only just past the child's end
+            cutoff_beat = self.master.beat
+            self.master.wait(0.5)       # plenty of time for a late unwind to be visible
+
+        self.assertIn("unwound_at_master_beat", record)
+        # the cleanup ran at the moment of the cut-off, not somewhere in the following 0.5 beats
+        self.assertAlmostEqual(record["unwound_at_master_beat"], cutoff_beat, delta=0.04)
+
     # ---- a forked function that raises still winds down cleanly ----
     # (these print a red traceback to stderr, which is the reporting under test, not a failure)
 

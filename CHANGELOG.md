@@ -24,6 +24,23 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   report the consequence rather than the machinery — scamp sets it so you read "a note on 'clarinet' that
   was still sounding" rather than an internal clock name.
 
+### Changed
+
+- **`Clock.kill()` now returns only once the clocks it killed have actually finished unwinding.**
+  Killing is only a signal: a killed clock runs its `except`/`finally` blocks on its own thread afterwards.
+  Previously `kill()` returned before any of that had run, so musical time could move on ahead of it and the
+  cleanup would take effect at some arbitrary later beat, differing from run to run. Anything a killed clock
+  does on the way out is now finished by the time `kill()` returns.
+
+  Cases that cannot be waited for are skipped rather than stalling the call: a clock killing itself (it *is*
+  that thread), a master clock (whose owning thread is the script, not ours to wait for), and a clock still
+  inside its start delay. Everything else — including an ancestor a clock kills from underneath itself — is
+  waited for unconditionally, with no timeout —
+  a bounded wait would mean `kill()` occasionally returned early under load, which is precisely the
+  nondeterminism this removes. A clock only registers a kill when it next calls `wait()`, so a forked
+  function sitting in a long computation or a blocking call can hold things up; after a few seconds that
+  draws a warning naming the clock, and the wait goes on.
+
 ### Fixed
 
 - **A fork that outlives its own function no longer strands its children.** When a forked function

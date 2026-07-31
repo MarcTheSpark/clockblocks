@@ -128,6 +128,8 @@ class ClockFamilyOptions:
 #       DeadClockError at the entry check. Either error propagates into _fork_wrapper, which catches it and
 #       falls through to the same cleanup as the natural-end path (detach + notify are idempotent, and the
 #       child-termination step finds nothing left to do, kill() having already cascaded to the descendants).
+#       All of that runs on the victim's own thread, after kill() signaled it, so kill() waits for it to
+#       finish before returning — see _await_unwind and Clock._unwound.
 #
 #   SUB-CLOCK, error:
 #       The user function raises something other than a kill. The cleanup above runs unchanged in the finally
@@ -171,6 +173,10 @@ class ClockFamilyOptions:
 # We maintain a set of all live master clocks, so that a user who never calls kill() still gets a clean
 # process exit. Weak, so a master that goes out of scope is collectable as usual.
 _live_master_clocks: 'weakref.WeakSet[Clock]' = weakref.WeakSet()
+
+# How long a killed clock may take to finish unwinding before kill() warns about the wait.
+# (Kill will wait as long as it takes to preserve synchronicity.)
+_UNWIND_WARNING_DELAY = 3.0
 
 
 def _kill_live_masters_at_exit() -> None:
@@ -361,6 +367,8 @@ class Clock:
         # messages so they can describe the consequence rather than the internal machinery. Currently only
         # read by _terminate_unfinished_children.
         self.description: str | None = None
+        # used in a forked child to signal wind down is complete after being killed.
+        self._unwound = threading.Event()
         # The thread whose __clock__ tag points at this clock, i.e. the thread this clock owns.
         # Only used for the master clock, since a forked child's tag is managed by _fork_wrapper.
         # kill() needs this in case it's called from another thread so it knows which thread to
@@ -545,6 +553,27 @@ class Clock:
             f"Use wait_for_children_to_finish() to keep the parent clock alive until its children "
             f"have finished, or terminate_forked_children() to end them deliberately and silence this message."
         )
+
+    @staticmethod
+    def _await_unwind(clocks: 'list[Clock]') -> None:
+        """
+        Block until each of the just-killed ``clocks`` has finished unwinding.
+
+        Killing is only a signal; the code that acts on it still has to run on the victim's own thread. It
+        wakes, raises ClockKilledError, and runs _fork_wrapper's cleanup. The killing thread needs to wait
+        for all of this to finish before returning to ensure synchronicity.
+
+        Must not be called while holding _tree_lock: an unwinding clock needs that lock in order to detach.
+        """
+        for c in clocks:
+            if not c._unwound.wait(timeout=_UNWIND_WARNING_DELAY):
+                # A clock only notices it was killed when it next calls wait(), so a stall here means the
+                # forked function hasn't reached one — usually a long computation or a blocking call.
+                logging.warning(
+                    "Still waiting for %r to finish unwinding after being killed. A clock only registers "
+                    "a kill at its next wait(), so its forked function is likely in a long computation, a "
+                    "blocking call, or its done_callback. Waiting for it to finish.", c)
+                c._unwound.wait()
 
     def iterate_inheritance(self, include_self: bool = True) -> Iterator['Clock']:
         """
@@ -1627,6 +1656,9 @@ class Clock:
                     # worker re-tags __clock__ before reading it, so None is safe here.
                     threading.current_thread().__clock__ = None
 
+                    # Release the killing thread waiting on this clock to unwind.
+                    child._unwound.set()
+
             # ---------- STEP 4: Define the launcher, schedule it, and return the child ----------
 
             def _start_new_clock():
@@ -1737,10 +1769,11 @@ class Clock:
 
     def terminate_forked_children(self) -> None:
         """
-        Kill this clock's children and their descendants in turn. At the natural end of a forked clock that
-        has (or might have) still-active children, either this or :meth:`wait_for_children_to_finish` should
-        be called, making explicit what to do with those forked children. (The default is termination with a
-        warning, in case it's not what the user wants.)
+        Kill this clock's children and their descendants in turn, returning once they have finished
+        unwinding. At the natural end of a forked clock that has (or might have) still-active children,
+        either this or :meth:`wait_for_children_to_finish` should be called, making explicit what to do with
+        those forked children. (The default is termination with a warning, in case it's not what the user
+        wants.)
         """
         # Snapshot under the lock, then kill outside it: kill() takes _tree_lock itself, and waits on
         # threads that need it to detach.
@@ -1942,7 +1975,7 @@ class Clock:
         """
         End this clock (and the corresponding forked function if not master) and cascade to all descendant clocks.
 
-        Pending scheduled work for this clock and its descendants is cancelled and the clocks are
+        Pending scheduled work for this clock and its descendants is canceled and the clocks are
         marked dead. A clock currently blocked in :meth:`wait` raises
         :class:`~clockblocks.exceptions.ClockKilledError`; any later :meth:`wait` or :meth:`fork` made
         through a reference to a dead clock raises :class:`~clockblocks.exceptions.DeadClockError`.
@@ -1952,10 +1985,13 @@ class Clock:
         (``wait()``, ``fork()``, ``get_beat()``, ...) raise
         :class:`~clockblocks.exceptions.NoActiveClockError` there rather than reporting a dead clock.
 
+        Returns once the killed clocks have finished unwinding to ensure synchronicity. Emits a warning
+        if this takes more than a few seconds.
+
         Safe to call from any thread, and killing an already-dead clock is a no-op.
 
         (See the "Clock termination / lifecycle paths" note near the top of this module for how the
-        four termination paths work internally.)
+        five termination paths work internally.)
         """
         if self._state is ClockState.DEAD:
             return
@@ -1992,6 +2028,16 @@ class Clock:
                 return (ac is not None and id(ac) in victim_ids) or \
                        (fc is not None and id(fc) in victim_ids)
 
+            # Work out who we'll wait for *before* flagging anyone DEAD, since being ALIVE is one of the filters.
+            # Exclude three kinds of clock, none of which we can wait on here:
+            #   - the acting clock itself: it's our own thread, which unwinds only after kill() returns, so
+            #     waiting for it here would deadlock.
+            #   - masters, which have no _fork_wrapper and so never set _unwound.
+            #   - PENDING clocks, still inside their start delay, which have yet to start a thread at all.
+            acting_clock = current_clock()
+            to_await = [c for c in victims
+                        if c._state is ClockState.ALIVE and not c.is_master() and c is not acting_clock]
+
             for c in victims:
                 c._state = ClockState.DEAD
             self.scheduler.remove_events(matches)
@@ -2019,7 +2065,11 @@ class Clock:
                 if c.parent is not None:
                     c.parent._detach_child(c)
 
-        # ------------------------------ STEP 4: Kill scheduler and pool -------------------------------
+        # -------------------- STEP 4: Wait for the victims to finish unwinding ------------------------
+        # Deliberately outside the tree lock, which an unwinding clock needs in order to detach itself.
+        self._await_unwind(to_await)
+
+        # ------------------------------ STEP 5: Kill scheduler and pool -------------------------------
         # Clean up the scheduler and thread pool when killing the master.
         # (No need to hold tree lock here anymore; it's irrelevant)
         if self.is_master():

@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from unittest import mock
 
 from clockblocks.clock import Clock, ClockState
 from clockblocks.exceptions import ClockKilledError, DeadClockError, NoActiveClockError, WrongThreadError
@@ -291,6 +292,172 @@ class KillTestCase(unittest.TestCase):
             with Clock(name="cm") as c:
                 raise ValueError("boom")
         self.assertIs(c._state, ClockState.DEAD)
+
+    # ---- kill() waits for its victims to unwind ----
+
+    def test_kill_returns_only_once_victim_has_unwound(self):
+        """
+        Killing is only a signal to the victim's thread; the cleanup that releases whatever the clock was
+        holding runs over there. kill() must not return before that has happened, or musical time runs on
+        and the release is stamped at the wrong beat.
+        """
+        unwound_at = []
+
+        def victim():
+            try:
+                current_clock().wait(50)
+            except ClockKilledError:
+                time.sleep(0.05)                       # cleanup that takes a moment
+                unwound_at.append(self.master.beat)
+                raise
+
+        child = self.master.fork(victim)
+        self.master.wait(0.2)                          # let it get parked in its wait
+        kill_beat = self.master.beat
+        child.kill()
+        # the cleanup has already run by the time kill() returns, and ran at the beat of the kill
+        self.assertEqual(len(unwound_at), 1)
+        self.assertAlmostEqual(unwound_at[0], kill_beat, delta=0.02)
+
+    def test_kill_waits_for_whole_subtree(self):
+        """kill() cascades to descendants, so it waits for the grandchildren too."""
+        unwound = []
+
+        def grandchild():
+            try:
+                current_clock().wait(50)
+            except ClockKilledError:
+                unwound.append("grandchild")
+                raise
+
+        def child():
+            c = current_clock()
+            c.fork(grandchild)
+            c.wait(50)
+
+        sub = self.master.fork(child)
+        self.master.wait(0.2)
+        sub.kill()
+        self.assertIn("grandchild", unwound)
+
+    def test_self_kill_does_not_deadlock(self):
+        """
+        A clock killing itself is the case that would hang if kill() naively waited for every victim:
+        it would be waiting for the very thread it is running on. The calling thread's own inheritance
+        line is skipped for exactly this reason.
+        """
+        finished = threading.Event()
+
+        def suicidal():
+            current_clock().kill()      # must return rather than waiting for this thread
+            finished.set()
+
+        self.master.fork(suicidal)
+        self.master.wait(0.2)
+        self.assertTrue(finished.is_set(), "current_clock().kill() blocked waiting for its own thread")
+
+    def test_killing_the_master_from_a_child_does_not_deadlock(self):
+        """A child killing the master: the master is skipped (it has no fork wrapper to signal unwind)
+        and the child is skipped as the acting clock, so kill() waits on neither and returns promptly."""
+        finished = threading.Event()
+
+        def child():
+            current_clock().parent.kill()   # parent is the master here
+            finished.set()
+
+        self.master.fork(child)
+        # the child kills the master out from under us, so our own wait is interrupted
+        with self.assertRaises(ClockKilledError):
+            self.master.wait(0.2)
+        self.assertTrue(finished.wait(timeout=2),
+                        "killing the master blocked waiting on the calling thread")
+
+    def test_killing_a_non_master_ancestor_waits_for_its_unwind(self):
+        """
+        An ancestor runs on its own thread, so — unlike the acting clock itself — kill() can and does wait
+        for it. When a clock kills a forked ancestor from underneath itself, that ancestor's cleanup has
+        finished by the time kill() returns, exactly as for any other victim.
+        """
+        record = {}
+
+        def ancestor_layer():
+            c = current_clock()
+            c.fork(killer)
+            try:
+                c.wait(50)
+            except ClockKilledError:
+                time.sleep(0.05)                 # cleanup that takes a moment
+                record["ancestor_unwound"] = True
+                raise
+
+        def killer():
+            c = current_clock()
+            c.wait(0.1)
+            c.parent.kill()                      # kill the (non-master) layer we were forked from
+            record["unwound_when_kill_returned"] = record.get("ancestor_unwound", False)
+
+        self.master.fork(ancestor_layer)
+        self.master.wait(0.4)
+        # kill() returned only after the ancestor had run its cleanup, not before
+        self.assertTrue(record.get("unwound_when_kill_returned"),
+                        "kill() returned before the ancestor it killed had finished unwinding")
+
+    def test_master_self_kill_is_prompt(self):
+        """
+        A master has no fork wrapper and so never signals that it has unwound. Waiting on one would burn
+        the whole unwind timeout — and `s.kill()` at the end of a script is the single most common kill
+        there is, so this would be a five-second stall on nearly every program.
+        """
+        master = Clock(name="lonely")
+        master.fork(lambda: current_clock().wait(50))
+        master.wait(0.2)
+        start = time.perf_counter()
+        master.kill()
+        self.assertLess(time.perf_counter() - start, 1.0, "master self-kill waited on its own thread")
+
+    def test_killing_pending_child_is_prompt(self):
+        """A clock still inside its start delay has no thread yet, so there is nothing to wait for."""
+        child = self.master.fork(lambda: current_clock().wait(50), when=Moment.after_beats(30))
+        self.assertIs(child._state, ClockState.PENDING)
+        start = time.perf_counter()
+        child.kill()
+        self.assertLess(time.perf_counter() - start, 1.0, "waited on a clock that had never started")
+
+    def test_slow_victim_is_reported_but_still_waited_for(self):
+        """
+        A victim slow to unwind gets called out, but kill() does not give up on it. Returning early would
+        put us right back where we started: kill() reporting a clock as finished while its thread is still
+        running, nondeterministically, on whichever machine happens to be loaded.
+        """
+        release = threading.Event()
+        self.addCleanup(release.set)        # never leave the wedged thread parked, even if this fails
+        unwound = []
+
+        def wedged():
+            try:
+                current_clock().wait(50)
+            except ClockKilledError:
+                release.wait(timeout=30)    # wedged in cleanup until the timer below lets go
+                unwound.append(True)
+                raise
+
+        child = self.master.fork(wedged)
+        self.master.wait(0.2)
+        # let go well after the warning is due, so we can see the warning *and* the wait continuing past it
+        timer = threading.Timer(0.6, release.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+
+        with mock.patch("clockblocks.clock._UNWIND_WARNING_DELAY", 0.2):
+            start = time.perf_counter()
+            with self.assertLogs(level="WARNING") as caught:
+                child.kill()
+            elapsed = time.perf_counter() - start
+
+        self.assertIn("Still waiting", "\n".join(caught.output))
+        # kill() didn't give up when it warned: it returned only once the victim had actually unwound
+        self.assertGreater(elapsed, 0.5, "kill() abandoned the victim instead of waiting it out")
+        self.assertEqual(unwound, [True])
 
 
 if __name__ == "__main__":
