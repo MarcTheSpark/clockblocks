@@ -43,6 +43,9 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ### Fixed
 
+- **A looping tempo envelope now takes on the new cycle's tempo right at the loop point**. Previously, the loop
+  was only extended when going strictly past the end of it, which misses a jump discontinuity there.
+
 - **A fork that outlives its own function no longer strands its children.** When a forked function
   returned while clocks it had forked were still running, the finishing clock detached itself from its
   parent and took the whole live subtree with it. Those descendants kept their queued wakeups but were

@@ -518,7 +518,9 @@ class TempoHistory(TempoEnvelope):
         :param beat: The beat at which to calculate the time.
         """
         if self.follow_func_or_envelope_loop is not None:
-            while self.follow_func_or_envelope_loop.current_end_beat < beat:
+            # extend when at or past the current end beat
+            # we use <= instead of strict < because otherwise it misses a jump discontinuity
+            while self.follow_func_or_envelope_loop.current_end_beat <= beat:
                 self._extend_function_or_envelope_loop()
         if beat >= self._beat:
             time_at_beat = self._t + self.integrate_interval(self._beat, beat)
@@ -535,7 +537,7 @@ class TempoHistory(TempoEnvelope):
         :param t: The time at which to calculate the beat
         """
         if self.follow_func_or_envelope_loop is not None:
-            while self.follow_func_or_envelope_loop.current_end_time < t:
+            while self.follow_func_or_envelope_loop.current_end_time <= t:
                 self._extend_function_or_envelope_loop()
         if t >= self._t:
             beat_at_time = self.get_upper_integration_bound(self._beat, t - self._t, max_error=1e-14)
