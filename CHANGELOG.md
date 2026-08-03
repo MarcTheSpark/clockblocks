@@ -9,6 +9,24 @@ All notable user-facing changes to clockblocks are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres (or tries to adhere) to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`Clock.extract_absolute_tempo_envelope()` takes an `end_beat`** (defaulting to the clock's current beat),
+  the beat out to which the tempo is extracted. The chain is materialized to that beat on private copies, so
+  a still-running clock is never touched.
+
+### Fixed
+
+- **`Clock.extract_absolute_tempo_envelope()` no longer smears instantaneous tempo changes into short
+  accelerandi/ritardandi.** It used to sample the absolute tempo curve on a blind uniform grid, so any
+  sudden tempo change (e.g. a stepwise tempo envelope) landing inside a sampling window came out as a tiny
+  ramp or sharply-curved segment. Sampling is now aligned to the tempo breakpoints of every clock in the
+  chain, keeping sudden changes sharp; a chain of constant-tempo ancestors is also handled exactly without
+  sampling at all. The extracted curve is more faithful overall (sudden changes stay sudden, and the total
+  elapsed time it implies is more accurate).
+
 ## [1.2.0] - 2026-08-01
 
 ### Added

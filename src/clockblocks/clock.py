@@ -288,6 +288,66 @@ class _CallableFloat(float):
         return float, (float(self),)
 
 
+class _TempoChain:
+    """A frozen snapshot of a clock together with its ancestors up to master, used to construct the clock's
+    absolute tempo curve relative to scheduler seconds. Each tempo history is deep-copied and materialized
+    out to `end_beat`, then its follow function or envelope loop detached so nothing auto-extends while sampling.
+    Working on the copies leaves the live, possibly-still-running clocks untouched.
+
+    :param clocks: the clock of interest first, then its ancestors up to (and including) master.
+    :param end_beat: the beat (in the clock of interest) out to which the tempo is needed.
+    """
+
+    def __init__(self, clocks, end_beat):
+        self.tempo_histories = [deepcopy(c.tempo_history) for c in clocks]
+        # each clock's beat-offset within its parent, so parent_beat = child_time + offset
+        self.parent_offsets = [c.parent_offset for c in clocks]
+        # materialize each copy out to end_beat, projected up into that clock's own timeline
+        target = end_beat
+        for i, th in enumerate(self.tempo_histories):
+            # advance the copy out to `target`, extending an open-ended follow to cover it. A no-op only
+            # when the copy is already committed there (e.g. a clock extracting its own tempo at its beat).
+            if target > th.beat:
+                th.advance(target - th.beat)
+            th.stop_follow_function_or_envelope_loop()  # truncate to `target`, detach the follow
+            target = self.parent_offsets[i] + th.time_at_beat(target)  # parent's matching beat
+
+    def beat_length(self, beat, from_left=False):
+        """Absolute (master-time) beat length at `beat` in the clock of interest: the product of every
+        clock-in-the-chain's local beat length at the corresponding beat."""
+        product, b = 1.0, beat
+        for i, th in enumerate(self.tempo_histories):
+            product *= th.value_at(b, from_left=from_left)
+            if i + 1 < len(self.tempo_histories):  # climb to the parent's matching beat
+                b = self.parent_offsets[i] + th.time_at_beat(b)
+        return product
+
+    def _project_down(self, clock_index, beat):
+        """Map a beat in tempo_histories[clock_index]'s timeline down onto the clock-of-interest's."""
+        # beat in the nth parent clock - (n-1)st parent offset = time in the (n-1)st parent clock, so to
+        # descend from clock_index to the clock of interest we repeatedly apply beat_at_time(beat - offset)
+        for i in range(clock_index, 0, -1):
+            beat = self.tempo_histories[i - 1].beat_at_time(beat - self.parent_offsets[i - 1])
+        return beat
+
+    def ancestors_constant(self):
+        """Whether every ancestor (everything but the clock of interest) holds a constant tempo."""
+        return all(th.max_level() == th.min_level() for th in self.tempo_histories[1:])
+
+    def break_points(self, start_beat, end_beat):
+        """Sorted beats (in the clock-of-interest's timeline) where any clock in the chain changes
+        tempo, clamped to (start_beat, end_beat), which are always included as the endpoints. Sampling
+        the absolute tempo curve on these keeps instantaneous tempo changes sharp."""
+        points = {start_beat, end_beat}
+        for i, th in enumerate(self.tempo_histories):
+            # confusingly, here "times" refers to "beats", because that's the nomenclature of expenvelope
+            for t in th.times:
+                beat = self._project_down(i, t)
+                if start_beat < beat < end_beat:
+                    points.add(beat)
+        return sorted(points)
+
+
 class Clock:
     """
     Recursively nestable clock. Clocks can fork child-clocks, which can in turn fork their own
@@ -1276,55 +1336,68 @@ class Clock:
         if delta > 0:
             self.tempo_history.advance(delta)
 
-    def extract_absolute_tempo_envelope(self, start_beat: float = 0, step_size: float = 0.1,
-                                        tolerance: float = 0.005) -> TempoEnvelope:
+    def extract_absolute_tempo_envelope(self, start_beat: float = 0, end_beat: float | None = None,
+                                        step_size: float = 0.1, tolerance: float = 0.005) -> TempoEnvelope:
         """
         Extract this clock's absolute tempo curve — its tempo as observed in master (scheduler) time,
         with parent rate-changes folded in. Used when building a Score from this clock's perspective.
 
-        For master, this is just the tempo_history as-is. Otherwise we walk the inheritance chain:
-        deepcopy each clock's tempo_history, position each at the beat it has when the child is at
-        `start_beat`, then step the child forward `step_size` at a time and cascade the resulting
-        time-deltas up through each parent. Final delta in master (seconds) / step_size (beats in this clock)
-        gives us a sample of absolute beat length, which we use to build up an absolute tempo envelope.
+        Extracts over ``[start_beat, end_beat]``, where `end_beat` defaults to this clock's current beat.
+        When all ancestors are pure, flat tempos, they simply scale this clock's tempo curve directly.
+        When the ancestors are changing, there is no exact solution, so we sample every `step_size` beats.
+        Sampling is aligned to the tempo break points of every clock in the chain, so an instantaneous
+        tempo change stays sharp rather than smearing into a short accelerando or ritardando.
         """
+        # Absolute beat length at a beat is the product of every clock-in-the-chain's local beat length
+        # at the corresponding beat. _TempoChain owns a frozen snapshot of the chain and answers both
+        # "where are the break points" and "what's the beat length here" against it.
         if self.is_master():
             return self.tempo_history.as_tempo_envelope()
 
-        clocks = self.inheritance()
-        tempo_histories = [deepcopy(c.tempo_history) for c in clocks]
-        for th in tempo_histories:
-            # Freeze the copies: a clock following an open-ended tempo function or envelope loop
-            # auto-extends inside advance(), so the `th.beat < th.length()` loop below would chase
-            # a receding horizon forever. The copy already contains everything already materialized.
-            th.stop_follow_function_or_envelope_loop()
-        tempo_histories[0].go_to_beat(start_beat)
-        initial_rate = tempo_histories[0].rate
-        for i in range(1, len(tempo_histories)):
-            # parent's beat at this moment = child's parent_offset + child's elapsed time
-            tempo_histories[i].go_to_beat(clocks[i - 1].parent_offset + tempo_histories[i - 1].time)
-            initial_rate *= tempo_histories[i].rate
+        if end_beat is None:
+            end_beat = self.beat
+        chain = _TempoChain(self.inheritance(), end_beat)
 
-        def step_and_get_beat_length(step):
-            beat_change = step
-            for th in tempo_histories:
-                _, beat_change = th.advance(beat_change)
-            return beat_change / step
+        # Fast path: if every ancestor holds a constant tempo, the absolute curve is just this clock's
+        # tempo history (already materialized to end_beat) scaled by the ancestors' constant beat
+        # lengths. No need to sample.
+        if chain.ancestors_constant():
+            env = chain.tempo_histories[0].as_tempo_envelope()
+            env.remove_segments_before(start_beat)
+            env.shift_horizontal(-start_beat)
+            env.scale_vertical(math.prod(th.start_level() for th in chain.tempo_histories[1:]))
+            return env
 
-        output_curve = TempoEnvelope(initial_rate, units="rate")
-        while any(th.beat < th.length() for th in tempo_histories):
-            # sample twice at half step_size so we can use the midpoint as a curvature guide
-            start_level = output_curve.end_level()
-            halfway_level = step_and_get_beat_length(step_size / 2)
-            end_level = step_and_get_beat_length(step_size / 2)
+        # General case: sample each smooth stretch between break points, bridging the jumps between
+        # them with zero-length segments, so sudden tempo changes stay sharp instead of smearing.
+        break_points = chain.break_points(start_beat, end_beat)
+        output = TempoEnvelope(chain.beat_length(start_beat), units="beatlength")
+
+        def append_sample(end_level, duration, halfway_level):
+            start_level = output.end_level()
             if min(start_level, end_level) < halfway_level < max(start_level, end_level):
-                output_curve.append_segment(end_level, step_size, tolerance=tolerance,
-                                            halfway_level=halfway_level)
+                output.append_segment(end_level, duration, tolerance=tolerance, halfway_level=halfway_level)
             else:
-                # midpoint outside [start, end] => turnaround; fall back to two linear segments
-                output_curve.append_segment(halfway_level, step_size / 2, tolerance=tolerance)
-                output_curve.append_segment(end_level, step_size / 2, tolerance=tolerance)
-        return output_curve
+                # midpoint outside [start, end] => a turnaround; two linear halves, not one curve
+                output.append_segment(halfway_level, duration / 2, tolerance=tolerance)
+                output.append_segment(end_level, duration / 2, tolerance=tolerance)
+
+        for region_start, region_end in zip(break_points[:-1], break_points[1:]):
+            # a jump at region_start shows up as its right limit differing from the curve's current
+            # end level; bridge it with a zero-duration segment before sampling the smooth stretch
+            right_limit = chain.beat_length(region_start)
+            if output.end_level() != right_limit:
+                output.append_segment(right_limit, 0)
+            # walk the interior in steps no wider than step_size, never crossing a break point
+            span = region_end - region_start
+            num_steps = max(1, math.ceil(span / step_size))
+            for n in range(num_steps):
+                a, b = region_start + span * n / num_steps, region_start + span * (n + 1) / num_steps
+                # take the left limit: it only differs from the right at a break point, and in that
+                # case we want the left limit to surface any jump discontinuities.
+                end_level = chain.beat_length(b, from_left=True)
+                append_sample(end_level, b - a, chain.beat_length((a + b) / 2))
+        return output
 
     def _reschedule_self_and_descendants(self):
         """
