@@ -42,7 +42,8 @@ from clockblocks.moment import Moment, ResolvableMoment, to_absolute_moment
 from clockblocks.metric_phase import MetricPhaseTarget
 from clockblocks.enums import DurationUnits
 from clockblocks.utilities import _PrintColors, current_clock
-from clockblocks.exceptions import ClockKilledError, DeadClockError, WrongThreadError, NotMasterClockError
+from clockblocks.exceptions import ClockKilledError, DeadClockError, WrongThreadError, NotMasterClockError, \
+    SchedulerHeldError
 import textwrap
 
 
@@ -1493,6 +1494,15 @@ class Clock:
             # and... well it sounds chaotic, and I cannot imagine a legitimate use case.
             raise WrongThreadError(
                 f"wait() on {self} must be called from its own thread (use current_clock().wait(...))."
+            )
+
+        if self.scheduler._held_by_thread is threading.current_thread():
+            # This thread is holding the scheduler via hold_scheduler() — most commonly because we're
+            # inside a MIDI / OSC / HID callback, which runs under such a hold. Waiting here would therefore
+            # lead to a deadlock, and so should raise. (See :class:`~clockblocks.exceptions.SchedulerHeldError`)
+            raise SchedulerHeldError(
+                "Cannot wait() while the scheduler is held (e.g. inside a MIDI/OSC/HID callback). Instead, "
+                "schedule the timed work on the clock via fork(...)."
             )
 
         # ------------------- STEP 2: Schedule the wake-up for `moment` --------------------

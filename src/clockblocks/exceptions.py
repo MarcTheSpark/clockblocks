@@ -67,3 +67,11 @@ class NotMasterClockError(ClockblocksError):
     """Raised by operations that are only valid on the master (top-level) clock — e.g.
     run_as_server() — when called on a child clock."""
     pass
+
+
+class SchedulerHeldError(ClockblocksError):
+    """Raised when wait() is called from a thread that is holding the scheduler via hold_scheduler()
+    — most commonly inside a MIDI / OSC / HID callback, which runs under such a hold. Trying to pass
+    time there leads to deadlock: the wait parks, waiting for the run loop to fire its wake-up, but the
+    run loop can't proceed until the hold is released. Schedule the timed work with fork() instead."""
+    pass

@@ -39,7 +39,7 @@ from importlib.metadata import version, PackageNotFoundError
 from clockblocks.clock import Clock, ClockState, ClockFamilyOptions
 from clockblocks.scheduler import TimingBackend, CompressedTime
 from clockblocks.exceptions import ClockblocksError, ClockKilledError, DeadClockError, WrongThreadError, \
-    NoActiveClockError, NotMasterClockError
+    NoActiveClockError, NotMasterClockError, SchedulerHeldError
 from clockblocks.tempo_envelope import TempoEnvelope, TempoHistory
 from clockblocks.metric_phase import MetricPhaseTarget
 from clockblocks.moment import Moment, ResolvableMoment

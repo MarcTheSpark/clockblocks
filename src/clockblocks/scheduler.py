@@ -171,6 +171,8 @@ class Scheduler(threading.Thread):
         # the lock object, since `with self._queue_change_condition:` acquires it directly.
         self._queue_change_condition = self._time.get_sleep_condition()
         self._execution_lock = threading.Lock()
+        # The foreign thread (if any) currently holding the scheduler via held()
+        self._held_by_thread = None
         self._killed = False
 
         # Timing variables.
@@ -335,8 +337,15 @@ class Scheduler(threading.Thread):
         are running from a clock and no-op'ing in that case.
         """
         with self._execution_lock:
-            self._rouse_to_now()
-            yield self
+            # Record the holding thread so Clock._wait can reject an attempt to pass time from a thread
+            # that holds the scheduler. (This would deadlock, since the wake-up action needs the _execution_lock
+            # that we're currently holding.)
+            self._held_by_thread = threading.current_thread()
+            try:
+                self._rouse_to_now()
+                yield self
+            finally:
+                self._held_by_thread = None
 
     def _rouse_to_now(self) -> None:
         """

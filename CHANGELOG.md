@@ -13,6 +13,11 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ### Added
 
+- **New `SchedulerHeldError`.** Calling `wait()` (or anything that waits) from a thread that is holding the
+  scheduler via `hold_scheduler()` — most commonly inside a MIDI/OSC/HID callback, which automatically runs
+  under such a hold — now raises this instead of silently deadlocking. As the exception message explains,
+  timed work should be scheduled with `fork(...)` instead of waiting inline. The exception unwinds out of
+  the callback and leaves the scheduler alive.
 - **`Clock.extract_absolute_tempo_envelope()` takes an `end_beat`** (defaulting to the clock's current beat),
   the beat out to which the tempo is extracted. The chain is materialized to that beat on private copies, so
   a still-running clock is never touched.
