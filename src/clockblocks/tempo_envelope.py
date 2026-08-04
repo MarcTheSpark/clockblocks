@@ -359,14 +359,24 @@ class TempoEnvelope(Envelope):
         ax.set_title('Graph of TempoEnvelope' if title is None else title)
         return plt
 
+    def _to_dict(self):
+        # Envelope._to_dict serializes self.levels, which for a TempoEnvelope are the underlying beat-length
+        # values. Re-express them as tempo (bpm) so the JSON is written in the same units the constructor and
+        # _from_dict read by default — otherwise the round-trip would silently invert the curve.
+        json_dict = super()._to_dict()
+        json_dict['levels'] = TempoEnvelope.convert_units(json_dict['levels'], TempoUnits.BEATLENGTH,
+                                                          TempoUnits.TEMPO)
+        return json_dict
+
     @classmethod
     def _from_dict(cls, json_dict):
+        # _to_dict writes the levels as tempo (bpm), so reconstruct in those same units (the from_levels* default).
         curve_shapes = None if 'curve_shapes' not in json_dict else json_dict['curve_shapes']
         if 'length' in json_dict:
-            return cls.from_levels(json_dict['levels'], json_dict['length'])
+            return cls.from_levels(json_dict['levels'], json_dict['length'], units="tempo")
         else:
             return cls.from_levels_and_durations(json_dict['levels'], json_dict['durations'],
-                                                 curve_shapes)
+                                                 curve_shapes, units="tempo")
 
     def is_default(self) -> bool:
         """
@@ -375,7 +385,7 @@ class TempoEnvelope(Envelope):
         "functionally constant at 60": a flat-60 envelope that carries a real duration or extra segments is
         *not* default (and worth surfacing for debugging)
         """
-        return self._to_dict() == {'levels': (1.0, 1.0), 'length': 0}
+        return self._to_dict() == {'levels': (60.0, 60.0), 'length': 0}
 
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(

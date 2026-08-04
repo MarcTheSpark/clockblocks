@@ -31,6 +31,10 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   chain, keeping sudden changes sharp; a chain of constant-tempo ancestors is also handled exactly without
   sampling at all. The extracted curve is more faithful overall (sudden changes stay sudden, and the total
   elapsed time it implies is more accurate).
+- **Serializing and deserializing a `TempoEnvelope` no longer inverts the curve.** Serialization wrote the
+  underlying beat-length levels while deserialization read them back as tempo (bpm). This corrupted any 
+  `Performance` reloaded with a non-trivial recorded tempo curve, making playback appear to hang. The JSON now 
+  stores `levels` as **tempo (bpm)**, matching the units the constructor and `from_json` use by default.
 
 ## [1.2.0] - 2026-08-01
 
