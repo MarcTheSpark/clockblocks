@@ -185,6 +185,18 @@ def wait_for_children_to_finish() -> None:
     c.wait_for_children_to_finish()
 
 
+def wait_for_clock_to_finish(clock: 'clock.Clock') -> None:
+    """
+    Block on the currently active clock until `clock` has finished
+    (see :meth:`~clockblocks.clock.Clock.wait_for_clock_to_finish`). On a thread
+    with no active clock, raises NoActiveClockError.
+    """
+    c = current_clock()
+    if c is None:
+        raise _no_active_clock_error("wait_for_clock_to_finish() called on a thread with no active clock.")
+    c.wait_for_clock_to_finish(clock)
+
+
 def terminate_forked_children() -> None:
     """
     Kill the child clocks of the currently active clock, returning once they have finished unwinding

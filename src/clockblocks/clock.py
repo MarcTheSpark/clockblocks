@@ -423,6 +423,10 @@ class Clock:
         # own (an indefinite _wait(None)), so _detach_child watches this flag and, when the last child
         # detaches, schedules the wakeup that releases it. See _detach_child / wait_for_children_to_finish.
         self._waiting_for_children = False
+        # Other clocks waiting on this clock to finish (via wait_for_clock_to_finish).
+        # When this clock turns to DEAD (at _fork_wrapper's cleanup or kill()), the _release_finish_waiters
+        # method walks this list and wakes them.
+        self._finish_waiters: list['Clock'] = []
         # Optional noun phrase naming what this clock is doing, used in place of its label in user-facing
         # messages so they can describe the consequence rather than the internal machinery. Currently only
         # read by _terminate_unfinished_children.
@@ -570,6 +574,23 @@ class Clock:
                                            self._priority,
                                            {"description": f"{self} wake (children finished)",
                                             "acting_clock": self})
+
+    def _release_finish_waiters(self) -> None:
+        """
+        Wake any clocks that are waiting for this clock to finish (via `wait_for_clock_to_finish`). Called at
+        each point where this clock becomes DEAD (_fork_wrapper's cleanup and kill()), with `_tree_lock` held.
+        Uses the same scheduler-mediated wake as _detach_child, so each waiter resumes in the normal post-wait state.
+        A waiter that is itself DEAD (e.g. killed in the same cascade) is skipped; it will raise
+        ClockKilledError on its own.
+        """
+        for waiter in self._finish_waiters:
+            if waiter._state is ClockState.ALIVE:
+                waiter.scheduler.schedule_action(waiter.scheduler.time,
+                                                 waiter._wake_and_advance_to_next_wait_call,
+                                                 waiter._priority,
+                                                 {"description": f"{waiter} wake ({self} finished)",
+                                                  "acting_clock": waiter})
+        self._finish_waiters.clear()
 
     def _terminate_unfinished_children(self, warn: bool = True) -> None:
         """
@@ -1714,6 +1735,7 @@ class Clock:
                         # blocked in wait_for_children_to_finish(), releases it.
                         self._detach_child(child)
                         child._state = ClockState.DEAD
+                        child._release_finish_waiters()
 
                     # done_callback runs before the scheduler is released below, so it sees musical time
                     # frozen at the moment this clock ended. Its errors are logged to alert the user,
@@ -1850,6 +1872,46 @@ class Clock:
             self._wait(None)
         finally:
             self._waiting_for_children = False
+
+    def wait_for_clock_to_finish(self, clock: 'Clock') -> None:
+        """
+        Block this clock's own thread until `clock` has finished, yielding to the scheduler so it (and
+        everything else) keeps running. The counterpart to :meth:`wait_for_children_to_finish` for a
+        specific clock rather than one's own children — `clock` may be any other clock in the same family
+        (a sibling, a descendant, an unrelated fork), so long as it shares this clock's scheduler.
+
+        Returns as soon as `clock` finishes, whether it ended on its own or was killed. If `clock` has
+        already finished, returns immediately. If this clock is itself killed while waiting, raises
+        :class:`~clockblocks.exceptions.ClockKilledError` rather than returning.
+
+        :param clock: the clock to wait on. Must belong to the same family (raises ValueError otherwise),
+            and must not be this clock itself (which would wait forever).
+        """
+        if clock is self:
+            raise ValueError("A clock cannot wait_for_clock_to_finish(itself); it would wait forever.")
+        if clock.scheduler is not self.scheduler:
+            raise ValueError("wait_for_clock_to_finish only works within the same clock family, as they must "
+                             "share the same scheduler.")
+
+        # Register as a waiter in the target clock's _finish_waiters list
+        # Done under _tree_lock, so it's atomic against the target being killed / ending: we can't
+        # get stuck waiting after the target clock is dead, because we either observe it already DEAD and return,
+        # or we land in its _finish_waiters list before it is processed during the clock's cleanup
+        with self._tree_lock:
+            if clock._state is ClockState.DEAD:
+                return
+            clock._finish_waiters.append(self)
+        try:
+            # Indefinite wait (no scheduled wake-up of its own); _release_finish_waiters wakes us.
+            self._wait(None)
+        finally:
+            # On a normal wake our entry is already gone, having been cleared by the target clock's
+            # _release_finish_waiters function. This covers any kind of error path: being killed mid-wait,
+            # or otherwise failing one of the _wait entry checks. In those cases we make sure not to leave
+            # a stale reference in a still-living target's waiter list.
+            with self._tree_lock:
+                if self in clock._finish_waiters:
+                    clock._finish_waiters.remove(self)
 
     def terminate_forked_children(self) -> None:
         """
@@ -2145,6 +2207,9 @@ class Clock:
                 # (a parent that *is* a victim is already DEAD here, so it gets no spurious wake).
                 if c.parent is not None:
                     c.parent._detach_child(c)
+                # Wake anyone parked in wait_for_clock_to_finish(c) (unless they're victims too, in which
+                # case they're already DEAD and _release_finish_waiters skips them).
+                c._release_finish_waiters()
 
         # -------------------- STEP 4: Wait for the victims to finish unwinding ------------------------
         # Deliberately outside the tree lock, which an unwinding clock needs in order to detach itself.

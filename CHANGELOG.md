@@ -13,6 +13,11 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ### Added
 
+- **`wait_for_clock_to_finish(clock)`.** Block the current clock until another clock in the same family
+  finishes (whether it ends on its own or is killed), returning immediately if it has already finished.
+  The counterpart to `wait_for_children_to_finish()` for a specific clock rather than one's own children —
+  e.g. wait for one forked line to end, then cut off another. Available as a `Clock` method and a
+  module-level helper.
 - **New `SchedulerHeldError`.** Calling `wait()` (or anything that waits) from a thread that is holding the
   scheduler via `hold_scheduler()` — most commonly inside a MIDI/OSC/HID callback, which automatically runs
   under such a hold — now raises this instead of silently deadlocking. As the exception message explains,
