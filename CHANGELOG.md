@@ -1,9 +1,5 @@
 # Changelog
 
-> These changelogs are AI-written and human-reviewed, because no one (least of all my wife
-> and kids) wants me wasting my precious time meticulously documenting this shit, useful
-> though it may be.
-
 All notable user-facing changes to clockblocks are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -11,21 +7,22 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-25
+
 ### Added
 
 - **`wait_for_clock_to_finish(clock)`.** Block the current clock until another clock in the same family
   finishes (whether it ends on its own or is killed), returning immediately if it has already finished.
-  The counterpart to `wait_for_children_to_finish()` for a specific clock rather than one's own children —
-  e.g. wait for one forked line to end, then cut off another. Available as a `Clock` method and a
-  module-level helper.
+  The counterpart to `wait_for_children_to_finish()` for a specific clock rather than all of one's own
+  child clocks. For example you might want to wait for a child of a different clock, or wait for only one
+  child clock, while others continue. Available as a `Clock` method and a module-level helper.
 - **New `SchedulerHeldError`.** Calling `wait()` (or anything that waits) from a thread that is holding the
   scheduler via `hold_scheduler()` — most commonly inside a MIDI/OSC/HID callback, which automatically runs
   under such a hold — now raises this instead of silently deadlocking. As the exception message explains,
   timed work should be scheduled with `fork(...)` instead of waiting inline. The exception unwinds out of
   the callback and leaves the scheduler alive.
-- **`Clock.extract_absolute_tempo_envelope()` takes an `end_beat`** (defaulting to the clock's current beat),
-  the beat out to which the tempo is extracted. The chain is materialized to that beat on private copies, so
-  a still-running clock is never touched.
+- **`Clock.extract_absolute_tempo_envelope()` now takes an `end_beat`** to extract up to (defaulting to the
+  clock's current beat).
 
 ### Fixed
 
@@ -34,8 +31,8 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
   sudden tempo change (e.g. a stepwise tempo envelope) landing inside a sampling window came out as a tiny
   ramp or sharply-curved segment. Sampling is now aligned to the tempo breakpoints of every clock in the
   chain, keeping sudden changes sharp; a chain of constant-tempo ancestors is also handled exactly without
-  sampling at all. The extracted curve is more faithful overall (sudden changes stay sudden, and the total
-  elapsed time it implies is more accurate).
+  sampling at all. The extracted curve is therefore more faithful overall (sudden changes stay sudden, and
+  the total elapsed time it implies is more accurate).
 - **Serializing and deserializing a `TempoEnvelope` no longer inverts the curve.** Serialization wrote the
   underlying beat-length levels while deserialization read them back as tempo (bpm). This corrupted any 
   `Performance` reloaded with a non-trivial recorded tempo curve, making playback appear to hang. The JSON now 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clockblocks"
-version = "1.2.0"
+version = "1.3.0"
 description = "A python library for synchronizing parallel and nested strands of musical time."
 readme = "README.md"
 requires-python = ">=3.12"
