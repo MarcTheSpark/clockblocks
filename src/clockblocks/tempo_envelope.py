@@ -387,6 +387,23 @@ class TempoEnvelope(Envelope):
         """
         return self._to_dict() == {'levels': (60.0, 60.0), 'length': 0}
 
+    def time_at_beat(self, beat: float) -> float:
+        """
+        Determine the time at the given beat by integrating the beat-length curve from beat 0
+        (seconds/beat * beats = seconds).
+
+        :param beat: the beat at which to calculate the time
+        """
+        return snap_float_to_nice_decimal(self.integrate_interval(0, beat))
+
+    def beat_at_time(self, t: float) -> float:
+        """
+        Determine the beat at the given time, measured from time 0. This is the inverse of :meth:`time_at_beat`.
+
+        :param t: the time at which to calculate the beat
+        """
+        return snap_float_to_nice_decimal(self.get_upper_integration_bound(0, t, max_error=1e-14))
+
     def __repr__(self):
         return "TempoEnvelope({}, {}, {})".format(
             TempoEnvelope.convert_units(self.levels, TempoUnits.BEATLENGTH, TempoUnits.TEMPO),

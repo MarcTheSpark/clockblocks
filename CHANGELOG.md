@@ -7,6 +7,12 @@ and this project adheres (or tries to adhere) to [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Added
+
+- **`TempoEnvelope.time_at_beat()` and `beat_at_time()`.** These now work on a plain `TempoEnvelope`,
+  integrating the beat-length curve from beat/time 0. Previously they only existed on `TempoHistory`,
+  where they remain (measured from the current beat/time pointer).
+
 ## [1.3.0] - 2026-09-25
 
 ### Added
